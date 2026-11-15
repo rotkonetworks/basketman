@@ -64,5 +64,3 @@ The arguments are a screen name and its options (`title`, `squad`, `tactics`, `m
 5. **Tests state what should be true.** When a test fails after an engine change, find out why. Do not loosen the assertion or change the seed until it passes.
 
 6. **Saves must keep loading.** New fields on saved types get `#[serde(default)]`; there is an old-save test in `crates/core/src/save.rs`.
-
-7. **No real people.** Players, clubs and sponsors in the game are invented. Design notes may mention real players as references; the game may not.
