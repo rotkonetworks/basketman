@@ -1,0 +1,2176 @@
+// basketman 3D match viewer in Plush: jointed player figures on a software painter.
+//
+//   plush match.psh game.bmr                   interactive window
+//   plush match.psh game.bmr --screenshot a.tga --at 600 --cam 1
+//   plush match.psh game.bmr --bench 100       time the renderer, no window
+//
+// World units are metres: x along the court (0..28), y across it (0..15),
+// z up. The renderer is a software painter: flat shaded convex polygons are
+// scan-converted into the frame buffer with native fill_u32 spans, objects
+// are sorted back to front. See README.md.
+
+from args import ArgParser;
+from image import Image, save_tga;
+from ./monogram_font import Font;
+
+let PI = 3.141592653589793;
+
+let args = ArgParser("3D viewer for exported basketman games")
+    .pos_str("game", nil, "Exported game file (basketman --export-game <seed> <file>)")
+    .opt_int("width", 960, "Window width in pixels")
+    .opt_int("height", 540, "Window height in pixels")
+    .opt_str("screenshot", nil, "Render one frame to this TGA file and exit")
+    .opt_str("outdir", nil, "Existing directory to write --screenshot into (Plush only writes under the current directory or directories named on the command line)")
+    .opt_float("at", 0.0, "Game time in seconds for --screenshot and --bench")
+    .opt_int("cam", 1, "Camera 1 broadcast, 2 orbit, 3 top-down, 4 end line")
+    .opt_int("bench", 0, "Render this many frames without a window and report the time")
+    .opt_float("yaw", 0.6, "Orbit camera yaw in radians")
+    .opt_float("pitch", 0.55, "Orbit camera pitch (looking down) in radians")
+    .opt_float("dist", 24.0, "Orbit camera distance in metres")
+    .opt_int("focus", -1, "Close-up camera on this floor slot 0..9 (0-4 home, 5-9 away); --yaw is then relative to his facing (0 = from the front), --fdist the distance")
+    .opt_float("fdist", 5.0, "Distance in metres for --focus (and 2.4x for --lineup)")
+    .opt_int("lineup", 0, "Debug: stand the ten players on the floor in a row, facing 1 the camera, 2 right (profile), 3 away")
+    .opt_int("pose", 0, "With --lineup: 0 stand, 1 defensive stance, 2 run, 3 walk, 4 stance shuffle, 5 run dribbling (slot 4), 6 stand holding ball (slot 4)")
+    .opt_float("phase", 0.0, "With --lineup: gait phase in radians")
+    .opt_int("seq", 0, "Write this many screenshots (name_00.tga, ...) --seqstep seconds apart")
+    .opt_float("seqstep", 0.1, "Seconds between --seq frames")
+    .flag("nohud", "Do not draw the HUD in screenshots")
+    .flag("show-help", "Start with the key help overlay open")
+    .flag("fps", "Print the frame rate every two seconds")
+    .parse_args();
+
+if (args.game == nil) {
+    $println("usage: plush match.psh <game file>   (see --help)");
+    $exit(1);
+}
+
+let W = args.width;
+let H = args.height;
+let HW = W * 0.5;
+let HH = H * 0.5;
+let FOCAL = W * 0.95;
+let NEAR = 0.25;
+
+// ---------------------------------------------------------------- loading
+
+let P_SIDE = [];
+let P_NAME = [];
+let P_H = [];
+let P_SW = [];
+let P_ID = [];
+let P_WT = [];
+let P_WS = [];
+let P_RCH = [];
+let P_HL = [];
+let P_HAND = [];
+let P_SPD = [];
+let P_VERT = [];
+let P_STR = [];
+let P_STA = [];
+let P_HND = [];
+let var TEAMS = ["Home", "Away"];
+
+let var NF = 0;
+let FT = [];        // frame time, seconds
+let var FP = [];        // 23 values per frame in cm: ball x y z, then ten players x y
+let FWHO = [];      // index into WHOSETS
+let FHOLD = [];     // ball carrier slot 0..9 or -1
+let FPER = [];
+let FS0 = [];
+let FS1 = [];
+let FOFF = [];
+let FCLK = [];      // game clock in seconds
+let WHOSETS = [];
+
+// Per frame and slot (index frame * 10 + slot), built by build_motion().
+let MVX = [];       // smoothed velocity, m/s
+let MVY = [];
+let MFX = [];       // facing unit vector
+let MFY = [];
+let MST = [];       // defensive stance weight 0..1
+let MPH = [];       // gait phase, radians, advanced by distance travelled
+let MPB = [];       // dribble phase
+let DIM = [];       // body dimensions per table player, stride DS
+let DS = 40;
+
+let EV_T = [];
+let EV_TXT = [];
+
+fun load_game(path) {
+    let text = $read_file_utf8(path);
+    if (text == nil) {
+        $println("cannot read " + path);
+        $exit(1);
+    }
+    let lines = text.split("\n");
+    if (lines[0] == "BMREPLAY 1") {
+        $println(path + " is in the old BMREPLAY 1 format, which has no body measurements or ratings.");
+        $println("Export it again with the current build:  basketman --export-game <seed> " + path);
+        $exit(1);
+    }
+    if (lines[0] != "BMREPLAY 2") {
+        $println("not a BMREPLAY 2 file: " + path);
+        $exit(1);
+    }
+    let teams = lines[2].slice(6, lines[2].len).split("|");
+    TEAMS = [teams[0], teams[1]];
+    let np = lines[3].slice(8, lines[3].len).parse_int(10);
+    let var li = 4;
+    for (let var i = 0; i < np; ++i) {
+        let p = lines[li].split("|");
+        li += 1;
+        if (p.len < 15) {
+            $println("bad player line " + (li - 1).to_s() + " in " + path);
+            $exit(1);
+        }
+        P_SIDE.push(p[0].parse_int(10));
+        P_NAME.push(p[1]);
+        P_ID.push(p[2].parse_int(10));
+        P_H.push(p[3].parse_int(10).to_f() * 0.01);
+        P_SW.push(p[4].parse_int(10).to_f() * 0.01);
+        P_WT.push(p[5].parse_int(10).to_f());
+        P_WS.push(p[6].parse_int(10).to_f() * 0.01);
+        P_RCH.push(p[7].parse_int(10).to_f() * 0.01);
+        P_HL.push(p[8].parse_int(10).to_f() * 0.01);
+        P_HAND.push(p[9].parse_int(10));
+        P_SPD.push(p[10].parse_int(10).to_f() * 0.1);
+        P_VERT.push(p[11].parse_int(10).to_f() * 0.1);
+        P_STR.push(p[12].parse_int(10).to_f() * 0.1);
+        P_STA.push(p[13].parse_int(10).to_f() * 0.1);
+        P_HND.push(p[14].parse_int(10).to_f() * 0.1);
+    }
+    NF = lines[li].slice(7, lines[li].len).parse_int(10);
+    li += 1;
+    FP = Array.with_size(NF * 23, 0);
+    let pos = Array.with_size(23, 0);
+    let vel = Array.with_size(23, 0);
+    let var per = 0;
+    let var s0 = 0;
+    let var s1 = 0;
+    let var off = 0;
+    let var clk = 0;
+    let var tcs = 0;
+    let var who = 0;
+    let var n = 0;
+    while (n < NF) {
+        let l = lines[li];
+        li += 1;
+        let c = l.byte_at(0);
+        if (c == 119) {              // w: who is on the floor
+            let p = l.split(" ");
+            let set = [];
+            for (let var k = 1; k < 11; ++k) set.push(p[k].parse_int(10));
+            WHOSETS.push(set);
+            who = WHOSETS.len - 1;
+        } else if (c == 109) {       // m: period, score, offense
+            let p = l.split(" ");
+            per = p[1].parse_int(10);
+            s0 = p[2].parse_int(10);
+            s1 = p[3].parse_int(10);
+            off = p[4].parse_int(10);
+        } else if (c == 99) {        // c: clock jump
+            clk = l.slice(2, l.len).parse_int(10);
+        } else {
+            let p = l.split(" ");
+            let dt = p[0].parse_int(10) + 20;
+            tcs += dt;
+            FHOLD.push(p[1].parse_int(10));
+            let base = n * 23;
+            for (let var k = 0; k < 23; ++k) {
+                vel[k] = vel[k] + p[k + 2].parse_int(10);
+                pos[k] = pos[k] + vel[k];
+                FP[base + k] = pos[k];
+            }
+            FT.push(tcs.to_f() * 0.01);
+            FWHO.push(who);
+            FPER.push(per);
+            FS0.push(s0);
+            FS1.push(s1);
+            FOFF.push(off);
+            FCLK.push(clk.to_f() * 0.01);
+            clk = clk - dt;
+            n += 1;
+        }
+    }
+    // events
+    li += 1;
+    while (li < lines.len) {
+        let l = lines[li];
+        li += 1;
+        let bar = l.find("|");
+        if (bar == nil) continue;
+        EV_T.push(l.slice(0, bar).parse_int(10).to_f() * 0.01);
+        EV_TXT.push(l.slice(bar + 1, l.len));
+    }
+}
+
+let t_load0 = $time_current_ms();
+load_game(args.game);
+let t_load1 = $time_current_ms();
+let DURATION = FT[NF - 1];
+
+// ---------------------------------------------------------------- bodies and motion
+
+fun smoothstep(a, b, x) {
+    let t = ((x - a) / (b - a)).clip(0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+let SKIN_TONES = [[247, 219, 190], [238, 196, 156], [214, 160, 116], [180, 124, 84], [138, 92, 62], [96, 64, 44]];
+let HAIR_TONES = [[24, 20, 18], [50, 36, 28], [84, 58, 38], [146, 108, 58], [112, 46, 28]];
+let SHOE_TONES = [[238, 238, 232], [34, 34, 40], [226, 196, 60]];
+
+// Every length of a figure, derived from the player's table row. Layout of
+// one record in DIM (stride DS):
+//  0 height  1 shoulder width  2 build  3 hip height  4 thigh  5 shin
+//  6 ankle height  7 torso length (hip to shoulder joint)  8 shoulder to head base
+//  9 head height  10 upper arm  11 forearm  12 hand  13 half shoulder spacing
+//  14 half hip spacing  15 leg length (thigh+shin)  16 foot length
+//  17..19 skin  20..22 hair  23..25 shoes  26 shooting side (+1 left, -1 right)
+//  27 speed  28 vertical  29 strength  30 stamina  31 handling  32 stride factor
+fun build_dims() {
+    DIM.resize(P_SIDE.len * DS, 0.0);
+    for (let var p = 0; p < P_SIDE.len; ++p) {
+        let o = p * DS;
+        let H = P_H[p];
+        let sw = P_SW[p];
+        let rch = P_RCH[p];
+        let hnd = P_HL[p];
+        // Shoulder joints sit slightly inside the shoulder width; what is left
+        // of half the wingspan is the whole arm including the hand.
+        let shl = 0.46 * sw;
+        let arm = P_WS[p] * 0.5 - shl;
+        // Shoulder height from standing reach: longer reach for the height
+        // means higher shoulders, which also shortens the legs a little.
+        let shf = (0.815 + (rch / H - 1.33)).clip(0.78, 0.85);
+        let sh = H * shf;
+        let hipZ = H * (0.525 - 0.5 * (shf - 0.82));
+        let hv = 0.034 * H;
+        let ankle = hv + 0.002 * H;
+        let lr = hipZ - ankle;
+        // Build from weight relative to height, and strength.
+        let bmi = P_WT[p] / (H * H);
+        let tm = ((0.9 + 0.075 * (bmi - 22.0)) * (0.93 + 0.012 * P_STR[p])).clip(0.8, 1.4);
+        DIM[o] = H;
+        DIM[o + 1] = sw;
+        DIM[o + 2] = tm;
+        DIM[o + 3] = hipZ;
+        DIM[o + 4] = lr * 0.505;
+        DIM[o + 5] = lr * 0.495;
+        DIM[o + 6] = ankle;
+        DIM[o + 7] = sh - hipZ;
+        DIM[o + 8] = (H * (1.0 - 0.13) - sh).max(0.03 * H);
+        DIM[o + 9] = 0.13 * H;
+        DIM[o + 10] = (arm - hnd) * 0.56;
+        DIM[o + 11] = (arm - hnd) * 0.44;
+        DIM[o + 12] = hnd;
+        DIM[o + 13] = shl;
+        DIM[o + 14] = 0.24 * sw;
+        DIM[o + 15] = lr;
+        DIM[o + 16] = 0.145 * H;
+        // Deterministic looks from the player id.
+        let h = ((P_ID[p] + 1) * 2654435761 + 40503) % 4294967296;
+        let sk = SKIN_TONES[(h >> 3) % 6];
+        let jit = ((h >> 9) % 13) - 6;
+        for (let var c = 0; c < 3; ++c) DIM[o + 17 + c] = (sk[c] + jit).clip(0, 255).to_f();
+        let hr = HAIR_TONES[(h >> 12) % 5];
+        let jit2 = ((h >> 15) % 9) - 4;
+        for (let var c = 0; c < 3; ++c) {
+            let hc = (hr[c] + jit2).clip(0, 255).to_f();
+            // One in nine is shaved: hair close to the skin tone.
+            DIM[o + 20 + c] = ((h >> 18) % 9 == 0) ? (sk[c] * 0.6 + jit) : hc;
+        }
+        let sn = SHOE_TONES[(h >> 21) % 3];
+        for (let var c = 0; c < 3; ++c) DIM[o + 23 + c] = sn[c].to_f();
+        DIM[o + 26] = P_HAND[p] == 1 ? 1.0 : -1.0;
+        DIM[o + 27] = P_SPD[p];
+        DIM[o + 28] = P_VERT[p];
+        DIM[o + 29] = P_STR[p];
+        DIM[o + 30] = P_STA[p];
+        DIM[o + 31] = P_HND[p];
+        DIM[o + 32] = 1.0 + 0.012 * (P_SPD[p] - 10.0);
+    }
+}
+
+// Gait cycle parameters from speed v (m/s) and stance weight s.
+//   duty: share of the cycle a foot is on the floor; sigma: how far the
+//   planted foot travels relative to the hips, in leg lengths. A planted foot
+//   must travel v * duty * T, so one full cycle (two steps) covers
+//   S = sigma * leg / duty metres: stride length follows leg length, and a
+//   tall player takes fewer, longer strides.
+fun gait_duty(v, s) {
+    let ra = smoothstep(1.6, 4.4, v);
+    return (0.62 - 0.29 * ra) * (1.0 - s) + 0.58 * s;
+}
+
+fun gait_sigma(v, s) {
+    let ra = smoothstep(1.6, 4.4, v);
+    return (0.78 + 0.05 * ra + 0.10 * smoothstep(4.4, 7.5, v)) * (1.0 - s) + 0.42 * s;
+}
+
+fun stride_len(v, s, lr, sf) {
+    return gait_sigma(v, s) * lr / gait_duty(v, s) * sf;
+}
+
+fun build_motion() {
+    let n = NF * 10;
+    MVX.resize(n, 0.0);
+    MVY.resize(n, 0.0);
+    MFX.resize(n, 1.0);
+    MFY.resize(n, 0.0);
+    MST.resize(n, 0.0);
+    MPH.resize(n, 0.0);
+    MPB.resize(n, 0.0);
+    // CN: frame i to i+1 is a continuous movement for this slot (same player,
+    // no jump, no time-out gap).
+    let CN = Array.with_size(n, 0);
+    for (let var i = 0; i < NF - 1; ++i) {
+        let dt = FT[i + 1] - FT[i];
+        let b0 = i * 23;
+        let b1 = b0 + 23;
+        let wa = WHOSETS[FWHO[i]];
+        let wb = WHOSETS[FWHO[i + 1]];
+        for (let var k = 0; k < 10; ++k) {
+            let ix = 3 + 2 * k;
+            let ddx = FP[b1 + ix] - FP[b0 + ix];
+            let ddy = FP[b1 + ix + 1] - FP[b0 + ix + 1];
+            if (wa[k] == wb[k] && ddx.abs() <= 350 && ddy.abs() <= 350 && dt < 0.45) CN[i * 10 + k] = 1;
+        }
+    }
+    let RVX = Array.with_size(n, 0.0);
+    let RVY = Array.with_size(n, 0.0);
+    for (let var i = 0; i < NF; ++i) {
+        for (let var k = 0; k < 10; ++k) {
+            let kk = i * 10 + k;
+            let a = i > 0 && CN[kk - 10] == 1;
+            let b = i < NF - 1 && CN[kk] == 1;
+            let ix = i * 23 + 3 + 2 * k;
+            if (a && b) {
+                let span = FT[i + 1] - FT[i - 1];
+                RVX[kk] = (FP[ix + 23] - FP[ix - 23]) * 0.01 / span;
+                RVY[kk] = (FP[ix + 24] - FP[ix - 22]) * 0.01 / span;
+            } else if (b) {
+                let span = FT[i + 1] - FT[i];
+                RVX[kk] = (FP[ix + 23] - FP[ix]) * 0.01 / span;
+                RVY[kk] = (FP[ix + 24] - FP[ix + 1]) * 0.01 / span;
+            } else if (a) {
+                let span = FT[i] - FT[i - 1];
+                RVX[kk] = (FP[ix] - FP[ix - 23]) * 0.01 / span;
+                RVY[kk] = (FP[ix + 1] - FP[ix - 22]) * 0.01 / span;
+            }
+        }
+    }
+    for (let var i = 0; i < NF; ++i) {
+        for (let var k = 0; k < 10; ++k) {
+            let kk = i * 10 + k;
+            if (i > 0 && i < NF - 1 && CN[kk - 10] == 1 && CN[kk] == 1) {
+                MVX[kk] = 0.25 * RVX[kk - 10] + 0.5 * RVX[kk] + 0.25 * RVX[kk + 10];
+                MVY[kk] = 0.25 * RVY[kk - 10] + 0.5 * RVY[kk] + 0.25 * RVY[kk + 10];
+            } else {
+                MVX[kk] = RVX[kk];
+                MVY[kk] = RVY[kk];
+            }
+        }
+    }
+    // Stance, facing and gait phase, frame by frame.
+    for (let var i = 0; i < NF; ++i) {
+        let base = i * 23;
+        let ws = WHOSETS[FWHO[i]];
+        let bs = FOFF[i];
+        let h = FHOLD[i];
+        let var hx = FP[base] * 0.01;
+        let var hy = FP[base + 1] * 0.01;
+        if (h >= 0) {
+            hx = FP[base + 3 + 2 * h] * 0.01;
+            hy = FP[base + 4 + 2 * h] * 0.01;
+        }
+        for (let var k = 0; k < 10; ++k) {
+            let kk = i * 10 + k;
+            let px = FP[base + 3 + 2 * k] * 0.01;
+            let py = FP[base + 4 + 2 * k] * 0.01;
+            let vx = MVX[kk];
+            let vy = MVY[kk];
+            let spd = (vx * vx + vy * vy).sqrt();
+            let side = k < 5 ? 0 : 1;
+            let linked = i > 0 && CN[kk - 10] == 1;
+            // A defender is in stance when he is in the half court the other
+            // side is attacking and an attacker is close.
+            let var tgt = 0.0;
+            let var ax = 0.0;
+            let var ay = 0.0;
+            let var dmin = 9999.0;
+            if (side != bs) {
+                for (let var j = bs * 5; j < bs * 5 + 5; ++j) {
+                    let qx = FP[base + 3 + 2 * j] * 0.01 - px;
+                    let qy = FP[base + 4 + 2 * j] * 0.01 - py;
+                    let d = qx * qx + qy * qy;
+                    if (d < dmin) {
+                        dmin = d;
+                        ax = qx;
+                        ay = qy;
+                    }
+                }
+                dmin = dmin.sqrt();
+                let front = bs == 0 ? px > 13.0 : px < 15.0;
+                if (dmin < 3.4 && front && spd < 4.5) tgt = 1.0;
+            }
+            let sp = linked ? MST[kk - 10] : tgt;
+            let st = sp + (tgt - sp) * (tgt > sp ? 0.55 : 0.4);
+            MST[kk] = st;
+            // Facing: travel direction when moving, the ball when standing;
+            // in stance the man with the ball (if close) or the nearest attacker.
+            let bx = FP[base] * 0.01 - px;
+            let by = FP[base + 1] * 0.01 - py;
+            let bl = (bx * bx + by * by).sqrt().max(0.01);
+            let wv = (spd / 1.6).min(1.0);
+            let var nx = bx / bl * (1.0 - wv);
+            let var ny = by / bl * (1.0 - wv);
+            if (spd > 0.01) {
+                nx += vx / spd * wv;
+                ny += vy / spd * wv;
+            }
+            let var tx = nx;
+            let var ty = ny;
+            if (st > 0.02) {
+                let var sx = bx / bl;
+                let var sy = by / bl;
+                let hdx = hx - px;
+                let hdy = hy - py;
+                let hd = (hdx * hdx + hdy * hdy).sqrt();
+                if (h >= 0 && hd < 6.0 && hd > 0.3) {
+                    sx = hdx / hd;
+                    sy = hdy / hd;
+                } else if (dmin < 20.0) {
+                    sx = ax / dmin.max(0.01);
+                    sy = ay / dmin.max(0.01);
+                }
+                let nl = (nx * nx + ny * ny).sqrt().max(0.001);
+                tx = sx * st + nx / nl * (1.0 - st);
+                ty = sy * st + ny / nl * (1.0 - st);
+            }
+            let var tl = (tx * tx + ty * ty).sqrt();
+            if (tl < 0.05) {
+                tx = nx;
+                ty = ny;
+                tl = (tx * tx + ty * ty).sqrt();
+            }
+            if (tl < 0.001) {
+                tx = 1.0;
+                ty = 0.0;
+                tl = 1.0;
+            }
+            tx = tx / tl;
+            ty = ty / tl;
+            let var fx = tx;
+            let var fy = ty;
+            if (linked) {
+                let kf = (spd > 0.5 || st > 0.5) ? 0.55 : 0.3;
+                fx = MFX[kk - 10] * (1.0 - kf) + tx * kf;
+                fy = MFY[kk - 10] * (1.0 - kf) + ty * kf;
+                let fl = (fx * fx + fy * fy).sqrt();
+                if (fl < 0.05) {
+                    fx = tx;
+                    fy = ty;
+                } else {
+                    fx = fx / fl;
+                    fy = fy / fl;
+                }
+            }
+            MFX[kk] = fx;
+            MFY[kk] = fy;
+            let who = ws[k];
+            if (linked) {
+                let dx2 = px - FP[base - 20 + 2 * k] * 0.01;
+                let dy2 = py - FP[base - 19 + 2 * k] * 0.01;
+                let dist = (dx2 * dx2 + dy2 * dy2).sqrt();
+                let o = who * DS;
+                let sl = stride_len(spd, st, DIM[o + 15], DIM[o + 32]);
+                let dph = 2.0 * PI * dist / sl;
+                MPH[kk] = MPH[kk - 10] + dph;
+                MPB[kk] = MPB[kk - 10] + dph * (2.0 - smoothstep(1.5, 3.5, spd));
+            } else {
+                MPH[kk] = (who * 1.7 + k * 0.9) % 6.2831853;
+                MPB[kk] = 0.0;
+            }
+        }
+    }
+}
+
+let t_mot0 = $time_current_ms();
+build_dims();
+build_motion();
+let t_mot1 = $time_current_ms();
+
+// ---------------------------------------------------------------- state
+
+// Per-frame sampled game state, filled by sample().
+let PX = Array.with_size(10, 0.0);
+let PY = Array.with_size(10, 0.0);
+let PVX = Array.with_size(10, 0.0);
+let PVY = Array.with_size(10, 0.0);
+let PWHO = Array.with_size(10, 0);
+let PFX = Array.with_size(10, 1.0);   // facing
+let PFY = Array.with_size(10, 0.0);
+let PST = Array.with_size(10, 0.0);   // stance weight
+let PPH = Array.with_size(10, 0.0);   // gait phase
+let PPB = Array.with_size(10, 0.0);   // dribble phase
+let SM = Array.with_size(8, 0.0);   // 0 ball x, 1 ball y, 2 ball z, 3 holder
+
+fun atan2(y, x) {
+    if (x > 0.0) return (y / x).atan();
+    if (x < 0.0) {
+        if (y >= 0.0) return (y / x).atan() + PI;
+        return (y / x).atan() - PI;
+    }
+    if (y > 0.0) return PI * 0.5;
+    if (y < 0.0) return -PI * 0.5;
+    return 0.0;
+}
+
+fun frame_at(t) {
+    let var i = (t / 0.2).floor();
+    if (i < 0) i = 0;
+    if (i > NF - 1) i = NF - 1;
+    while (i > 0 && FT[i] > t) i -= 1;
+    while (i < NF - 1 && FT[i + 1] <= t) i += 1;
+    return i;
+}
+
+// Interpolated positions at time t. Returns the frame index.
+fun sample(t) {
+    let fi = frame_at(t);
+    let var fj = fi + 1;
+    if (fj > NF - 1) fj = NF - 1;
+    let var a = 0.0;
+    let span = FT[fj] - FT[fi];
+    if (fj != fi && span < 0.45 && FWHO[fi] == FWHO[fj]) a = ((t - FT[fi]) / span).clip(0.0, 1.0);
+    let b0 = fi * 23;
+    let b1 = fj * 23;
+    for (let var k = 0; k < 10; ++k) {
+        let ix = b0 + 3 + 2 * k;
+        let x0 = FP[ix];
+        let y0 = FP[ix + 1];
+        let x1 = FP[b1 + 3 + 2 * k];
+        let y1 = FP[b1 + 4 + 2 * k];
+        let var aa = a;
+        let ddx = (x1 - x0).abs();
+        let ddy = (y1 - y0).abs();
+        if (ddx > 350 || ddy > 350) aa = 0.0;
+        PX[k] = (x0 + (x1 - x0) * aa) * 0.01;
+        PY[k] = (y0 + (y1 - y0) * aa) * 0.01;
+        let m0 = fi * 10 + k;
+        let m1 = fj * 10 + k;
+        PVX[k] = MVX[m0] + (MVX[m1] - MVX[m0]) * aa;
+        PVY[k] = MVY[m0] + (MVY[m1] - MVY[m0]) * aa;
+        let var gx = MFX[m0] + (MFX[m1] - MFX[m0]) * aa;
+        let var gy = MFY[m0] + (MFY[m1] - MFY[m0]) * aa;
+        let gl = (gx * gx + gy * gy).sqrt();
+        if (gl < 0.05) {
+            gx = MFX[m0];
+            gy = MFY[m0];
+        } else {
+            gx = gx / gl;
+            gy = gy / gl;
+        }
+        PFX[k] = gx;
+        PFY[k] = gy;
+        PST[k] = MST[m0] + (MST[m1] - MST[m0]) * aa;
+        PPH[k] = MPH[m0] + (MPH[m1] - MPH[m0]) * aa;
+        PPB[k] = MPB[m0] + (MPB[m1] - MPB[m0]) * aa;
+        PWHO[k] = WHOSETS[FWHO[fi]][k];
+    }
+    let bx0 = FP[b0];
+    let by0 = FP[b0 + 1];
+    let bx1 = FP[b1];
+    let by1 = FP[b1 + 1];
+    let var ab = a;
+    if ((bx1 - bx0).abs() > 900 || (by1 - by0).abs() > 900) ab = 0.0;
+    SM[0] = (bx0 + (bx1 - bx0) * ab) * 0.01;
+    SM[1] = (by0 + (by1 - by0) * ab) * 0.01;
+    SM[2] = (FP[b0 + 2] + (FP[b1 + 2] - FP[b0 + 2]) * ab) * 0.01;
+    SM[3] = FHOLD[fi].to_f();
+    return fi;
+}
+
+// ---------------------------------------------------------------- rasteriser
+
+let img = Image(W, H);
+let FB = img.bytes;
+let XL = Array.with_size(H, 0.0);
+let XR = Array.with_size(H, 0.0);
+let SX = Array.with_size(32, 0.0);
+let SY = Array.with_size(32, 0.0);
+let PCX = Array.with_size(32, 0.0);
+let PCY = Array.with_size(32, 0.0);
+let PCZ = Array.with_size(32, 0.0);
+let QX = Array.with_size(32, 0.0);
+let QY = Array.with_size(32, 0.0);
+let QZ = Array.with_size(32, 0.0);
+let WX = Array.with_size(32, 0.0);
+let WY = Array.with_size(32, 0.0);
+let WZ = Array.with_size(32, 0.0);
+
+// Camera: eye, right, up, forward.
+let CAM = Array.with_size(12, 0.0);
+
+fun set_cam(ex, ey, ez, yaw, pitch) {
+    let cy = yaw.cos();
+    let sy = yaw.sin();
+    let cp = pitch.cos();
+    let sp = pitch.sin();
+    CAM[0] = ex;
+    CAM[1] = ey;
+    CAM[2] = ez;
+    CAM[3] = sy;
+    CAM[4] = -cy;
+    CAM[5] = 0.0;
+    CAM[6] = -cy * sp;
+    CAM[7] = -sy * sp;
+    CAM[8] = cp;
+    CAM[9] = cp * cy;
+    CAM[10] = cp * sy;
+    CAM[11] = sp;
+}
+
+fun look_at(ex, ey, ez, tx, ty, tz) {
+    let dx = tx - ex;
+    let dy = ty - ey;
+    let dz = tz - ez;
+    set_cam(ex, ey, ez, atan2(dy, dx), atan2(dz, (dx * dx + dy * dy).sqrt()));
+}
+
+// Fill the convex polygon SX/SY[0..n) with a flat colour.
+fun fill_poly(n, color) {
+    let var ymin = SY[0];
+    let var ymax = ymin;
+    let var xmin = SX[0];
+    let var xmax = xmin;
+    for (let var i = 1; i < n; ++i) {
+        let y = SY[i];
+        let x = SX[i];
+        if (y < ymin) ymin = y;
+        if (y > ymax) ymax = y;
+        if (x < xmin) xmin = x;
+        if (x > xmax) xmax = x;
+    }
+    if (xmax < 0.0 || xmin >= W || ymax < 0.0 || ymin >= H) return;
+    let y0 = (ymin - 0.5).ceil().max(0);
+    let y1 = (ymax - 0.5).floor().min(H - 1);
+    if (y0 > y1) return;
+    for (let var y = y0; y <= y1; ++y) {
+        XL[y] = 1.0e9;
+        XR[y] = -1.0e9;
+    }
+    for (let var i = 0; i < n; ++i) {
+        let j = i + 1 == n ? 0 : i + 1;
+        let var ax = SX[i];
+        let var ay = SY[i];
+        let var bx = SX[j];
+        let var by = SY[j];
+        if (ay == by) continue;
+        if (ay > by) {
+            let tx = ax;
+            let ty = ay;
+            ax = bx;
+            ay = by;
+            bx = tx;
+            by = ty;
+        }
+        let ra = (ay - 0.5).ceil().max(y0);
+        let rb = (by - 0.5).floor().min(y1);
+        if (ra > rb) continue;
+        let slope = (bx - ax) / (by - ay);
+        let var x = ax + (ra + 0.5 - ay) * slope;
+        for (let var y = ra; y <= rb; ++y) {
+            if (x < XL[y]) XL[y] = x;
+            if (x > XR[y]) XR[y] = x;
+            x += slope;
+        }
+    }
+    let maxx = W - 1;
+    for (let var y = y0; y <= y1; ++y) {
+        let l = XL[y];
+        if (l > 1.0e8) continue;
+        let r = XR[y];
+        let var xs = (l - 0.5).ceil();
+        let var xe = (r - 0.5).floor();
+        if (xe < xs) {
+            // Sliver thinner than a pixel: keep it visible.
+            xs = ((l + r) * 0.5).floor();
+            xe = xs;
+        }
+        if (xs < 0) xs = 0;
+        if (xe > maxx) xe = maxx;
+        if (xe < xs) continue;
+        FB.fill_u32(y * W + xs, xe - xs + 1, color);
+    }
+}
+
+// Project camera-space PCX/PCY/PCZ[0..n) (near-clipped) and fill.
+fun poly_cam(n, color) {
+    let var inside = true;
+    for (let var i = 0; i < n; ++i) {
+        if (PCZ[i] < NEAR) inside = false;
+    }
+    if (inside) {
+        for (let var i = 0; i < n; ++i) {
+            let k = FOCAL / PCZ[i];
+            SX[i] = HW + PCX[i] * k;
+            SY[i] = HH - PCY[i] * k;
+        }
+        fill_poly(n, color);
+        return;
+    }
+    let var m = 0;
+    for (let var i = 0; i < n; ++i) {
+        let j = i + 1 == n ? 0 : i + 1;
+        let zi = PCZ[i];
+        let zj = PCZ[j];
+        let ai = zi >= NEAR;
+        let bj = zj >= NEAR;
+        if (ai) {
+            QX[m] = PCX[i];
+            QY[m] = PCY[i];
+            QZ[m] = zi;
+            m += 1;
+        }
+        if (ai != bj) {
+            let u = (NEAR - zi) / (zj - zi);
+            QX[m] = PCX[i] + (PCX[j] - PCX[i]) * u;
+            QY[m] = PCY[i] + (PCY[j] - PCY[i]) * u;
+            QZ[m] = NEAR;
+            m += 1;
+        }
+    }
+    if (m < 3) return;
+    for (let var i = 0; i < m; ++i) {
+        let k = FOCAL / QZ[i];
+        SX[i] = HW + QX[i] * k;
+        SY[i] = HH - QY[i] * k;
+    }
+    fill_poly(m, color);
+}
+
+// Fill the world-space polygon WX/WY/WZ[0..n).
+fun poly_world(n, color) {
+    let ex = CAM[0];
+    let ey = CAM[1];
+    let ez = CAM[2];
+    let rx = CAM[3];
+    let ry = CAM[4];
+    let ux = CAM[6];
+    let uy = CAM[7];
+    let uz = CAM[8];
+    let fx = CAM[9];
+    let fy = CAM[10];
+    let fz = CAM[11];
+    for (let var i = 0; i < n; ++i) {
+        let dx = WX[i] - ex;
+        let dy = WY[i] - ey;
+        let dz = WZ[i] - ez;
+        PCX[i] = dx * rx + dy * ry;
+        PCY[i] = dx * ux + dy * uy + dz * uz;
+        PCZ[i] = dx * fx + dy * fy + dz * fz;
+    }
+    poly_cam(n, color);
+}
+
+fun rgb(r, g, b) {
+    return 0xFF000000 | (r << 16) | (g << 8) | b;
+}
+
+fun shade(r, g, b, k) {
+    return rgb((r * k).floor().min(255), (g * k).floor().min(255), (b * k).floor().min(255));
+}
+
+// A flat quad on the floor from (x0,y0) to (x1,y1).
+fun floor_rect(x0, y0, x1, y1, z, color) {
+    WX[0] = x0; WY[0] = y0; WZ[0] = z;
+    WX[1] = x1; WY[1] = y0; WZ[1] = z;
+    WX[2] = x1; WY[2] = y1; WZ[2] = z;
+    WX[3] = x0; WY[3] = y1; WZ[3] = z;
+    poly_world(4, color);
+}
+
+// ---------------------------------------------------------------- court
+
+let LINE_W = 0.07;
+let L0X = [];
+let L0Y = [];
+let L1X = [];
+let L1Y = [];
+
+fun add_line(x0, y0, x1, y1) {
+    L0X.push(x0);
+    L0Y.push(y0);
+    L1X.push(x1);
+    L1Y.push(y1);
+}
+
+// Court point from end-local coordinates: u from the baseline, v across.
+fun cx_of(end, u, v) { return end == 0 ? u : 28.0 - u; }
+fun cy_of(end, u, v) { return end == 0 ? 7.5 + v : 7.5 - v; }
+
+fun add_arc(end, cu, cv, r, a0, a1, steps) {
+    for (let var i = 0; i < steps; ++i) {
+        let aa = a0 + (a1 - a0) * i / steps;
+        let bb = a0 + (a1 - a0) * (i + 1) / steps;
+        let u0 = cu + r * aa.cos();
+        let v0 = cv + r * aa.sin();
+        let u1 = cu + r * bb.cos();
+        let v1 = cv + r * bb.sin();
+        add_line(cx_of(end, u0, v0), cy_of(end, u0, v0), cx_of(end, u1, v1), cy_of(end, u1, v1));
+    }
+}
+
+fun add_local(end, u0, v0, u1, v1) {
+    add_line(cx_of(end, u0, v0), cy_of(end, u0, v0), cx_of(end, u1, v1), cy_of(end, u1, v1));
+}
+
+fun build_court() {
+    add_line(0.0, 0.0, 28.0, 0.0);
+    add_line(28.0, 0.0, 28.0, 15.0);
+    add_line(28.0, 15.0, 0.0, 15.0);
+    add_line(0.0, 15.0, 0.0, 0.0);
+    add_line(14.0, 0.0, 14.0, 15.0);
+    for (let var i = 0; i < 40; ++i) {
+        let a = 2.0 * PI * i / 40;
+        let b = 2.0 * PI * (i + 1) / 40;
+        add_line(14.0 + 1.8 * a.cos(), 7.5 + 1.8 * a.sin(), 14.0 + 1.8 * b.cos(), 7.5 + 1.8 * b.sin());
+    }
+    for (let var end = 0; end < 2; ++end) {
+        // Key.
+        add_local(end, 0.0, -2.45, 5.8, -2.45);
+        add_local(end, 5.8, -2.45, 5.8, 2.45);
+        add_local(end, 5.8, 2.45, 0.0, 2.45);
+        // Free-throw circle: solid towards midcourt, dashed inside the key.
+        add_arc(end, 5.8, 0.0, 1.8, -PI * 0.5, PI * 0.5, 16);
+        for (let var i = 0; i < 16; i += 2) {
+            let a0 = PI * 0.5 + PI * i / 16;
+            let a1 = PI * 0.5 + PI * (i + 1) / 16;
+            add_arc(end, 5.8, 0.0, 1.8, a0, a1, 1);
+        }
+        // Three-point line: corner lines and the arc round the hoop.
+        let corner = 2.99;
+        add_local(end, 0.0, -6.6, corner, -6.6);
+        add_local(end, 0.0, 6.6, corner, 6.6);
+        let am = atan2(6.6, 1.415);
+        add_arc(end, 1.575, 0.0, 6.75, -am, am, 36);
+        // No-charge semicircle.
+        add_arc(end, 1.575, 0.0, 1.25, -PI * 0.5, PI * 0.5, 14);
+        add_local(end, 1.575, -1.25, 1.2, -1.25);
+        add_local(end, 1.575, 1.25, 1.2, 1.25);
+    }
+}
+
+build_court();
+
+let COL_OUTER = rgb(34, 40, 56);
+let COL_RUNOFF = rgb(160, 118, 76);
+let COL_FLOOR = rgb(206, 158, 104);
+let COL_PAINT = rgb(176, 70, 62);
+let COL_LINE = rgb(245, 245, 240);
+
+fun draw_court() {
+    floor_rect(-40.0, -30.0, 68.0, 45.0, -0.02, COL_OUTER);
+    floor_rect(-2.5, -2.0, 30.5, 17.0, -0.01, COL_RUNOFF);
+    floor_rect(0.0, 0.0, 28.0, 15.0, 0.0, COL_FLOOR);
+    floor_rect(0.0, 5.05, 5.8, 9.95, 0.002, COL_PAINT);
+    floor_rect(22.2, 5.05, 28.0, 9.95, 0.002, COL_PAINT);
+    let hw = LINE_W * 0.5;
+    for (let var i = 0; i < L0X.len; ++i) {
+        let x0 = L0X[i];
+        let y0 = L0Y[i];
+        let x1 = L1X[i];
+        let y1 = L1Y[i];
+        let dx = x1 - x0;
+        let dy = y1 - y0;
+        let len = (dx * dx + dy * dy).sqrt();
+        let ux = dx / len;
+        let uy = dy / len;
+        // Extend by half a width so joints between segments have no gaps.
+        let ax = x0 - ux * hw;
+        let ay = y0 - uy * hw;
+        let bx = x1 + ux * hw;
+        let by = y1 + uy * hw;
+        let nx = -uy * hw;
+        let ny = ux * hw;
+        WX[0] = ax + nx; WY[0] = ay + ny; WZ[0] = 0.004;
+        WX[1] = bx + nx; WY[1] = by + ny; WZ[1] = 0.004;
+        WX[2] = bx - nx; WY[2] = by - ny; WZ[2] = 0.004;
+        WX[3] = ax - nx; WY[3] = ay - ny; WZ[3] = 0.004;
+        poly_world(4, COL_LINE);
+    }
+}
+
+// ---------------------------------------------------------------- objects
+
+// Scene items, sorted far to near before drawing.
+let BP = Array.with_size(10 * 160, 0.0);
+let IK = Array.with_size(512, 0.0);
+let IT = Array.with_size(512, 0);
+let IA = Array.with_size(512, 0);
+let ORD = Array.with_size(512, 0);
+let var NB = 0;
+let var NI = 0;
+
+fun add_item(kind, arg, key) {
+    IK[NI] = key;
+    IT[NI] = kind;
+    IA[NI] = arg;
+    NI += 1;
+}
+
+// Depth of a world point along the camera's viewing direction: the sort key.
+fun depth_of(x, y, z) {
+    return (x - CAM[0]) * CAM[9] + (y - CAM[1]) * CAM[10] + (z - CAM[2]) * CAM[11];
+}
+
+// Box standing on z0, `hf` and `hl` half sizes along its own forward/left
+// axes, rotated by yaw, h tall.
+fun add_box(cx, cy, z0, hf, hl, h, yaw, r, g, b) {
+    let o = NB * 10;
+    BP[o] = cx;
+    BP[o + 1] = cy;
+    BP[o + 2] = z0;
+    BP[o + 3] = hf;
+    BP[o + 4] = hl;
+    BP[o + 5] = h;
+    BP[o + 6] = yaw;
+    BP[o + 7] = r;
+    BP[o + 8] = g;
+    BP[o + 9] = b;
+    add_item(0, NB, depth_of(cx, cy, z0 + h * 0.5));
+    NB += 1;
+}
+
+let BWX = Array.with_size(8, 0.0);
+let BWY = Array.with_size(8, 0.0);
+let BCX = Array.with_size(8, 0.0);
+let BCY = Array.with_size(8, 0.0);
+let BCZ = Array.with_size(8, 0.0);
+let LX = -0.42;
+let LY = -0.52;
+let LZ = 0.75;
+
+fun draw_box(bi) {
+    let o = bi * 10;
+    let cx = BP[o];
+    let cy = BP[o + 1];
+    let z0 = BP[o + 2];
+    let hf = BP[o + 3];
+    let hl = BP[o + 4];
+    let h = BP[o + 5];
+    let yaw = BP[o + 6];
+    let r = BP[o + 7];
+    let g = BP[o + 8];
+    let b = BP[o + 9];
+    let cs = yaw.cos();
+    let sn = yaw.sin();
+    let ex = CAM[0];
+    let ey = CAM[1];
+    let ez = CAM[2];
+    let rx = CAM[3];
+    let ry = CAM[4];
+    let ux = CAM[6];
+    let uy = CAM[7];
+    let uz = CAM[8];
+    let fx = CAM[9];
+    let fy = CAM[10];
+    let fz = CAM[11];
+    // Corner k in local (f, l): (-,-) (+,-) (+,+) (-,+).
+    for (let var k = 0; k < 4; ++k) {
+        let f = (k == 1 || k == 2) ? hf : -hf;
+        let l = (k >= 2) ? hl : -hl;
+        let wx = cx + f * cs - l * sn;
+        let wy = cy + f * sn + l * cs;
+        BWX[k] = wx;
+        BWY[k] = wy;
+        let dx = wx - ex;
+        let dy = wy - ey;
+        let dzb = z0 - ez;
+        let dzt = z0 + h - ez;
+        let px = dx * rx + dy * ry;
+        let py = dx * ux + dy * uy;
+        let pz = dx * fx + dy * fy;
+        BCX[k] = px;
+        BCY[k] = py + dzb * uz;
+        BCZ[k] = pz + dzb * fz;
+        BCX[k + 4] = px;
+        BCY[k + 4] = py + dzt * uz;
+        BCZ[k + 4] = pz + dzt * fz;
+    }
+    for (let var k = 0; k < 4; ++k) {
+        let k1 = (k + 1) % 4;
+        // Outward normal of side k in local (f, l): -l, +f, +l, -f.
+        let var df = 0.0;
+        let var dl = 0.0;
+        if (k == 0) dl = -1.0;
+        else if (k == 1) df = 1.0;
+        else if (k == 2) dl = 1.0;
+        else df = -1.0;
+        let nx = df * cs - dl * sn;
+        let ny = df * sn + dl * cs;
+        if ((ex - BWX[k]) * nx + (ey - BWY[k]) * ny <= 0.0) continue;
+        let var s = 0.42 + 0.7 * (nx * LX + ny * LY).max(0.0);
+        if (s > 1.0) s = 1.0;
+        PCX[0] = BCX[k]; PCY[0] = BCY[k]; PCZ[0] = BCZ[k];
+        PCX[1] = BCX[k1]; PCY[1] = BCY[k1]; PCZ[1] = BCZ[k1];
+        PCX[2] = BCX[k1 + 4]; PCY[2] = BCY[k1 + 4]; PCZ[2] = BCZ[k1 + 4];
+        PCX[3] = BCX[k + 4]; PCY[3] = BCY[k + 4]; PCZ[3] = BCZ[k + 4];
+        poly_cam(4, shade(r, g, b, s));
+    }
+    if (ez > z0 + h) {
+        for (let var k = 0; k < 4; ++k) {
+            PCX[k] = BCX[k + 4];
+            PCY[k] = BCY[k + 4];
+            PCZ[k] = BCZ[k + 4];
+        }
+        poly_cam(4, shade(r, g, b, 1.0));
+    }
+}
+
+// Thick 3D line segment, thickness in pixels.
+fun line3d(x0, y0, z0, x1, y1, z1, wpx, color) {
+    let ex = CAM[0];
+    let ey = CAM[1];
+    let ez = CAM[2];
+    let ax = x0 - ex;
+    let ay = y0 - ey;
+    let az = z0 - ez;
+    let bx = x1 - ex;
+    let by = y1 - ey;
+    let bz = z1 - ez;
+    let var pax = ax * CAM[3] + ay * CAM[4];
+    let var pay = ax * CAM[6] + ay * CAM[7] + az * CAM[8];
+    let var paz = ax * CAM[9] + ay * CAM[10] + az * CAM[11];
+    let var pbx = bx * CAM[3] + by * CAM[4];
+    let var pby = bx * CAM[6] + by * CAM[7] + bz * CAM[8];
+    let var pbz = bx * CAM[9] + by * CAM[10] + bz * CAM[11];
+    if (paz < NEAR && pbz < NEAR) return;
+    if (paz < NEAR) {
+        let u = (NEAR - paz) / (pbz - paz);
+        pax = pax + (pbx - pax) * u;
+        pay = pay + (pby - pay) * u;
+        paz = NEAR;
+    }
+    if (pbz < NEAR) {
+        let u = (NEAR - pbz) / (paz - pbz);
+        pbx = pbx + (pax - pbx) * u;
+        pby = pby + (pay - pby) * u;
+        pbz = NEAR;
+    }
+    let sax = HW + pax * FOCAL / paz;
+    let say = HH - pay * FOCAL / paz;
+    let sbx = HW + pbx * FOCAL / pbz;
+    let sby = HH - pby * FOCAL / pbz;
+    let dx = sbx - sax;
+    let dy = sby - say;
+    let len = (dx * dx + dy * dy).sqrt();
+    if (len < 0.01) return;
+    let nx = -dy / len * wpx * 0.5;
+    let ny = dx / len * wpx * 0.5;
+    SX[0] = sax + nx; SY[0] = say + ny;
+    SX[1] = sbx + nx; SY[1] = sby + ny;
+    SX[2] = sbx - nx; SY[2] = sby - ny;
+    SX[3] = sax - nx; SY[3] = say - ny;
+    fill_poly(4, color);
+}
+
+// Filled floor ellipse (shadow).
+fun floor_disc(x, y, rx_m, ry_m, color) {
+    for (let var i = 0; i < 10; ++i) {
+        let a = 2.0 * PI * i / 10;
+        WX[i] = x + rx_m * a.cos();
+        WY[i] = y + ry_m * a.sin();
+        WZ[i] = 0.006;
+    }
+    poly_world(10, color);
+}
+
+let RIM_X = [1.575, 26.425];
+let RIM_Z = 3.05;
+
+fun draw_rim(end) {
+    let hx = RIM_X[end];
+    let hy = 7.5;
+    let dx = hx - CAM[0];
+    let dy = hy - CAM[1];
+    let dz = RIM_Z - CAM[2];
+    let d = (dx * dx + dy * dy + dz * dz).sqrt();
+    let wpx = (0.03 * FOCAL / d).max(1.6);
+    let orange = rgb(250, 110, 30);
+    let net = rgb(235, 235, 235);
+    for (let var i = 0; i < 12; ++i) {
+        let a = 2.0 * PI * i / 12;
+        let b = 2.0 * PI * (i + 1) / 12;
+        line3d(hx + 0.225 * a.cos(), hy + 0.225 * a.sin(), RIM_Z,
+               hx + 0.225 * b.cos(), hy + 0.225 * b.sin(), RIM_Z, wpx, orange);
+    }
+    // Bracket joining the rim to the backboard.
+    let bxd = end == 0 ? 1.2 : 26.8;
+    let rxd = end == 0 ? 1.35 : 26.65;
+    line3d(bxd, hy, RIM_Z, rxd, hy, RIM_Z, wpx, orange);
+    for (let var i = 0; i < 8; ++i) {
+        let a = 2.0 * PI * i / 8;
+        line3d(hx + 0.225 * a.cos(), hy + 0.225 * a.sin(), RIM_Z,
+               hx + 0.13 * a.cos(), hy + 0.13 * a.sin(), RIM_Z - 0.4, (wpx * 0.5).max(1.0), net);
+    }
+}
+
+let BALL_R = 0.12;
+
+fun draw_ball(bx, by, bz) {
+    let dx = bx - CAM[0];
+    let dy = by - CAM[1];
+    let dz = bz - CAM[2];
+    let xc = dx * CAM[3] + dy * CAM[4];
+    let yc = dx * CAM[6] + dy * CAM[7] + dz * CAM[8];
+    let zc = dx * CAM[9] + dy * CAM[10] + dz * CAM[11];
+    if (zc < NEAR) return;
+    let k = FOCAL / zc;
+    let sx = HW + xc * k;
+    let sy = HH - yc * k;
+    let rp = (BALL_R * k).max(2.0);
+    for (let var i = 0; i < 14; ++i) {
+        let a = 2.0 * PI * i / 14;
+        SX[i] = sx + rp * a.cos();
+        SY[i] = sy + rp * a.sin();
+    }
+    fill_poly(14, rgb(232, 118, 36));
+    // Shaded lower right and one seam.
+    if (rp >= 4.0) {
+        for (let var i = 0; i < 8; ++i) {
+            let a = -0.25 * PI + PI * 0.75 * i / 7;
+            SX[i] = sx + rp * a.cos();
+            SY[i] = sy + rp * a.sin();
+        }
+        for (let var i = 8; i < 12; ++i) {
+            let a = 0.5 * PI - 0.0 + 0.0;
+            SX[i] = sx + rp * 0.45 * (-0.25 * PI - PI * 0.75 * (i - 8) / 3).cos();
+            SY[i] = sy + rp * 0.45 * (-0.25 * PI - PI * 0.75 * (i - 8) / 3).sin();
+        }
+        fill_poly(12, rgb(196, 92, 26));
+        for (let var i = 0; i < 4; ++i) {
+            SX[i] = sx + (i == 0 || i == 3 ? -rp : rp);
+            SY[i] = sy + (i < 2 ? -0.7 : 0.7);
+        }
+        fill_poly(4, rgb(40, 24, 16));
+    }
+}
+
+let TEAM_COL = [[214, 52, 52], [52, 110, 226]];
+let SHORTS_COL = [[150, 30, 34], [30, 66, 160]];
+
+// ---- jointed figures
+//
+// A figure is a set of tapered boxes ("segments"), each stored as eight
+// camera-space corners plus six face colours (0 = back face, not drawn) in
+// SEGD, and sorted with everything else by depth of its middle.
+
+// Joint positions in the body frame (forward, left, up) of the player.
+let JF = Array.with_size(32, 0.0);
+let JL = Array.with_size(32, 0.0);
+let JZ = Array.with_size(32, 0.0);
+// Joint ids: 0 pelvis, 1-2 hips, 3-4 knees, 5-6 ankles, 7-8 toes, 9-10 heels,
+// 11 shoulder centre, 12-13 shoulders, 14 neck base, 15 head base, 16 head top,
+// 17-18 elbows, 19-20 wrists, 21-22 finger tips, 23 waist, 24 pelvis bottom,
+// 25 pelvis top, 26-27 end of shorts on the thigh, 28-29 hair, 30 torso top.
+// Of each pair the first is the left side.
+let BF = Array.with_size(4, 0.0);     // body frame: facing x, y, origin x, y
+let IKR = Array.with_size(6, 0.0);
+let BALLW = Array.with_size(4, 0.0);
+let SEGD = Array.with_size(300 * 32, 0.0);
+let var NS = 0;
+let CWX = Array.with_size(8, 0.0);
+let CWY = Array.with_size(8, 0.0);
+let CWZ = Array.with_size(8, 0.0);
+
+// Two-bone IK: elbow (or knee) for a limb from s to t with bone lengths l1,
+// l2, bending towards the pole direction p. Result in IKR: joint xyz, then
+// the end point (t, pulled in when out of reach).
+fun ik2(sx, sy, sz, tx, ty, tz, l1, l2, px, py, pz) {
+    let var dx = tx - sx;
+    let var dy = ty - sy;
+    let var dz = tz - sz;
+    let var d = (dx * dx + dy * dy + dz * dz).sqrt();
+    if (d < 0.01) {
+        dx = 0.0;
+        dy = 0.0;
+        dz = -0.01;
+        d = 0.01;
+    }
+    let ux = dx / d;
+    let uy = dy / d;
+    let uz = dz / d;
+    let maxd = (l1 + l2) * 0.999;
+    let mind = (l1 - l2).abs() + 0.02;
+    let var dd = d;
+    if (dd > maxd) dd = maxd;
+    if (dd < mind) dd = mind;
+    let dp = px * ux + py * uy + pz * uz;
+    let var qx = px - dp * ux;
+    let var qy = py - dp * uy;
+    let var qz = pz - dp * uz;
+    let var ql = (qx * qx + qy * qy + qz * qz).sqrt();
+    if (ql < 0.001) {
+        qx = 0.0 - 0.0 * ux;
+        qy = 0.0;
+        qz = -1.0;
+        let dq = qz * uz;
+        qx = -dq * ux;
+        qy = -dq * uy;
+        qz = -1.0 - dq * uz;
+        ql = (qx * qx + qy * qy + qz * qz).sqrt().max(0.001);
+    }
+    let a = (dd * dd + l1 * l1 - l2 * l2) / (2.0 * dd);
+    let h = (l1 * l1 - a * a).max(0.0).sqrt();
+    IKR[0] = sx + ux * a + qx / ql * h;
+    IKR[1] = sy + uy * a + qy / ql * h;
+    IKR[2] = sz + uz * a + qz / ql * h;
+    IKR[3] = sx + ux * dd;
+    IKR[4] = sy + uy * dd;
+    IKR[5] = sz + uz * dd;
+}
+
+fun set_face(o, f, nx, ny, nz, c, cr, cg, cb) {
+    let ex = CAM[0];
+    let ey = CAM[1];
+    let ez = CAM[2];
+    if (nx * (ex - CWX[c]) + ny * (ey - CWY[c]) + nz * (ez - CWZ[c]) <= 0.0) {
+        SEGD[o + 24 + f] = 0;
+        return;
+    }
+    let nl = (nx * nx + ny * ny + nz * nz).sqrt().max(0.001);
+    let k = 0.55 + 0.52 * ((nx * LX + ny * LY + nz * LZ) / nl).max(0.0);
+    SEGD[o + 24 + f] = 0xFF000000 | ((cr * k).floor().min(255) << 16) | ((cg * k).floor().min(255) << 8) | (cb * k).floor().min(255);
+}
+
+// Add a tapered box between joints ja and jb: half sizes wa x da at the first
+// end and wb x db at the second (w along the side vector sv, d across it),
+// lengthened by ext half widths at both ends so bent joints close up.
+fun seg(ja, jb, wa, da, wb, db, ext, svf, svl, svz, bias, cr, cg, cb) {
+    let var af = JF[ja];
+    let var al = JL[ja];
+    let var az = JZ[ja];
+    let var bf = JF[jb];
+    let var bl = JL[jb];
+    let var bz = JZ[jb];
+    let var xf = bf - af;
+    let var xl = bl - al;
+    let var xz = bz - az;
+    let ln = (xf * xf + xl * xl + xz * xz).sqrt();
+    if (ln < 0.002) return;
+    xf = xf / ln;
+    xl = xl / ln;
+    xz = xz / ln;
+    if (ext > 0.0) {
+        let ea = ext * wa;
+        let eb = ext * wb;
+        af -= xf * ea;
+        al -= xl * ea;
+        az -= xz * ea;
+        bf += xf * eb;
+        bl += xl * eb;
+        bz += xz * eb;
+    }
+    let ln2 = ln + ext * (wa + wb);
+    let var dp = svf * xf + svl * xl + svz * xz;
+    let var sf = svf - dp * xf;
+    let var sl = svl - dp * xl;
+    let var sz = svz - dp * xz;
+    let var sn = (sf * sf + sl * sl + sz * sz).sqrt();
+    if (sn < 0.3) {
+        let a2f = svl.abs() < 0.5 ? 0.0 : 1.0;
+        let a2l = svl.abs() < 0.5 ? 1.0 : 0.0;
+        dp = a2f * xf + a2l * xl;
+        sf = a2f - dp * xf;
+        sl = a2l - dp * xl;
+        sz = -dp * xz;
+        sn = (sf * sf + sl * sl + sz * sz).sqrt().max(0.001);
+    }
+    sf = sf / sn;
+    sl = sl / sn;
+    sz = sz / sn;
+    let df = xl * sz - xz * sl;
+    let dl = xz * sf - xf * sz;
+    let dz = xf * sl - xl * sf;
+    let fx = BF[0];
+    let fy = BF[1];
+    let px = BF[2];
+    let py = BF[3];
+    let ax = px + af * fx - al * fy;
+    let ay = py + af * fy + al * fx;
+    let bx = px + bf * fx - bl * fy;
+    let by = py + bf * fy + bl * fx;
+    let sx = sf * fx - sl * fy;
+    let sy = sf * fy + sl * fx;
+    let dxw = df * fx - dl * fy;
+    let dyw = df * fy + dl * fx;
+    let axw = xf * fx - xl * fy;
+    let ayw = xf * fy + xl * fx;
+    CWX[0] = ax + wa * sx + da * dxw; CWY[0] = ay + wa * sy + da * dyw; CWZ[0] = az + wa * sz + da * dz;
+    CWX[1] = ax - wa * sx + da * dxw; CWY[1] = ay - wa * sy + da * dyw; CWZ[1] = az - wa * sz + da * dz;
+    CWX[2] = ax - wa * sx - da * dxw; CWY[2] = ay - wa * sy - da * dyw; CWZ[2] = az - wa * sz - da * dz;
+    CWX[3] = ax + wa * sx - da * dxw; CWY[3] = ay + wa * sy - da * dyw; CWZ[3] = az + wa * sz - da * dz;
+    CWX[4] = bx + wb * sx + db * dxw; CWY[4] = by + wb * sy + db * dyw; CWZ[4] = bz + wb * sz + db * dz;
+    CWX[5] = bx - wb * sx + db * dxw; CWY[5] = by - wb * sy + db * dyw; CWZ[5] = bz - wb * sz + db * dz;
+    CWX[6] = bx - wb * sx - db * dxw; CWY[6] = by - wb * sy - db * dyw; CWZ[6] = bz - wb * sz - db * dz;
+    CWX[7] = bx + wb * sx - db * dxw; CWY[7] = by + wb * sy - db * dyw; CWZ[7] = bz + wb * sz - db * dz;
+    let ex = CAM[0];
+    let ey = CAM[1];
+    let ez = CAM[2];
+    let o = NS * 32;
+    let rx = CAM[3];
+    let ry = CAM[4];
+    let ux = CAM[6];
+    let uy = CAM[7];
+    let uz = CAM[8];
+    let gx = CAM[9];
+    let gy = CAM[10];
+    let gz = CAM[11];
+    for (let var c = 0; c < 8; ++c) {
+        let qx = CWX[c] - ex;
+        let qy = CWY[c] - ey;
+        let qz = CWZ[c] - ez;
+        let oc = o + c * 3;
+        SEGD[oc] = qx * rx + qy * ry;
+        SEGD[oc + 1] = qx * ux + qy * uy + qz * uz;
+        SEGD[oc + 2] = qx * gx + qy * gy + qz * gz;
+    }
+    let mw = (wb - wa) / ln2;
+    let md = (db - da) / ln2;
+    set_face(o, 0, dxw - md * axw, dyw - md * ayw, dz - md * xz, 0, cr, cg, cb);
+    set_face(o, 1, -sx - mw * axw, -sy - mw * ayw, -sz - mw * xz, 1, cr, cg, cb);
+    set_face(o, 2, -dxw - md * axw, -dyw - md * ayw, -dz - md * xz, 2, cr, cg, cb);
+    set_face(o, 3, sx - mw * axw, sy - mw * ayw, sz - mw * xz, 3, cr, cg, cb);
+    set_face(o, 4, -axw, -ayw, -xz, 0, cr, cg, cb);
+    set_face(o, 5, axw, ayw, xz, 4, cr, cg, cb);
+    let mx = (ax + bx) * 0.5 - ex;
+    let my = (ay + by) * 0.5 - ey;
+    let mz = (az + bz) * 0.5 - ez;
+    add_item(3, NS, mx * gx + my * gy + mz * gz + bias);
+    NS += 1;
+}
+
+fun draw_seg(si) {
+    let o = si * 32;
+    for (let var f = 0; f < 6; ++f) {
+        let col = SEGD[o + 24 + f];
+        if (col == 0) continue;
+        let var i0 = 0;
+        let var i1 = 1;
+        let var i2 = 2;
+        let var i3 = 3;
+        if (f < 4) {
+            i0 = f;
+            i1 = (f + 1) & 3;
+            i2 = i1 + 4;
+            i3 = f + 4;
+        } else if (f == 5) {
+            i0 = 4;
+            i1 = 5;
+            i2 = 6;
+            i3 = 7;
+        }
+        PCX[0] = SEGD[o + i0 * 3]; PCY[0] = SEGD[o + i0 * 3 + 1]; PCZ[0] = SEGD[o + i0 * 3 + 2];
+        PCX[1] = SEGD[o + i1 * 3]; PCY[1] = SEGD[o + i1 * 3 + 1]; PCZ[1] = SEGD[o + i1 * 3 + 2];
+        PCX[2] = SEGD[o + i2 * 3]; PCY[2] = SEGD[o + i2 * 3 + 1]; PCZ[2] = SEGD[o + i2 * 3 + 2];
+        PCX[3] = SEGD[o + i3 * 3]; PCY[3] = SEGD[o + i3 * 3 + 1]; PCZ[3] = SEGD[o + i3 * 3 + 2];
+        poly_cam(4, col);
+    }
+}
+
+// Pose and add one player. Everything is computed in the player's body frame
+// (forward, left, up; origin on the floor), see README for the model.
+// isball: he holds or dribbles the ball, whose centre ends up in BALLW.
+fun build_player(k, isball) {
+    let who = PWHO[k];
+    let o = who * DS;
+    let side = k < 5 ? 0 : 1;
+    let H = DIM[o];
+    let sw = DIM[o + 1];
+    let tm = DIM[o + 2];
+    let hipZ = DIM[o + 3];
+    let thigh = DIM[o + 4];
+    let shin = DIM[o + 5];
+    let torso = DIM[o + 7];
+    let nbk = DIM[o + 8];
+    let headH = DIM[o + 9];
+    let l1 = DIM[o + 10];
+    let l2 = DIM[o + 11];
+    let hl = DIM[o + 12];
+    let shl = DIM[o + 13];
+    let hipL = DIM[o + 14];
+    let Lr = DIM[o + 15];
+    let footL = DIM[o + 16];
+    let sb = DIM[o + 26];
+    let vert = DIM[o + 28];
+    let px = PX[k];
+    let py = PY[k];
+    let fx = PFX[k];
+    let fy = PFY[k];
+    let vx = PVX[k];
+    let vy = PVY[k];
+    BF[0] = fx;
+    BF[1] = fy;
+    BF[2] = px;
+    BF[3] = py;
+    let v = (vx * vx + vy * vy).sqrt().min(8.0);
+    let s = PST[k];
+    let phi = PPH[k];
+    // Direction of travel in the body frame (forward, left).
+    let var mf = 1.0;
+    let var ml = 0.0;
+    if (v > 0.05) {
+        let dxn = vx / v;
+        let dyn = vy / v;
+        mf = dxn * fx + dyn * fy;
+        ml = -dxn * fy + dyn * fx;
+    }
+    let ra = smoothstep(1.6, 4.4, v);          // walk 0 .. run 1
+    let g = smoothstep(0.12, 0.65, v);         // standing 0 .. moving 1
+    let duty = gait_duty(v, s);
+    let sigma = gait_sigma(v, s);
+    let sweep = sigma * Lr * g * DIM[o + 32];
+    let vf = 0.7 + 0.03 * vert;
+    let liftH = (Lr * (0.07 + 0.15 * ra) * (1.0 - s) + Lr * 0.05 * s) * g * vf;
+    // Hip height: low enough that the planted foot at the end of its sweep is
+    // still within reach of the leg, plus a small vault, highest over the
+    // planted foot.
+    let xh = sweep * 0.5 / Lr;
+    let dends = 1.0 - (0.994 - xh * xh).max(0.5).sqrt();
+    let dropf = (1.0 - s) * (0.02 + dends) + s * (0.15 + dends);
+    let vault = Lr * (0.015 + 0.04 * ra) * g * vf * (1.0 - 0.5 * s);
+    let pelF = -0.08 * Lr * s;
+    let pz = hipZ - Lr * dropf + vault * (0.5 + 0.5 * (2.0 * (phi - PI * duty)).cos());
+    let latBase = hipL * (1.0 - s) + 0.15 * H * s;
+    let hv = 0.034 * H;
+    let heelL = 0.30 * footL;
+    let toeL = footL - heelL;
+    // ---- legs: the feet follow a stance/swing path along the direction of
+    // travel; the knees come out of two-bone IK. Planted feet move back
+    // relative to the hips exactly as fast as the body moves forward.
+    let var sLeft = 0.0;
+    for (let var sd = 0; sd < 2; ++sd) {
+        let sg = sd == 0 ? 1.0 : -1.0;
+        let var u = phi * 0.15915494 + (sd == 0 ? 0.0 : 0.5);
+        u = u - u.floor();
+        if (sd == 0) sLeft = (6.2831853 * u - 0.2).cos();
+        let var pp = 0.0;
+        let var lift = 0.0;
+        let var pitch = 0.0;
+        if (u < duty) {
+            let q = u / duty;
+            pp = 0.5 - q;
+            pitch = -0.30 * smoothstep(0.7, 1.0, q) + 0.16 * (1.0 - smoothstep(0.0, 0.2, q));
+        } else {
+            let q = (u - duty) / (1.0 - duty);
+            pp = -0.5 + q * q * (3.0 - 2.0 * q);
+            lift = (PI * q).sin() * liftH;
+            pitch = -0.5 * (1.0 - smoothstep(0.0, 0.5, q)) + 0.22 * smoothstep(0.6, 1.0, q);
+        }
+        pitch = pitch * g;
+        let off = pp * sweep;
+        let tf = mf * off;
+        let tl = sg * latBase + ml * off;
+        let sp = pitch.sin();
+        let cp = pitch.cos();
+        let az = hv * cp + (pitch < 0.0 ? toeL * (-sp) : heelL * sp) + lift;
+        ik2(pelF, sg * hipL, pz, tf, tl, az, thigh, shin, 1.0, sg * 0.35 * s, 0.0);
+        JF[1 + sd] = pelF;
+        JL[1 + sd] = sg * hipL;
+        JZ[1 + sd] = pz;
+        JF[3 + sd] = IKR[0];
+        JL[3 + sd] = IKR[1];
+        JZ[3 + sd] = IKR[2];
+        JF[5 + sd] = IKR[3];
+        JL[5 + sd] = IKR[4];
+        JZ[5 + sd] = IKR[5];
+        JF[9 + sd] = IKR[3] - cp * heelL;
+        JL[9 + sd] = IKR[4];
+        JZ[9 + sd] = IKR[5] - sp * heelL;
+        JF[7 + sd] = IKR[3] + cp * toeL;
+        JL[7 + sd] = IKR[4];
+        JZ[7 + sd] = IKR[5] + sp * toeL;
+        // End of the shorts, a bit over half way down the thigh.
+        JF[26 + sd] = JF[1 + sd] + (IKR[0] - pelF) * 0.62;
+        JL[26 + sd] = JL[1 + sd] + (IKR[1] - sg * hipL) * 0.62;
+        JZ[26 + sd] = pz + (IKR[2] - pz) * 0.62;
+    }
+    // ---- trunk and head
+    let lean = ((0.03 + 0.24 * smoothstep(1.0, 6.0, v)) * (1.0 - s) + 0.30 * s) + 0.004 * (10.0 - DIM[o + 30]) * g;
+    let sl = lean.sin();
+    let cl = lean.cos();
+    JF[0] = pelF; JL[0] = 0.0; JZ[0] = pz;
+    JF[23] = pelF; JL[23] = 0.0; JZ[23] = pz + 0.02 * H;
+    JF[24] = pelF; JL[24] = 0.0; JZ[24] = pz - 0.075 * H;
+    JF[25] = pelF; JL[25] = 0.0; JZ[25] = pz + 0.04 * H;
+    JF[11] = pelF + sl * torso; JL[11] = 0.0; JZ[11] = pz + cl * torso;
+    JF[30] = pelF + sl * (torso + 0.02 * H); JL[30] = 0.0; JZ[30] = pz + cl * (torso + 0.02 * H);
+    JF[14] = JF[11]; JL[14] = 0.0; JZ[14] = JZ[11];
+    let sn4 = (lean * 0.4).sin();
+    let cn4 = (lean * 0.4).cos();
+    JF[15] = JF[11] + sn4 * nbk; JL[15] = 0.0; JZ[15] = JZ[11] + cn4 * nbk;
+    let sh1 = (lean * 0.1).sin();
+    let ch1 = (lean * 0.1).cos();
+    JF[16] = JF[15] + sh1 * headH; JL[16] = 0.0; JZ[16] = JZ[15] + ch1 * headH;
+    JF[28] = JF[15] + sh1 * headH * 0.55 - 0.012 * H; JL[28] = 0.0; JZ[28] = JZ[15] + ch1 * headH * 0.55;
+    JF[29] = JF[16] - 0.012 * H; JL[29] = 0.0; JZ[29] = JZ[16] + 0.012 * H;
+    // Shoulders twist against the hips: the arm opposite the forward leg is forward.
+    let psi = (0.10 + 0.14 * ra) * g * sLeft * (1.0 - s);
+    let spsi = psi.sin();
+    let cpsi = psi.cos();
+    JF[12] = JF[11] - shl * spsi; JL[12] = shl * cpsi; JZ[12] = JZ[11];
+    JF[13] = JF[11] + shl * spsi; JL[13] = -shl * cpsi; JZ[13] = JZ[11];
+    // ---- ball (handler only): held at chest when standing, dribbled at the
+    // shooting-side hand in step with his strides when moving.
+    let var bcF = 0.0;
+    let var bcL = 0.0;
+    let var bcZ = 0.0;
+    let var hb = 0.0;
+    let var sdb = 0;
+    if (isball) {
+        sdb = sb > 0.0 ? 0 : 1;
+        hb = smoothstep(0.25, 0.9, v);
+        let holdF = 0.17 * H;
+        let holdL = sb * 0.09;
+        let holdZ = pz + 0.30 * torso;
+        let drF = (0.17 + 0.05 * ra) * H;
+        let drL = sb * (shl + 0.04);
+        let wzt = pz + 0.12;
+        let zt = wzt - 0.07 - BALL_R;
+        let var ub = PPB[k] * 0.15915494;
+        ub = ub - ub.floor();
+        let e = 2.0 * ub - 1.0;
+        let zb = BALL_R + (zt - BALL_R) * (1.0 - e * e);
+        bcF = holdF + (drF - holdF) * hb;
+        bcL = holdL + (drL - holdL) * hb;
+        bcZ = holdZ + (zb - holdZ) * hb;
+    }
+    // ---- arms
+    let aamp = (0.28 + 0.45 * ra) * g;
+    let ef = 0.25 + 1.05 * ra * g;
+    let first = isball ? sdb : 0;
+    for (let var ai = 0; ai < 2; ++ai) {
+        let sd = ai == 0 ? first : 1 - first;
+        let sg = sd == 0 ? 1.0 : -1.0;
+        let shf = JF[12 + sd];
+        let shl_ = JL[12 + sd];
+        let shz = JZ[12 + sd];
+        // Running swing.
+        let beta = 0.05 - sg * aamp * sLeft;
+        let gam = beta + ef;
+        let var ux = beta.sin();
+        let var uy = sg * 0.12;
+        let var uz = -(beta.cos());
+        let var un = (ux * ux + uy * uy + uz * uz).sqrt();
+        ux = ux / un; uy = uy / un; uz = uz / un;
+        let var vx2 = gam.sin();
+        let var vy2 = sg * 0.05;
+        let var vz2 = -(gam.cos());
+        let vn = (vx2 * vx2 + vy2 * vy2 + vz2 * vz2).sqrt();
+        vx2 = vx2 / vn; vy2 = vy2 / vn; vz2 = vz2 / vn;
+        let rex = shf + l1 * ux;
+        let rey = shl_ + l1 * uy;
+        let rez = shz + l1 * uz;
+        let rwx = rex + l2 * vx2;
+        let rwy = rey + l2 * vy2;
+        let rwz = rez + l2 * vz2;
+        // Defensive stance: out to the sides, hands up.
+        let var dx = 0.15;
+        let var dy = sg * 0.85;
+        let var dz = -0.50;
+        let dn = (dx * dx + dy * dy + dz * dz).sqrt();
+        dx = dx / dn; dy = dy / dn; dz = dz / dn;
+        let var ex2 = 0.60;
+        let var ey2 = sg * 0.60;
+        let var ez2 = 0.35;
+        let en = (ex2 * ex2 + ey2 * ey2 + ez2 * ez2).sqrt();
+        ex2 = ex2 / en; ey2 = ey2 / en; ez2 = ez2 / en;
+        let dex = shf + l1 * dx;
+        let dey = shl_ + l1 * dy;
+        let dez = shz + l1 * dz;
+        let dwx = dex + l2 * ex2;
+        let dwy = dey + l2 * ey2;
+        let dwz = dez + l2 * ez2;
+        let var elx = rex + (dex - rex) * s;
+        let var ely = rey + (dey - rey) * s;
+        let var elz = rez + (dez - rez) * s;
+        let var twx = rwx + (dwx - rwx) * s;
+        let var twy = rwy + (dwy - rwy) * s;
+        let var twz = rwz + (dwz - rwz) * s;
+        let var hdx = twx - elx;
+        let var hdy = twy - ely;
+        let var hdz = twz - elz;
+        let var onball = 0.0;
+        if (isball) {
+            let r = BALL_R;
+            if (sd == sdb) {
+                // Hand on top of the ball when dribbling, on its side when held.
+                let wzt = pz + 0.12;
+                let dribz = (bcZ + r + 0.07).max(wzt - 0.24);
+                twx = bcF;
+                twy = bcL + sb * (r + 0.04) * (1.0 - hb);
+                twz = bcZ + (dribz - bcZ) * hb;
+                onball = 1.0;
+            } else {
+                let w2 = 1.0 - hb;
+                twx = twx + (bcF - twx) * w2;
+                twy = twy + (bcL - sb * (r + 0.04) - twy) * w2;
+                twz = twz + (bcZ - twz) * w2;
+                onball = w2;
+            }
+        }
+        // Pole: keep the elbow where the pose put it.
+        let mx = (shf + twx) * 0.5;
+        let my = (shl_ + twy) * 0.5;
+        let mz = (shz + twz) * 0.5;
+        let var pxp = elx - mx;
+        let var pyp = ely - my;
+        let var pzp = elz - mz;
+        if (pxp * pxp + pyp * pyp + pzp * pzp < 0.0004) {
+            pxp = 0.0;
+            pyp = sg * 0.4;
+            pzp = -1.0;
+        }
+        ik2(shf, shl_, shz, twx, twy, twz, l1, l2, pxp, pyp, pzp);
+        JF[17 + sd] = IKR[0];
+        JL[17 + sd] = IKR[1];
+        JZ[17 + sd] = IKR[2];
+        let wxo = IKR[3];
+        let wyo = IKR[4];
+        let wzo = IKR[5];
+        JF[19 + sd] = wxo;
+        JL[19 + sd] = wyo;
+        JZ[19 + sd] = wzo;
+        if (isball && sd == sdb) {
+            // Out of reach: bring the ball to the hand.
+            bcF += wxo - twx;
+            bcL += wyo - twy;
+            bcZ += wzo - twz;
+        }
+        // Hand continues the forearm, or reaches for the ball.
+        hdx = wxo - IKR[0];
+        hdy = wyo - IKR[1];
+        hdz = wzo - IKR[2];
+        let var hn = (hdx * hdx + hdy * hdy + hdz * hdz).sqrt().max(0.001);
+        hdx = hdx / hn; hdy = hdy / hn; hdz = hdz / hn;
+        if (onball > 0.0) {
+            let tx = bcF - wxo;
+            let ty = bcL - wyo;
+            let tz = bcZ - wzo;
+            let tn = (tx * tx + ty * ty + tz * tz).sqrt().max(0.001);
+            hdx = hdx + (tx / tn - hdx) * onball;
+            hdy = hdy + (ty / tn - hdy) * onball;
+            hdz = hdz + (tz / tn - hdz) * onball;
+            hn = (hdx * hdx + hdy * hdy + hdz * hdz).sqrt().max(0.001);
+            hdx = hdx / hn; hdy = hdy / hn; hdz = hdz / hn;
+        }
+        JF[21 + sd] = wxo + hdx * hl;
+        JL[21 + sd] = wyo + hdy * hl;
+        JZ[21 + sd] = wzo + hdz * hl;
+    }
+    if (isball) {
+        BALLW[0] = px + bcF * fx - bcL * fy;
+        BALLW[1] = py + bcF * fy + bcL * fx;
+        BALLW[2] = bcZ;
+    }
+    // ---- emit the segments
+    let jr = TEAM_COL[side];
+    let sh = SHORTS_COL[side];
+    let skr = DIM[o + 17];
+    let skg = DIM[o + 18];
+    let skb = DIM[o + 19];
+    let ta = tm.sqrt();
+    let bw = 0.92 + 0.12 * (tm - 1.0);
+    // Shorts and jersey.
+    seg(24, 25, 0.37 * sw * bw, 0.26 * sw * tm, 0.37 * sw * bw, 0.26 * sw * tm, 0.0, 0.0, 1.0, 0.0, 0.0, sh[0], sh[1], sh[2]);
+    seg(23, 30, 0.35 * sw * bw, 0.25 * sw * tm, 0.45 * sw * bw, 0.28 * sw * tm, 0.0, 0.0, 1.0, 0.0, -0.05, jr[0], jr[1], jr[2]);
+    // Head.
+    seg(14, 15, 0.026 * H * ta, 0.026 * H * ta, 0.022 * H * ta, 0.022 * H * ta, 0.3, 0.0, 1.0, 0.0, 0.0, skr, skg, skb);
+    seg(15, 16, 0.046 * H, 0.054 * H, 0.043 * H, 0.050 * H, 0.0, 0.0, 1.0, 0.0, 0.0, skr, skg, skb);
+    seg(28, 29, 0.049 * H, 0.056 * H, 0.047 * H, 0.053 * H, 0.0, 0.0, 1.0, 0.0, -0.02, DIM[o + 20], DIM[o + 21], DIM[o + 22]);
+    for (let var sd = 0; sd < 2; ++sd) {
+        // Arms: bare skin, jersey is sleeveless.
+        seg(12 + sd, 17 + sd, 0.032 * H * ta, 0.032 * H * ta, 0.027 * H * ta, 0.027 * H * ta, 0.5, 1.0, 0.0, 0.0, 0.0, skr, skg, skb);
+        seg(17 + sd, 19 + sd, 0.026 * H * ta, 0.026 * H * ta, 0.019 * H * ta, 0.019 * H * ta, 0.5, 1.0, 0.0, 0.0, 0.0, skr, skg, skb);
+        seg(19 + sd, 21 + sd, 0.17 * hl, 0.13 * hl, 0.15 * hl, 0.10 * hl, 0.0, 0.0, 1.0, 0.0, -0.02, skr, skg, skb);
+        // Legs.
+        seg(1 + sd, 26 + sd, 0.056 * H * tm, 0.054 * H * tm, 0.052 * H * tm, 0.050 * H * tm, 0.3, 0.0, 1.0, 0.0, 0.0, sh[0], sh[1], sh[2]);
+        seg(26 + sd, 3 + sd, 0.050 * H * tm, 0.048 * H * tm, 0.040 * H * tm, 0.040 * H * tm, 0.4, 0.0, 1.0, 0.0, 0.0, skr, skg, skb);
+        seg(3 + sd, 5 + sd, 0.038 * H * tm, 0.038 * H * tm, 0.024 * H * ta, 0.024 * H * ta, 0.4, 0.0, 1.0, 0.0, 0.0, skr, skg, skb);
+        seg(9 + sd, 7 + sd, 0.024 * H, hv, 0.030 * H, hv * 0.9, 0.0, 0.0, 1.0, 0.0, 0.0, DIM[o + 23], DIM[o + 24], DIM[o + 25]);
+    }
+}
+
+fun add_hoop(end) {
+    let sg = end == 0 ? 1.0 : -1.0;
+    let base = end == 0 ? 0.0 : 28.0;
+    // Backboard (glass) face 1.2 m from the baseline, 1.8 x 1.05 m.
+    add_box(base + sg * 1.225, 7.5, 2.9, 0.025, 0.9, 1.05, 0.0, 214, 228, 240);
+    // Stanchion: padded post behind the baseline and an arm to the board.
+    add_box(base - sg * 1.2, 7.5, 0.0, 0.3, 0.3, 2.6, 0.0, 40, 52, 120);
+    add_box(base - sg * 1.2, 7.5, 2.6, 0.12, 0.12, 0.9, 0.0, 70, 70, 76);
+    add_box(base + sg * 0.1, 7.5, 3.3, 1.3, 0.06, 0.1, 0.0, 70, 70, 76);
+    add_item(2, end, depth_of(RIM_X[end], 7.5, RIM_Z));
+}
+
+// ---------------------------------------------------------------- frame
+
+let SM_CAMBX = 14.0;
+let CAMSTATE = Array.with_size(8, 0.0);  // 0 smoothed ball x, 1 end-line camera x, 2 end
+
+let CAM_NAMES = ["Broadcast", "Orbit", "Top-down", "End line"];
+let ORBIT = [args.yaw, args.pitch, args.dist];
+
+fun setup_camera(mode, dt, snap) {
+    let bx = SM[0];
+    let by = SM[1];
+    if (snap) {
+        CAMSTATE[0] = bx;
+        CAMSTATE[1] = bx < 14.0 ? -6.0 : 34.0;
+        CAMSTATE[2] = bx < 14.0 ? 0.0 : 1.0;
+    }
+    let k = 1.0 - (-3.0 * dt).exp();
+    CAMSTATE[0] = CAMSTATE[0] + (bx - CAMSTATE[0]) * k;
+    let sbx = CAMSTATE[0];
+    if (mode == 0) {
+        let tx = sbx.clip(5.5, 22.5);
+        let ex = (tx * 0.7 + 14.0 * 0.3).clip(7.5, 20.5);
+        look_at(ex, -14.0, 11.0, tx, 6.2, 0.0);
+    } else if (mode == 1) {
+        let tx = 14.0 * 0.4 + sbx * 0.6;
+        let ty = 7.5;
+        let tz = 0.8;
+        let yaw = ORBIT[0];
+        let pit = ORBIT[1];
+        let d = ORBIT[2];
+        let hd = d * pit.cos();
+        look_at(tx + hd * yaw.cos(), ty + hd * yaw.sin(), tz + d * pit.sin(), tx, ty, tz);
+    } else if (mode == 2) {
+        set_cam(14.0, 7.5, 31.0, PI * 0.5, -PI * 0.5);
+    } else {
+        if (CAMSTATE[2] < 0.5 && bx > 17.0) CAMSTATE[2] = 1.0;
+        if (CAMSTATE[2] > 0.5 && bx < 11.0) CAMSTATE[2] = 0.0;
+        let want = CAMSTATE[2] < 0.5 ? -7.0 : 35.0;
+        CAMSTATE[1] = CAMSTATE[1] + (want - CAMSTATE[1]) * (1.0 - (-1.5 * dt).exp());
+        look_at(CAMSTATE[1], -3.0, 7.0, sbx, by, 1.0);
+    }
+}
+
+fun sort_items() {
+    for (let var i = 0; i < NI; ++i) ORD[i] = i;
+    // Far to near: larger squared distance first.
+    for (let var i = 1; i < NI; ++i) {
+        let id = ORD[i];
+        let key = IK[id];
+        let var j = i;
+        while (j > 0 && IK[ORD[j - 1]] < key) {
+            ORD[j] = ORD[j - 1];
+            j -= 1;
+        }
+        ORD[j] = id;
+    }
+}
+
+fun floor_shadow_color(x, y) {
+    let inkey = y > 5.05 && y < 9.95 && (x < 5.8 || x > 22.2);
+    if (inkey) return rgb(120, 48, 44);
+    if (x < 0.0 || x > 28.0 || y < 0.0 || y > 15.0) return rgb(110, 80, 52);
+    return rgb(140, 100, 64);
+}
+
+let LINEUP = args.lineup;
+let FOCUS = args.focus.clip(-1, 9);
+
+// Debug: the ten players in a row in a fixed pose, to compare builds.
+fun apply_lineup() {
+    let pose = args.pose;
+    let var fx = 0.0;
+    let var fy = -1.0;
+    if (LINEUP == 2) {
+        fx = 1.0;
+        fy = 0.0;
+    } else if (LINEUP == 3) {
+        fx = 0.0;
+        fy = 1.0;
+    }
+    let var v = 0.0;
+    let var st = 0.0;
+    let var dx = fx;
+    let var dy = fy;
+    if (pose == 1) st = 1.0;
+    else if (pose == 2 || pose == 5) v = 4.5;
+    else if (pose == 3) v = 1.4;
+    else if (pose == 4) {
+        st = 1.0;
+        v = 2.0;
+        dx = -fy;
+        dy = fx;
+    }
+    for (let var k = 0; k < 10; ++k) {
+        PX[k] = 14.0 + (k - 4.5) * 1.2;
+        PY[k] = 7.5;
+        PFX[k] = fx;
+        PFY[k] = fy;
+        PVX[k] = dx * v;
+        PVY[k] = dy * v;
+        PST[k] = st;
+        PPH[k] = args.phase;
+        PPB[k] = args.phase;
+    }
+    SM[3] = (pose == 5 || pose == 6) ? 4.0 : -1.0;
+    SM[2] = 1.0;
+}
+
+fun render_scene(t, dt, snap, mode) {
+    let fi = sample(t);
+    if (LINEUP > 0) apply_lineup();
+    SM[7] = t;
+    if (LINEUP > 0 && FOCUS < 0) {
+        look_at(14.0, 7.5 - args.fdist * 2.4, 1.25, 14.0, 7.5, 0.95);
+    } else if (FOCUS >= 0) {
+        let tz = DIM[PWHO[FOCUS] * DS] * 0.5;
+        let fa = atan2(PFY[FOCUS], PFX[FOCUS]) + ORBIT[0];
+        let hd = args.fdist * ORBIT[1].cos();
+        look_at(PX[FOCUS] + hd * fa.cos(), PY[FOCUS] + hd * fa.sin(), tz + args.fdist * ORBIT[1].sin(),
+                PX[FOCUS], PY[FOCUS], tz);
+    } else {
+        setup_camera(mode, dt, snap);
+    }
+
+    // Backdrop.
+    for (let var y = 0; y < H; ++y) {
+        let u = y / H;
+        FB.fill_u32(y * W, W, rgb((18 + 14 * u).floor(), (22 + 16 * u).floor(), (34 + 20 * u).floor()));
+    }
+    draw_court();
+
+    NB = 0;
+    NI = 0;
+    NS = 0;
+    // Shadows, below everything that stands.
+    for (let var k = 0; k < 10; ++k) {
+        let r = 0.18 + 0.45 * DIM[PWHO[k] * DS + 1];
+        floor_disc(PX[k], PY[k], r, r, floor_shadow_color(PX[k], PY[k]));
+    }
+    // The ball is attached to the carrier's hand when the recording has him
+    // holding it (ball height about 1 m); otherwise it is where it was recorded.
+    let var bz = SM[2];
+    let var bsx = SM[0];
+    let var bsy = SM[1];
+    let hold = SM[3];
+    let var hk = -1;
+    if (hold >= 0.0) {
+        if (bz < 1.05 && bz > 0.95) hk = hold.floor();
+    }
+    for (let var k = 0; k < 10; ++k) build_player(k, k == hk);
+    if (hk >= 0) {
+        bsx = BALLW[0];
+        bsy = BALLW[1];
+        bz = BALLW[2];
+    }
+    let shr = 0.14 + bz * 0.012;
+    floor_disc(bsx, bsy, shr, shr, rgb(96, 60, 38));
+    if (hk >= 0) {
+        for (let var i = 0; i < 14; ++i) {
+            let a = 2.0 * PI * i / 14;
+            let b = 2.0 * PI * (i + 1) / 14;
+            line3d(PX[hk] + 0.6 * a.cos(), PY[hk] + 0.6 * a.sin(), 0.01,
+                   PX[hk] + 0.6 * b.cos(), PY[hk] + 0.6 * b.sin(), 0.01, 3.0, rgb(255, 214, 64));
+        }
+    }
+    add_hoop(0);
+    add_hoop(1);
+    add_item(1, 0, depth_of(bsx, bsy, bz) + 0.04);
+    sort_items();
+    for (let var i = 0; i < NI; ++i) {
+        let id = ORD[i];
+        let kind = IT[id];
+        if (kind == 3) draw_seg(IA[id]);
+        else if (kind == 0) draw_box(IA[id]);
+        else if (kind == 1) draw_ball(bsx, bsy, bz);
+        else draw_rim(IA[id]);
+    }
+    return fi;
+}
+
+// ---------------------------------------------------------------- HUD
+
+let PANEL = 0xFF12172A;
+let FONT_S = Font(1.5, 0xFFE8ECF4, PANEL);
+let FONT_DIM = Font(1.5, 0xFF8892A8, PANEL);
+let FONT_M = Font(2, 0xFFFFFFFF, PANEL);
+let FONT_L = Font(3, 0xFFFFFFFF, PANEL);
+let FONT_HELP = Font(1.5, 0xFFE8ECF4, PANEL);
+let var TCACHE = {};
+
+fun text_img(font, tag, s) {
+    let key = tag + "|" + s;
+    if (TCACHE.has(key)) return TCACHE[key];
+    if (TCACHE.keys().len > 300) TCACHE = {};
+    let n = s.len.max(1);
+    let im = Image(font.char_w * n, font.char_h);
+    im.clear(font.bg_color);
+    for (let var i = 0; i < s.len; ++i) {
+        let b = s.byte_at(i);
+        let ch = (b >= 32 && b < 127) ? String.from_codepoint(b) : "?";
+        font.draw_char(im, i * font.char_w, 0, ch);
+    }
+    TCACHE[key] = im;
+    return im;
+}
+
+fun put_text(font, tag, s, x, y) {
+    img.blit(text_img(font, tag, s), x, y);
+}
+
+fun text_w(font, s) { return font.char_w * s.len; }
+
+fun clock_str(sec) {
+    let s = sec.floor().max(0);
+    let m = s.idiv(60);
+    let r = s % 60;
+    return m.to_s() + ":" + (r < 10 ? "0" : "") + r.to_s();
+}
+
+fun period_str(p) {
+    if (p < 4) return "Q" + (p + 1).to_s();
+    return "OT" + (p - 3).to_s();
+}
+
+fun ev_index(t) {
+    let var lo = 0;
+    let var hi = EV_T.len;
+    while (lo < hi) {
+        let mid = (lo + hi).idiv(2);
+        if (EV_T[mid] <= t) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo - 1;
+}
+
+fun clip_text(s, maxc) {
+    if (s.len <= maxc) return s;
+    return s.slice(0, maxc - 3) + "...";
+}
+
+fun draw_hud(t, fi, mode, paused, speed, help) {
+    // Score bug.
+    let bar_w = 700;
+    let bx = ((W - bar_w) / 2).floor();
+    img.fill_rect(bx, 8, bar_w, 34, PANEL);
+    img.fill_rect(bx, 8, 8, 34, rgb(TEAM_COL[0][0], TEAM_COL[0][1], TEAM_COL[0][2]));
+    img.fill_rect(bx + bar_w - 8, 8, 8, 34, rgb(TEAM_COL[1][0], TEAM_COL[1][1], TEAM_COL[1][2]));
+    let hn = TEAMS[0].upper();
+    let an = TEAMS[1].upper();
+    let mid = (W / 2).floor();
+    put_text(FONT_S, "s", hn, mid - 90 - text_w(FONT_S, hn), 16);
+    put_text(FONT_S, "s", an, mid + 90, 16);
+    let sc = FS0[fi].to_s() + " - " + FS1[fi].to_s();
+    put_text(FONT_M, "m", sc, mid - (text_w(FONT_M, sc) / 2).floor(), 12);
+    // Period and clock.
+    let pc = period_str(FPER[fi]) + "  " + clock_str(FCLK[fi]);
+    let pw = text_w(FONT_M, pc) + 24;
+    img.fill_rect(mid - (pw / 2).floor(), 42, pw, 28, PANEL);
+    put_text(FONT_M, "m", pc, mid - (text_w(FONT_M, pc) / 2).floor(), 44);
+
+    // Status, top left.
+    let st = speed.to_s() + "x " + (paused ? "PAUSED" : "PLAYING") + "  " + CAM_NAMES[mode] + " cam  H=help";
+    let sw = text_w(FONT_S, st) + 16;
+    img.fill_rect(8, H - 66 - 12 - 30, sw, 24, PANEL);
+    put_text(FONT_S, "s", st, 16, H - 66 - 12 - 27);
+
+    // Play by play, bottom.
+    let ei = ev_index(t);
+    let ph = 66;
+    let py0 = H - ph - 12;
+    img.fill_rect(8, py0, W - 16, ph, PANEL);
+    let maxc = ((W - 40) / FONT_S.char_w).floor();
+    for (let var j = 0; j < 3; ++j) {
+        let e = ei - j;
+        if (e < 0) continue;
+        let ef = frame_at(EV_T[e]);
+        let line = period_str(FPER[ef]) + " " + clock_str(FCLK[ef]) + "  " + EV_TXT[e];
+        let f = j == 0 ? FONT_S : FONT_DIM;
+        put_text(f, j == 0 ? "s" : "d", clip_text(line, maxc), 18, py0 + 6 + (2 - j) * 19);
+    }
+    // Progress bar.
+    img.fill_rect(0, H - 6, W, 6, PANEL);
+    let prog = (W * t / DURATION).floor().clip(0, W);
+    img.fill_rect(0, H - 5, prog, 4, rgb(240, 160, 50));
+    for (let var q = 1; q < 4; ++q) img.fill_rect((W * q / 4).floor(), H - 6, 1, 6, rgb(120, 130, 150));
+
+    if (help) draw_help();
+}
+
+fun draw_help() {
+    let lines = [
+        "KEYS",
+        "",
+        "SPACE or P   pause / resume",
+        "1 2 4        speed 1x 2x 4x",
+        "LEFT RIGHT   seek -5 s / +5 s",
+        "DOWN UP      seek -30 s / +30 s",
+        "R            restart",
+        "C            next camera",
+        "B O T E      broadcast, orbit, top-down, end line",
+        "A D W S      orbit camera: turn and tilt",
+        "Z X          orbit camera: zoom in / out",
+        "H            show / hide this help",
+        "Q or ESC     quit"
+    ];
+    let w = 590;
+    let h = lines.len * 20 + 20;
+    let x = ((W - w) / 2).floor();
+    let y = ((H - h) / 2).floor();
+    img.fill_rect(x, y, w, h, PANEL);
+    for (let var i = 0; i < lines.len; ++i) {
+        if (lines[i].len > 0) put_text(FONT_HELP, "h", lines[i], x + 18, y + 12 + i * 20);
+    }
+}
+
+// ---------------------------------------------------------------- main
+
+let var game_t = args.at;
+if (game_t > DURATION) game_t = DURATION;
+let var cam_mode = (args.cam - 1).clip(0, 3);
+
+if (args.screenshot != nil) {
+    let nseq = args.seq;
+    let var base = args.screenshot;
+    if (nseq > 0 && base.len > 4 && base.slice(base.len - 4, base.len) == ".tga") base = base.slice(0, base.len - 4);
+    let count = nseq > 0 ? nseq : 1;
+    for (let var i = 0; i < count; ++i) {
+        let tt = (game_t + i * args.seqstep).min(DURATION);
+        let fi = render_scene(tt, 0.0, true, cam_mode);
+        if (!args.nohud) draw_hud(tt, fi, cam_mode, false, 1, args.show_help);
+        let name = nseq > 0 ? base + "_" + (i < 10 ? "0" : "") + i.to_s() + ".tga" : base;
+        let path = args.outdir == nil ? name : args.outdir + "/" + name;
+        if (!save_tga(path, img)) {
+            $println("could not write " + path);
+            $exit(1);
+        }
+        $println("wrote " + path);
+    }
+    $exit(0);
+}
+
+if (args.bench > 0) {
+    let n = args.bench;
+    let var total_scene = 0;
+    let var total_hud = 0;
+    let var tt = game_t;
+    for (let var i = 0; i < n; ++i) {
+        let a = $time_current_ms();
+        let fi = render_scene(tt, 0.03, i == 0, cam_mode);
+        let b = $time_current_ms();
+        draw_hud(tt, fi, cam_mode, false, 1, false);
+        let c = $time_current_ms();
+        total_scene += b - a;
+        total_hud += c - b;
+        tt += 0.1;
+        if (tt > DURATION) tt = 0.0;
+    }
+    $println("camera " + CAM_NAMES[cam_mode] + " " + W.to_s() + "x" + H.to_s() + " frames " + n.to_s()
+             + ": scene " + (total_scene.to_f() / n).format_decimals(1) + " ms, hud "
+             + (total_hud.to_f() / n).format_decimals(2) + " ms, "
+             + (1000.0 / ((total_scene + total_hud).to_f() / n)).format_decimals(1) + " fps");
+    $exit(0);
+}
+
+$println("motion tables built in " + (t_mot1 - t_mot0).to_s() + " ms");
+$println("basketman 3D viewer: " + TEAMS[0] + " vs " + TEAMS[1] + ", "
+         + NF.to_s() + " frames, " + clock_str(DURATION) + " of play, loaded in "
+         + (t_load1 - t_load0).to_s() + " ms");
+$println("Keys:");
+$println("  SPACE / P  pause or resume      1 2 4      speed 1x 2x 4x");
+$println("  LEFT RIGHT seek -5 s / +5 s     DOWN UP    seek -30 s / +30 s");
+$println("  R          restart              C          next camera");
+$println("  B O T E    broadcast, orbit, top-down, end-line camera");
+$println("  A D W S    orbit camera turn and tilt      Z X  orbit zoom");
+$println("  H          help overlay         Q / ESC    quit");
+
+let window = $window_create(W, H, "basketman 3D match viewer", 0);
+let var paused = false;
+let var speed = 1;
+let var help = args.show_help;
+let var help_until = $time_current_ms() + 6000;
+let var last_ms = $time_current_ms();
+let var snap = true;
+let held = {};
+let var fps_t = last_ms;
+let var fps_n = 0;
+let var fps_render = 0;
+
+loop {
+    let var quit = false;
+    loop {
+        let ev = $actor_poll();
+        if (ev == nil) break;
+        if (!(ev instanceof UIEvent)) continue;
+        if (ev.kind == 'CLOSE_WINDOW') quit = true;
+        if (ev.kind == 'KEY_UP') held[ev.key] = false;
+        if (ev.kind == 'KEY_DOWN') {
+            let k = ev.key;
+            held[k] = true;
+            if (k == 'ESCAPE' || k == 'Q') quit = true;
+            else if (k == 'SPACE' || k == 'P') paused = !paused;
+            else if (k == '1') speed = 1;
+            else if (k == '2') speed = 2;
+            else if (k == '4') speed = 4;
+            else if (k == 'LEFT') game_t = (game_t - 5.0).max(0.0);
+            else if (k == 'RIGHT') game_t = (game_t + 5.0).min(DURATION);
+            else if (k == 'DOWN') game_t = (game_t - 30.0).max(0.0);
+            else if (k == 'UP') game_t = (game_t + 30.0).min(DURATION);
+            else if (k == 'R') game_t = 0.0;
+            else if (k == 'C') cam_mode = (cam_mode + 1) % 4;
+            else if (k == 'B') cam_mode = 0;
+            else if (k == 'O') cam_mode = 1;
+            else if (k == 'T') cam_mode = 2;
+            else if (k == 'E') cam_mode = 3;
+            else if (k == 'H') { help = !help; help_until = 0; }
+            if (k == 'LEFT' || k == 'RIGHT' || k == 'DOWN' || k == 'UP' || k == 'R') snap = true;
+        }
+    }
+    if (quit) break;
+
+    let now = $time_current_ms();
+    let dt = ((now - last_ms).to_f() * 0.001).min(0.1);
+    last_ms = now;
+    if (!paused) game_t += dt * speed;
+    if (game_t >= DURATION) {
+        game_t = DURATION;
+        paused = true;
+    }
+    if (help_until > 0 && now > help_until) {
+        help = false;
+        help_until = 0;
+    }
+    let turn = ((held.get_or('D', false) ? 1.0 : 0.0) - (held.get_or('A', false) ? 1.0 : 0.0)) * 1.4 * dt;
+    let tilt = ((held.get_or('W', false) ? 1.0 : 0.0) - (held.get_or('S', false) ? 1.0 : 0.0)) * 0.8 * dt;
+    let zoom = ((held.get_or('X', false) ? 1.0 : 0.0) - (held.get_or('Z', false) ? 1.0 : 0.0)) * 12.0 * dt;
+    ORBIT[0] = ORBIT[0] + turn;
+    ORBIT[1] = (ORBIT[1] + tilt).clip(0.12, 1.5);
+    ORBIT[2] = (ORBIT[2] + zoom).clip(6.0, 60.0);
+
+    let r0 = $time_current_ms();
+    let fi = render_scene(game_t, dt, snap, cam_mode);
+    snap = false;
+    draw_hud(game_t, fi, cam_mode, paused, speed, help);
+    fps_render += $time_current_ms() - r0;
+    $window_draw_frame(window, FB);
+    fps_n += 1;
+    if (now - fps_t >= 2000) {
+        if (args.fps) {
+            $println("fps " + (fps_n * 1000.0 / (now - fps_t)).format_decimals(1)
+                     + ", render " + (fps_render.to_f() / fps_n).format_decimals(1) + " ms/frame"
+                     + ", t=" + game_t.format_decimals(1));
+        }
+        fps_t = now;
+        fps_n = 0;
+        fps_render = 0;
+    }
+    $actor_sleep(1);
+}

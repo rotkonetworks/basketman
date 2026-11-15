@@ -1,0 +1,22 @@
+[workspace]
+resolver = "3"
+members = ["crates/core", "crates/cli", "crates/web"]
+default-members = ["crates/core", "crates/cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+basketman-core = { path = "crates/core", default-features = false }
+serde = { version = "1", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+
+# The match engine is simulated thousands of times in tests and is painfully
+# slow unoptimised.
+[profile.dev.package.basketman-core]
+opt-level = 3

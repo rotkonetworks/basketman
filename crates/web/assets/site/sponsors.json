@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "_comment": "Real advertisers. Each entry maps slots to a PNG next to this file ('image' for the long boards, drawn 4:1, and optionally 'image_square' for the square ones). Selectors: all, courtside, table_side, far_side, baseline, baseline_west, baseline_east, centre, padding, table, or a slot number (0-5 far sideline as the camera sees it, 6-11 near sideline, 12-13 west baseline, 14-15 east baseline, 16 centre circle, 17-18 basket padding, 19 scorer's table). 'clubs' (team or arena names) is optional. The first matching entry wins; slots no entry names show the in-game sponsor. 'vector' and 'vector_square' (triangle files made by tools/board_mesh.py) draw the board as geometry in 'ink' on 'bg', which stays sharp at any distance; the PNGs are the fallback.",
+  "boards": [
+    {
+      "name": "Rotko Networks",
+      "image": "sponsors/rotko-wide-dark.png",
+      "image_square": "sponsors/rotko-square-dark.png",
+      "slots": [
+        "centre",
+        "table",
+        "8",
+        "9",
+        "13",
+        "14"
+      ],
+      "bg": [
+        50,
+        65,
+        76
+      ],
+      "vector": "sponsors/rotko-wide.json",
+      "vector_square": "sponsors/rotko-square.json",
+      "ink": [
+        255,
+        255,
+        255
+      ]
+    },
+    {
+      "name": "Rotko Networks",
+      "image": "sponsors/rotko-wide-light.png",
+      "image_square": "sponsors/rotko-square-light.png",
+      "slots": [
+        "2",
+        "3",
+        "padding"
+      ],
+      "bg": [
+        255,
+        255,
+        255
+      ],
+      "vector": "sponsors/rotko-wide.json",
+      "vector_square": "sponsors/rotko-square.json",
+      "ink": [
+        50,
+        65,
+        76
+      ]
+    }
+  ],
+  "_example": [
+    {
+      "name": "Acme Hoops",
+      "image": "sponsors/acme.png",
+      "image_square": "sponsors/acme-square.png",
+      "slots": [
+        "courtside",
+        "centre"
+      ],
+      "clubs": [
+        "Helsinki Kings"
+      ],
+      "bg": [
+        255,
+        255,
+        255
+      ],
+      "vector": "sponsors/acme.json",
+      "ink": [
+        20,
+        20,
+        20
+      ]
+    }
+  ]
+}

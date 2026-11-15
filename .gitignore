@@ -1,0 +1,5 @@
+/target
+/crates/web/dist
+# Server details for the hosted demo; kept out of the public repository.
+/docs/deploy.md
+__pycache__/

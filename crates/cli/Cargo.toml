@@ -1,0 +1,19 @@
+[package]
+name = "basketman-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "basketman"
+path = "src/main.rs"
+
+[features]
+default = ["parallel"]
+# Multi-threaded round simulation; see basketman-core.
+parallel = ["basketman-core/parallel"]
+
+[dependencies]
+basketman-core.workspace = true
+serde.workspace = true
+serde_json = { version = "1", features = ["float_roundtrip"] }

@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Basketman: run the club, coach the game</title>
+    <meta
+      name="description"
+      content="A basketball management game that plays in your browser. Build the roster, draw the plays, and coach every possession from the bench."
+    />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Ccircle cx='24' cy='24' r='22' fill='%23e86a1c' stroke='%231b1822' stroke-width='2.2'/%3E%3Cpath d='M2 24h44M24 2v44M10.4 6.6c7 9.6 7 25.2 0 34.8M37.6 6.6c-7 9.6-7 25.2 0 34.8' fill='none' stroke='%231b1822' stroke-width='2.2'/%3E%3C/svg%3E"
+    />
+    <link data-trunk rel="rust" data-bin="basketman-web" />
+    <link data-trunk rel="copy-dir" href="assets/site" />
+    <link data-trunk rel="copy-file" href="assets/Inter-Regular.ttf" />
+    <link data-trunk rel="copy-file" href="assets/Inter-SemiBold.ttf" />
+    <link data-trunk rel="copy-file" href="assets/JetBrainsMono-Regular.ttf" />
+    <style>
+      @font-face { font-family: "Inter"; font-weight: 400; src: url("Inter-Regular.ttf"); font-display: swap; }
+      @font-face { font-family: "Inter"; font-weight: 600; src: url("Inter-SemiBold.ttf"); font-display: swap; }
+      @font-face { font-family: "JetBrains Mono"; font-weight: 400; src: url("JetBrainsMono-Regular.ttf"); font-display: swap; }
+
+      :root {
+        --bg: #faf8f3;
+        --card: #fdfcf9;
+        --ink: #1b1822;
+        --dim: #4c4856;
+        --mute: #6a6676;
+        --line: #e6e1d5;
+        --line-2: #d8d2c3;
+        --accent: #6243d9;
+        --ball: #e86a1c;
+        --sans: "Inter", system-ui, sans-serif;
+        --mono: "JetBrains Mono", ui-monospace, monospace;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); }
+      canvas#app { width: 100%; height: 100%; display: block; touch-action: none; }
+      html, body { height: 100dvh; overscroll-behavior: none; }
+
+      /* The site sits over the game, which loads underneath it. */
+      #site {
+        position: fixed; inset: 0; z-index: 10; overflow-y: auto;
+        background: var(--bg); color: var(--ink);
+        font: 400 17px/1.55 var(--sans);
+        -webkit-font-smoothing: antialiased;
+      }
+      #site.away { display: none; }
+      .spectrum {
+        height: 3px;
+        background: linear-gradient(90deg, #6243d9, #3d8bf2, #1c9152, #e8b21c, #e86a1c);
+      }
+      .wrap { max-width: 1180px; margin: 0 auto; padding: 0 28px; }
+      a { color: inherit; }
+
+      nav { display: flex; align-items: center; gap: 28px; padding: 18px 0; }
+      .mark { display: flex; align-items: center; gap: 10px; text-decoration: none; font: 400 18px var(--mono); letter-spacing: -0.01em; }
+      .mark svg { width: 24px; height: 24px; }
+      nav .links { display: flex; gap: 22px; margin-left: 18px; }
+      nav .links a {
+        font: 400 11.5px var(--mono); letter-spacing: 0.11em; text-transform: uppercase;
+        text-decoration: none; color: var(--mute);
+      }
+      nav .links a:hover { color: var(--ink); }
+      nav .spacer { flex: 1; }
+
+      .eyebrow { font: 400 11.5px var(--mono); letter-spacing: 0.11em; text-transform: uppercase; color: var(--mute); }
+      .eyebrow b { font-weight: 400; color: var(--accent); }
+
+      button.play {
+        font: 600 16px var(--sans); color: #fff; background: var(--ink);
+        border: 0; border-radius: 10px; padding: 13px 24px; cursor: pointer;
+        transition: transform 0.12s ease, background 0.12s ease;
+      }
+      button.play:hover { background: var(--accent); transform: translateY(-1px); }
+      button.play:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+      button.play.small { font-size: 14px; padding: 9px 16px; border-radius: 8px; }
+      button.play.big { font-size: 19px; padding: 17px 34px; border-radius: 12px; }
+
+      /* The choice of how to start */
+      .start { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; max-width: 600px; }
+      .start .way {
+        text-align: left; cursor: pointer; font: inherit; color: inherit;
+        background: var(--card); border: 1px solid var(--line-2); border-radius: 12px;
+        padding: 16px 18px 15px; transition: transform 0.12s ease, border-color 0.12s ease;
+      }
+      .start .way b { display: block; font: 600 18px/1.2 var(--sans); margin-bottom: 5px; }
+      .start .way span { display: block; font-size: 14px; line-height: 1.4; color: var(--dim); }
+      .start .way.main { background: var(--ink); border-color: var(--ink); color: #fff; }
+      .start .way.main span { color: #cfcbd8; }
+      .start .way:hover:not(:disabled) { transform: translateY(-1px); border-color: var(--accent); }
+      .start .way.main:hover:not(:disabled) { background: var(--accent); }
+      .start .way:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+      .start .way:disabled { cursor: default; opacity: 0.6; }
+      .start-note { font: 400 12.5px/1.5 var(--mono); color: var(--mute); margin: 12px 0 0; }
+      .close .start { margin: 0 auto; }
+
+      /* Hero */
+      .hero { position: relative; padding: 56px 0 0; overflow: hidden; }
+      .hero .wrap { position: relative; min-height: 560px; }
+      .hero .copy { position: relative; z-index: 2; max-width: 640px; padding-top: 34px; }
+      h1 {
+        font: 600 clamp(44px, 7.2vw, 88px)/0.98 var(--sans);
+        letter-spacing: -0.035em; margin: 18px 0 22px;
+      }
+      h1 em { font-style: normal; color: var(--accent); }
+      .lede { font-size: 20px; color: var(--dim); max-width: 540px; margin: 0 0 30px; }
+      .cta { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+      .cta small { font: 400 12.5px var(--mono); color: var(--mute); line-height: 1.5; }
+      .hero img.wilt {
+        position: absolute; right: -10px; top: -70px; width: 430px; z-index: 1;
+        opacity: 0.9; pointer-events: none; user-select: none;
+        -webkit-mask-image: linear-gradient(#000 78%, transparent 99%);
+        mask-image: linear-gradient(#000 78%, transparent 99%);
+      }
+
+      .shot {
+        display: block; width: 100%; height: auto; border-radius: 14px;
+        border: 1px solid var(--line-2);
+        box-shadow: 0 1px 0 #fff inset, 0 24px 60px -28px rgba(27, 24, 34, 0.35);
+        background: var(--card);
+      }
+      .stage { position: relative; z-index: 3; margin-top: 40px; padding-bottom: 20px; }
+      .stage figcaption, .feature figcaption {
+        font: 400 12px var(--mono); color: var(--mute); margin-top: 10px;
+      }
+      figure { margin: 0; }
+
+      /* Numbers strip */
+      .facts {
+        display: grid; grid-template-columns: repeat(4, 1fr); gap: 0;
+        margin: 64px 0 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+      }
+      .facts div { padding: 26px 22px; border-left: 1px solid var(--line); }
+      .facts div:first-child { border-left: 0; padding-left: 0; }
+      .facts strong { display: block; font: 600 34px/1.1 var(--sans); letter-spacing: -0.02em; }
+      .facts span { font-size: 14.5px; color: var(--dim); }
+
+      /* Features */
+      section.features { padding: 40px 0 20px; }
+      .feature {
+        display: grid; grid-template-columns: 5fr 6fr; gap: 56px; align-items: center;
+        padding: 64px 0; border-bottom: 1px solid var(--line);
+      }
+      .feature:last-child { border-bottom: 0; }
+      .feature.flip { grid-template-columns: 6fr 5fr; }
+      .feature.flip .text { order: 2; }
+      .feature h2 { font: 600 36px/1.08 var(--sans); letter-spacing: -0.025em; margin: 12px 0 14px; }
+      .feature p { color: var(--dim); margin: 0 0 16px; }
+      .feature ul { list-style: none; padding: 0; margin: 0; }
+      .feature li {
+        padding: 9px 0 9px 22px; border-top: 1px solid var(--line); font-size: 15.5px; position: relative;
+      }
+      .feature li::before {
+        content: ""; position: absolute; left: 2px; top: 18px; width: 7px; height: 7px;
+        border-radius: 50%; background: var(--ball);
+      }
+
+      /* Closing */
+      .close { text-align: center; padding: 84px 0 70px; }
+      .close h2 { font: 600 clamp(34px, 5vw, 56px)/1.02 var(--sans); letter-spacing: -0.03em; margin: 0 0 14px; }
+      .close p { color: var(--dim); max-width: 560px; margin: 0 auto 30px; }
+      .note {
+        max-width: 620px; margin: 34px auto 0; padding: 14px 18px; text-align: left;
+        border: 1px solid var(--line-2); border-radius: 10px; background: var(--card);
+        font-size: 14.5px; color: var(--dim);
+      }
+      .note b { color: var(--ink); font-weight: 600; }
+
+      footer { border-top: 1px solid var(--line); padding: 26px 0 40px; font: 400 12px/1.7 var(--mono); color: var(--mute); }
+      footer .wrap { display: flex; justify-content: space-between; gap: 24px; flex-wrap: wrap; }
+
+      @media (max-width: 900px) {
+        nav .links { display: none; }
+        .start { grid-template-columns: 1fr; }
+        .hero { padding-top: 20px; }
+        .hero .wrap { min-height: 0; }
+        .hero img.wilt { width: 300px; right: -90px; top: -20px; opacity: 0.28; }
+        .stage { margin-top: 44px; }
+        .facts { grid-template-columns: repeat(2, 1fr); }
+        .facts div:nth-child(3) { border-left: 0; padding-left: 0; }
+        .facts div:nth-child(n + 3) { border-top: 1px solid var(--line); }
+        .feature, .feature.flip { grid-template-columns: 1fr; gap: 26px; padding: 44px 0; }
+        .feature.flip .text { order: 0; }
+        .feature h2 { font-size: 29px; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        button.play, .start .way { transition: none; }
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="app"></canvas>
+
+    <div id="site">
+      <div class="spectrum"></div>
+
+      <div class="wrap">
+        <nav>
+          <a class="mark" href="#top" aria-label="Basketman">
+            <svg viewBox="0 0 48 48" aria-hidden="true">
+              <circle cx="24" cy="24" r="22" fill="#e86a1c" stroke="#1b1822" stroke-width="2.2" />
+              <path d="M2 24h44M24 2v44M10.4 6.6c7 9.6 7 25.2 0 34.8M37.6 6.6c-7 9.6-7 25.2 0 34.8" fill="none" stroke="#1b1822" stroke-width="2.2" />
+            </svg>
+            basketman
+          </a>
+          <div class="links">
+            <a href="#matchday">Match day</a>
+            <a href="#board">Tactics</a>
+            <a href="#squad">Squad</a>
+            <a href="#office">Front office</a>
+          </div>
+          <div class="spacer"></div>
+          <button class="play small" data-start>Play</button>
+        </nav>
+      </div>
+
+      <header class="hero" id="top">
+        <div class="wrap">
+          <img class="wilt" src="site/wilt.png" alt="" />
+          <div class="copy">
+            <div class="eyebrow">Basketball management <b>/</b> plays in your browser</div>
+            <h1>Run the club.<br /><em>Coach the game.</em></h1>
+            <p class="lede">
+              Take over a club, build the roster, draw the plays on the board, and then stand on the
+              touchline while every possession is played out in front of you.
+            </p>
+            <div class="start" data-choice>
+              <button class="way main" data-go="new">
+                <b>New career</b>
+                <span>Pick one of twelve clubs and start from week one.</span>
+              </button>
+              <button class="way" data-go="continue" disabled>
+                <b>Continue career</b>
+                <span data-saved>No career saved in this browser yet.</span>
+              </button>
+            </div>
+            <p class="start-note">Free. Nothing to install. No account. Your career is kept in this browser.</p>
+          </div>
+        </div>
+        <div class="wrap stage">
+          <figure>
+            <img class="shot" src="site/match.jpg" width="968" height="562" alt="A match in 3D: ten players on the court in the home club's arena, with a crowd in the stands and sponsor boards along the sides." />
+            <figcaption>Match day, in the home club's own arena. What you see is the simulation itself: bodies built to each player's measurements, a shot clock, a real box score.</figcaption>
+          </figure>
+        </div>
+      </header>
+
+      <div class="wrap">
+        <div class="facts">
+          <div><strong>12 clubs</strong><span>each with its own general manager, head coach and way of playing</span></div>
+          <div><strong>22 rounds</strong><span>then best-of-three playoffs for the top four, and a draft</span></div>
+          <div><strong>21 attributes</strong><span>per player, plus a body, a character, a medical record and a name to make</span></div>
+          <div><strong>Every game</strong><span>in the league is played out, so every box score can be scouted</span></div>
+        </div>
+      </div>
+
+      <section class="features">
+        <div class="wrap">
+          <article class="feature" id="matchday">
+            <div class="text">
+              <div class="eyebrow">Match day</div>
+              <h2>You are on the bench, not watching a replay.</h2>
+              <p>The match waits for you. Change what is not working while there is still time to change it.</p>
+              <ul>
+                <li>Call timeouts to stop a run before it becomes a rout</li>
+                <li>Shout from the touchline: lift them, calm them, demand more</li>
+                <li>Make substitutions and switch offense, defense and press mid-game</li>
+                <li>Watch in 3D, from above, or as commentary only</li>
+                <li>A film room afterwards: your best attacks and what went wrong</li>
+              </ul>
+            </div>
+            <figure>
+              <img class="shot" src="site/live.jpg" width="1200" height="711" loading="lazy" alt="A live match: the court in 3D, the play-by-play, your bench and the other team's bench." />
+            </figure>
+          </article>
+
+          <article class="feature flip" id="board">
+            <div class="text">
+              <div class="eyebrow">Tactics</div>
+              <h2>Draw it on the board. They run it.</h2>
+              <p>Pick a system, then make it yours: drag your five to where you want them and draw the runs.</p>
+              <ul>
+                <li>Five offenses, five defenses, three presses, each learned in training</li>
+                <li>A half-court board where the spots and cuts you draw are what the team plays</li>
+                <li>Tell each player what to do with the ball</li>
+                <li>Use a player out of position and he learns it, week by week</li>
+              </ul>
+            </div>
+            <figure>
+              <img class="shot" src="site/tactics.jpg" width="1200" height="607" loading="lazy" alt="The tactics screen: team instructions, the board with five players on a half court, and the squad list." />
+            </figure>
+          </article>
+
+          <article class="feature" id="squad">
+            <div class="text">
+              <div class="eyebrow">Squad</div>
+              <h2>Twelve people, not twelve rows.</h2>
+              <p>Every player has a body, a character and a career, and you can see all three.</p>
+              <ul>
+                <li>Figures built from each player's height, reach, shoulders and weight</li>
+                <li>Morale, match sharpness, injuries and a medical record</li>
+                <li>Scouting that turns a guess about another club's player into knowledge</li>
+                <li>Fame that outlasts ability: an old star still fills the hall</li>
+              </ul>
+            </div>
+            <figure>
+              <img class="shot" src="site/squad.jpg" width="1200" height="520" loading="lazy" alt="The squad screen: twelve players standing in a line as 3D figures of different builds, above the squad table." />
+            </figure>
+          </article>
+
+          <article class="feature flip" id="office">
+            <div class="text">
+              <div class="eyebrow">Front office</div>
+              <h2>Every club has someone to deal with.</h2>
+              <p>The league runs on a salary cap, trades and a draft, and the club has to pay its way.</p>
+              <ul>
+                <li>Trade players, picks and cash; each general manager values them his own way</li>
+                <li>Gate receipts, sponsors, ticket prices, board budgets and a luxury tax</li>
+                <li>Your own arena to fill, renovate and sell boards in</li>
+                <li>Coaches, scouts and a press officer to hire; an inbox that brings it all to you</li>
+              </ul>
+            </div>
+            <figure>
+              <img class="shot" src="site/finances.jpg" width="1200" height="694" loading="lazy" alt="The finances screen: board budgets, payroll against the salary cap, and a chart of money in and out by round." />
+            </figure>
+          </article>
+        </div>
+      </section>
+
+      <section class="close">
+        <div class="wrap">
+          <h2>The season starts when you do.</h2>
+          <p>Pick a club, read the board's welcome, and play your first game.</p>
+          <div class="start" data-choice>
+            <button class="way main" data-go="new">
+              <b>New career</b>
+              <span>Pick one of twelve clubs and start from week one.</span>
+            </button>
+            <button class="way" data-go="continue" disabled>
+              <b>Continue career</b>
+              <span data-saved>No career saved in this browser yet.</span>
+            </button>
+          </div>
+          <div class="note">
+            <b>Early version.</b> Your career is saved automatically in this browser after each round; a
+            match in progress is not, and a save may not survive a game update. Starting a new career
+            replaces the saved one. There is one league, and no sound.
+          </div>
+        </div>
+      </section>
+
+      <footer>
+        <div class="wrap">
+          <div>basketman / an early build</div>
+          <div>
+            Photograph: Wilt Chamberlain, 1967, public domain via Wikimedia Commons.<br />
+            Type: Inter and JetBrains Mono, SIL Open Font License.
+          </div>
+        </div>
+      </footer>
+    </div>
+
+    <script>
+      // The game loads behind the site. Choosing how to start takes the
+      // site away; the browser's back button brings it back without losing
+      // the career. The game reads the choice from the address: #new opens
+      // the club picker, #continue goes straight into the saved career.
+      (function () {
+        var site = document.getElementById("site");
+        var canvas = document.getElementById("app");
+        var playing = { "#play": 1, "#new": 1, "#continue": 1 };
+        function saved() {
+          try {
+            if (!localStorage.getItem("basketman.career")) return null;
+            return localStorage.getItem("basketman.summary") || "A career is saved in this browser.";
+          } catch (e) {
+            return null;
+          }
+        }
+        function refresh() {
+          var summary = saved();
+          document.querySelectorAll("[data-choice]").forEach(function (box) {
+            var again = box.querySelector('[data-go="continue"]');
+            var fresh = box.querySelector('[data-go="new"]');
+            again.disabled = !summary;
+            again.querySelector("[data-saved]").textContent = summary || "No career saved in this browser yet.";
+            // Whichever is the likelier choice gets the dark button.
+            again.classList.toggle("main", !!summary);
+            fresh.classList.toggle("main", !summary);
+          });
+        }
+        function show() {
+          var on = !!playing[location.hash];
+          site.classList.toggle("away", on);
+          if (on) canvas.focus();
+          else refresh();
+        }
+        document.querySelectorAll("[data-go]").forEach(function (b) {
+          b.addEventListener("click", function () {
+            location.hash = b.getAttribute("data-go");
+          });
+        });
+        document.querySelectorAll("[data-start]").forEach(function (b) {
+          b.addEventListener("click", function () {
+            var first = document.querySelector("[data-choice]");
+            first.scrollIntoView({ behavior: "smooth", block: "center" });
+            (first.querySelector(".main") || first.querySelector("button")).focus({ preventScroll: true });
+          });
+        });
+        window.addEventListener("hashchange", show);
+        show();
+      })();
+    </script>
+  </body>
+</html>

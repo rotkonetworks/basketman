@@ -1,0 +1,23 @@
+[package]
+name = "basketman-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["parallel"]
+# Multi-threaded round simulation; see basketman-core.
+parallel = ["basketman-core/parallel"]
+
+[dependencies]
+basketman-core.workspace = true
+eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "glow", "persistence", "wayland", "x11"] }
+base64 = "0.22"
+serde.workspace = true
+serde_json = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = "0.4.80"
+# Fetches the sponsor manifest and its pictures in the browser.
+ehttp = "0.5"

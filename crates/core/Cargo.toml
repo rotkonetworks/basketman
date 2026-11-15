@@ -1,0 +1,16 @@
+[package]
+name = "basketman-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["parallel"]
+# Simulate a round's games across threads. Results do not depend on it.
+parallel = ["dep:rayon"]
+
+[dependencies]
+serde.workspace = true
+serde_json = { version = "1", features = ["float_roundtrip"] }
+miniz_oxide = "0.8"
+rayon = { version = "1.10", optional = true }
