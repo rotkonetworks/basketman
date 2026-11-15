@@ -141,6 +141,9 @@ pub struct Message {
     /// player's time.
     #[serde(default)]
     pub appearance: Option<usize>,
+    /// Index into `Career::offers` when it is a club offering him a job.
+    #[serde(default)]
+    pub job: Option<usize>,
     pub read: bool,
 }
 
@@ -245,23 +248,20 @@ impl World {
         };
         let n = self.teams.len();
         let better = (0..n).filter(|&t| strength(t) > strength(team)).count();
-        let (target, wish) = if better < 3 {
-            (
-                3,
-                "The squad is among the best in the league and we expect a top-three finish.",
-            )
+        let target = self.board_target(team);
+        let wish = if target <= 3 {
+            "The squad is among the best in the league and we expect a top-three finish."
         } else if better < n / 2 {
-            (n / 2, "We see this squad in the top half of the table.")
+            "We see this squad in the top half of the table."
         } else {
-            (
-                n.saturating_sub(2),
-                "Nobody expects miracles. Keep us out of the bottom two.",
-            )
+            "Nobody expects miracles. Keep us out of the bottom two."
         };
         self.desk.expectation = target;
+        self.career_arrive(team);
         let name = self.teams[team].name.clone();
-        let body = format!(
-            "Welcome to {name}.\n\n{wish}\n\nYou have {} to work with and a wage bill of {} a week. \
+        let _ = (&name, wish);
+        let practical = format!(
+            "You have {} to work with and a wage bill of {} a week. \
              Your assistant runs training unless you take it over, and the scouts follow \
              whoever you shortlist. The coaches and scouts you inherit are on the Staff \
              page; better ones can be hired.\n\nThe season is {} rounds, one game every Saturday. \
@@ -270,14 +270,7 @@ impl World {
             money((self.wages(team) + self.teams[team].office.wages()) / 52),
             self.rounds(),
         );
-        self.post(
-            self.day,
-            Kind::Board,
-            "The board",
-            "Welcome to the club",
-            body,
-            vec![],
-        );
+        self.club_welcome(team, &practical);
         self.econ_welcome(team);
         self.preview();
     }
@@ -388,6 +381,7 @@ impl World {
             press: None,
             sponsor: None,
             appearance: None,
+            job: None,
             read: false,
         });
         self.desk.messages.last_mut().expect("just pushed")
@@ -1603,6 +1597,10 @@ mod seasons {
     fn the_draft_leads_into_the_next_season() {
         let mut w = World::generate(9, 8);
         w.take_charge(3);
+        // The board's patience is not what this test is about: nobody
+        // manages this club, and it finishes near the bottom.
+        w.club.clubs[3].board.owner.patience = 20;
+        w.club.clubs[3].board.chairman = None;
         let players = w.players.len();
         for season in 0..2 {
             loop {

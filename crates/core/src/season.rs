@@ -483,6 +483,7 @@ impl World {
         }
         self.fame_close_season(&table, champion_id, runner_up, mvp);
         self.fans_close_season(&table, champion_id);
+        self.club_close_season(&table, champion_id);
         self.summer_retirements();
         let champion = self.teams[champion_id].name.clone();
         let mvp_line = mvp.map(|p| {
@@ -582,6 +583,8 @@ impl World {
         self.reserve_summer();
         let staff_news = self.staff_summer(&crate::league::FIRST_NAMES, &crate::league::LAST_NAMES);
         self.econ_open_season();
+        self.career_fill_vacancies();
+        self.club_open_season();
 
         let Some(me) = me else { return };
         let mut body = format!(

@@ -6,8 +6,11 @@
 
 pub mod arena;
 pub mod assistant;
+pub mod board;
 pub mod books;
 pub mod budget;
+pub mod career;
+pub mod club;
 pub mod command;
 pub mod court;
 pub mod debt;
@@ -47,6 +50,8 @@ pub mod view_more;
 
 #[cfg(test)]
 mod books_tests;
+#[cfg(test)]
+mod club_tests;
 #[cfg(test)]
 mod fame_tests;
 #[cfg(test)]

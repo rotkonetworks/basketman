@@ -125,7 +125,7 @@ impl Staffer {
 
     /// `strong` is the job he is made for: that rating gets the better of
     /// the dice, the others what is left.
-    fn generate(rng: &mut Rng, strong: Job, first: &[&str], last: &[&str]) -> Staffer {
+    pub(crate) fn generate(rng: &mut Rng, strong: Job, first: &[&str], last: &[&str]) -> Staffer {
         let mut roll = |good: bool| {
             let two = (rng.range(0, 20) + rng.range(0, 20)) / 2;
             (1 + if good { two + 3 } else { two * 3 / 4 }).min(20) as u8

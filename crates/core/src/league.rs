@@ -214,6 +214,12 @@ pub struct World {
     /// Fame, fans, media work and the hall of fame; see `fame.rs`.
     #[serde(default)]
     pub fame: crate::fame::FameBook,
+    /// Each club's past and its people; see `club.rs`.
+    #[serde(default)]
+    pub club: crate::club::ClubBook,
+    /// The manager's reputation, jobs and offers; see `career.rs`.
+    #[serde(default)]
+    pub career: crate::career::Career,
 }
 
 const CITIES: [&str; 20] = [
@@ -349,9 +355,12 @@ impl World {
             round: 0,
             econ: Default::default(),
             fame: Default::default(),
+            club: Default::default(),
+            career: Default::default(),
         };
         world.econ = crate::finance::Economy::generate(seed, &world);
         world.ensure_fame();
+        world.ensure_clubs();
         world.sign_first_deals();
         world
     }
@@ -652,6 +661,8 @@ impl World {
         self.econ_after_round();
         self.fame_week(&played);
         self.send_off(&played);
+        self.club_after_round(&played);
+        self.career_fill_vacancies();
         played
     }
 }

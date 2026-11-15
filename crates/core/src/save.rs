@@ -88,6 +88,7 @@ pub fn decode(bytes: &[u8]) -> Result<World, SaveError> {
     // Saves from before arenas and sponsors existed get theirs here.
     world.ensure_economy();
     world.ensure_fame();
+    world.ensure_clubs();
     Ok(world)
 }
 
