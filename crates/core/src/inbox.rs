@@ -243,8 +243,9 @@ impl World {
             ov.sort_by(|a, b| b.total_cmp(a));
             ov.iter().take(8).sum::<f32>()
         };
-        let n = self.teams.len();
-        let better = (0..n).filter(|&t| strength(t) > strength(team)).count();
+        let mates = self.division_teams(self.teams[team].division);
+        let n = mates.len();
+        let better = mates.iter().filter(|&&t| strength(t) > strength(team)).count();
         let (target, wish) = if better < 3 {
             (
                 3,
@@ -1132,9 +1133,13 @@ impl World {
         let place = table.iter().position(|&t| t == me).unwrap_or(0) + 1;
         let mut body = String::new();
         let mut star: Option<(PlayerId, BoxLine, TeamId)> = None;
+        let my_division = self.teams[me].division;
         for &i in played {
             let f = &self.fixtures[i];
             let Some(r) = &f.result else { continue };
+            if f.division != my_division {
+                continue;
+            }
             body += &format!(
                 "{} {} - {} {}\n",
                 self.teams[f.home].name, r.score[0], r.score[1], self.teams[f.away].name

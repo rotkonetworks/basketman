@@ -110,6 +110,20 @@ def main():
         sug = p.call("suggest_tactics")
         check(len(sug["rotation"]) >= 5, "suggested rotation")
 
+        # --- calendar and divisions -------------------------------------------
+        cal = p.call("view", what="calendar", day=0)
+        check(cal["phase"] == "preseason" and cal["preseason_days"] == 28, "a new game opens in the camp")
+        check(any(e["title"] == "Training camp opens" for e in cal["events"]), "events on a day")
+        r = p.call("continue")
+        check(r["day"] == cal["day"] + 1 and "date" in r and "weekday" in r, "continue passes one day")
+        fr = p.call("view", what="calendar", **{"from": 0, "to": 40, "club": 2})
+        check(sum(e["kind"] == "Friendly" for e in fr["events"]) == 4, "four friendlies for our club")
+        summary = p.call("view", what="summary")
+        check(summary["division"] == 0 and summary["division_name"] == "First Division", "the summary names the division")
+        check(len(p.call("view", what="table", division=2)) == 8, "another division's table")
+        check(p.call("view", what="table", division=2)[0]["club"] >= 16, "a third division club")
+        _, err = p.try_call("view", what="table", division=7)
+        check(err, "no such division")
         # --- through a full round ------------------------------------------
         before = p.call("view", what="summary")
         s = to_match_day(p)

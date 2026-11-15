@@ -173,6 +173,7 @@ impl App {
     /// games link to their box score.
     pub(crate) fn fixture_list(&self, ui: &mut Ui, only: Option<TeamId>, height: f32) {
         let w = &self.world;
+        let division = crate::calendar::viewed_division(ui, w);
         egui::ScrollArea::vertical()
             .id_salt(("fixtures", only))
             .max_height(height)
@@ -185,6 +186,9 @@ impl App {
                         let mut round = usize::MAX;
                         for (i, f) in w.fixtures.iter().enumerate() {
                             if only.is_some_and(|t| f.home != t && f.away != t) {
+                                continue;
+                            }
+                            if only.is_none() && f.division != division {
                                 continue;
                             }
                             let day = f.day;
@@ -241,7 +245,11 @@ impl App {
         let w = &self.world;
         let team = &w.teams[t];
         let s = &w.standings[t];
-        let place = w.table().iter().position(|&x| x == t).map_or(0, |p| p + 1);
+        let place = w
+            .table_of(team.division)
+            .iter()
+            .position(|&x| x == t)
+            .map_or(0, |p| p + 1);
         let tactics = team.tactics();
         let games = (s.wins + s.losses).max(1) as f32;
         bd.card(ui, |ui| {

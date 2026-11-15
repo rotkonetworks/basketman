@@ -324,6 +324,7 @@ impl App {
             let name = labels[cur];
             let compact_table = name == "Table" && narrow;
             if compact_table {
+                crate::calendar::division_picker(ui, &self.world);
                 self.standings_header(ui);
             }
             egui::ScrollArea::vertical()
@@ -369,8 +370,9 @@ impl App {
     /// The league table as rows of four figures that fit a phone; the rest
     /// is on the club's page, a tap away.
     fn standings_rows(&mut self, ui: &mut Ui) {
+        let division = crate::calendar::viewed_division(ui, &self.world);
         ui.spacing_mut().item_spacing.y = 0.0;
-        for (rank, t) in self.world.table().into_iter().enumerate() {
+        for (rank, t) in self.world.table_of(division).into_iter().enumerate() {
             let s = &self.world.standings[t];
             let (r, resp) =
                 ui.allocate_exact_size(vec2(ui.available_width(), 46.0), egui::Sense::click());

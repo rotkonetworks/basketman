@@ -155,8 +155,9 @@ impl World {
             ov.sort_by(|a, b| b.total_cmp(a));
             ov.iter().take(8).sum::<f32>()
         };
-        let n = self.teams.len();
-        let better = (0..n).filter(|&t| strength(t) > strength(club)).count();
+        let mates = self.division_teams(self.teams[club].division);
+        let n = mates.len();
+        let better = mates.iter().filter(|&&t| strength(t) > strength(club)).count();
         if better < 3 {
             3
         } else if better < n / 2 {

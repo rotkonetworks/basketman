@@ -62,7 +62,7 @@ impl App {
                     .width(220.0)
                     .selected_text(&w.teams[deal.club].name)
                     .show_ui(ui, |ui| {
-                        for t in w.table() {
+                        for t in w.division_tables().into_iter().flatten() {
                             if t != me {
                                 ui.selectable_value(&mut deal.club, t, &w.teams[t].name);
                             }

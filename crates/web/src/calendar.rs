@@ -349,3 +349,48 @@ impl App {
         });
     }
 }
+
+#[allow(deprecated)]
+fn division_id() -> egui::Id {
+    egui::Id::new("league_division_viewed")
+}
+
+/// The division the League screens show: the one picked, else our own.
+pub(crate) fn viewed_division(ui: &Ui, world: &basketman_core::league::World) -> usize {
+    let mine = world.my_division();
+    let d = ui
+        .ctx()
+        .data(|d| d.get_temp::<usize>(division_id()))
+        .unwrap_or(mine);
+    d.min(world.division_count().saturating_sub(1))
+}
+
+/// A row of buttons, one per division, when there is more than one. The
+/// choice is kept for the League screens and returned.
+pub(crate) fn division_picker(ui: &mut Ui, world: &basketman_core::league::World) -> usize {
+    let now = viewed_division(ui, world);
+    if world.division_count() < 2 {
+        return now;
+    }
+    let mut pick = now;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        for d in 0..world.division_count() {
+            let label = world.division_name(d);
+            let short = label.split(' ').next().unwrap_or(&label).to_string();
+            let mine = d == world.my_division();
+            let text = if mine {
+                format!("{short} (ours)")
+            } else {
+                short
+            };
+            if ui.selectable_label(d == now, text).clicked() {
+                pick = d;
+            }
+        }
+    });
+    if pick != now {
+        ui.ctx().data_mut(|d| d.insert_temp(division_id(), pick));
+    }
+    pick
+}

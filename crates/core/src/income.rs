@@ -28,19 +28,29 @@ const MERCH_STAR: f32 = 1_000.0;
 impl World {
     /// Rounds the money in `Economy` is spread over.
     pub(crate) fn pay_rounds(&self) -> i64 {
-        (2 * self.teams.len().saturating_sub(1)).max(1) as i64
+        (self.regular_rounds()).max(1) as i64
     }
 
     /// 0-based finish last season, or by the hall's standing when there was
     /// none.
     pub fn last_finish(&self, club: TeamId) -> usize {
-        if let Some(rec) = self.history.last()
-            && let Some(p) = rec.table.iter().position(|t| t.0 == club)
-        {
-            return p;
+        if let Some(rec) = self.history.last() {
+            // Where the club finished, in the division it played in.
+            let tables: Vec<&Vec<(TeamId, u16, u16)>> = if rec.divisions.is_empty() {
+                vec![&rec.table]
+            } else {
+                rec.divisions.iter().collect()
+            };
+            if let Some(p) = tables
+                .iter()
+                .find_map(|t| t.iter().position(|r| r.0 == club))
+            {
+                return p;
+            }
         }
         let mine = self.econ.arenas[club].prestige;
-        (0..self.teams.len())
+        self.division_teams(self.teams[club].division)
+            .into_iter()
             .filter(|&t| {
                 let o = self.econ.arenas[t].prestige;
                 o > mine || (o == mine && t < club)
@@ -50,8 +60,9 @@ impl World {
 
     /// The club's broadcast money for the season.
     pub fn broadcast_season(&self, club: TeamId) -> i64 {
-        let n = self.teams.len().max(1) as i64;
-        let pool = n * BROADCAST_PER_CLUB;
+        let n = self.division_size(club).max(1) as i64;
+        let pool = (n * BROADCAST_PER_CLUB) as f32 * self.money_scale(club);
+        let pool = pool as i64;
         let equal = pool / 2 / n;
         let rank = self.last_finish(club) as i64;
         let perf = pool / 2 * (n - rank) / (n * (n + 1) / 2);

@@ -279,6 +279,7 @@ pub struct TableRow {
 pub struct FixtureView {
     pub index: usize,
     pub round: usize,
+    pub division: usize,
     pub home: TeamId,
     pub away: TeamId,
     pub home_name: String,
@@ -373,6 +374,9 @@ pub struct ArenaView {
 pub struct ClubPublic {
     pub club: TeamId,
     pub name: String,
+    /// 0 is the top division.
+    pub division: usize,
+    pub division_name: String,
     pub wins: u16,
     pub losses: u16,
     pub place: usize,
@@ -439,6 +443,9 @@ pub struct NextGame {
 pub struct Summary {
     pub club: TeamId,
     pub name: String,
+    /// 0 is the top division.
+    pub division: usize,
+    pub division_name: String,
     pub calendar: Calendar,
     pub wins: u16,
     pub losses: u16,
@@ -666,8 +673,22 @@ pub struct Market {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct LeagueView {
+pub struct DivisionView {
+    pub index: usize,
+    pub name: String,
+    /// The division of the managed club.
+    pub mine: bool,
     pub table: Vec<TableRow>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct LeagueView {
+    /// The table of the managed club's division.
+    pub division: usize,
+    pub division_name: String,
+    pub table: Vec<TableRow>,
+    /// Every division's table, the top one first.
+    pub divisions: Vec<DivisionView>,
     pub fixtures: Vec<FixtureView>,
     pub playoffs: Vec<SeriesView>,
     pub history: Vec<HistoryRow>,
@@ -950,8 +971,14 @@ impl World {
         }
     }
 
+    /// The table of the managed club's division.
     pub fn view_table(&self) -> Vec<TableRow> {
-        self.table()
+        self.view_table_of(self.my_division())
+    }
+
+    /// Any division's table.
+    pub fn view_table_of(&self, division: usize) -> Vec<TableRow> {
+        self.table_of(division)
             .into_iter()
             .enumerate()
             .map(|(i, t)| {
@@ -974,6 +1001,7 @@ impl World {
         FixtureView {
             index: i,
             round: f.round,
+            division: f.division,
             home: f.home,
             away: f.away,
             home_name: self.teams[f.home].name.clone(),
@@ -1118,10 +1146,12 @@ impl World {
         Some(ClubPublic {
             club: t,
             name: team.name.clone(),
+            division: team.division,
+            division_name: self.division_name(team.division),
             wins: s.wins,
             losses: s.losses,
             place: self
-                .table()
+                .table_of(team.division)
                 .iter()
                 .position(|&x| x == t)
                 .map_or(0, |p| p + 1),
@@ -1256,6 +1286,8 @@ impl World {
         Some(Summary {
             club,
             name: team.name.clone(),
+            division: team.division,
+            division_name: self.division_name(team.division),
             calendar: self.view_calendar(),
             wins: s.wins,
             losses: s.losses,
@@ -1365,8 +1397,17 @@ impl World {
         })
     }
 
+    /// Scoring leaders of the managed club's division.
     pub fn view_leaders(&self, n: usize) -> Vec<Leader> {
-        let mut ids: Vec<PlayerId> = (0..self.players.len() as PlayerId)
+        self.view_leaders_in(self.my_division(), n)
+    }
+
+    /// Scoring leaders of one division.
+    pub fn view_leaders_in(&self, division: usize, n: usize) -> Vec<Leader> {
+        let mut ids: Vec<PlayerId> = self
+            .division_teams(division)
+            .into_iter()
+            .flat_map(|t| self.teams[t].roster.iter().copied())
             .filter(|&p| self.games_played[p as usize] >= 3)
             .collect();
         let ppg = |p: PlayerId| {
@@ -1406,7 +1447,17 @@ impl World {
             .filter_map(|i| self.view_box_score(i))
             .collect();
         Some(LeagueView {
+            division: self.my_division(),
+            division_name: self.division_name(self.my_division()),
             table: self.view_table(),
+            divisions: (0..self.division_count())
+                .map(|d| DivisionView {
+                    index: d,
+                    name: self.division_name(d),
+                    mine: d == self.my_division(),
+                    table: self.view_table_of(d),
+                })
+                .collect(),
             fixtures: self.view_fixtures(),
             playoffs: self
                 .playoffs

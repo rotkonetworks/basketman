@@ -218,10 +218,11 @@ impl World {
     /// The season is decided: the table, the playoffs and the pull of a
     /// club's standing change its fan base for good, and the summer files
     /// the year. Called after the season's money has been settled.
-    pub(crate) fn fans_close_season(&mut self, table: &[TeamId], champion: TeamId) {
+    pub(crate) fn fans_close_season(&mut self, tables: &[Vec<TeamId>], champion: TeamId) {
         if self.fame.fans.len() != self.teams.len() {
             return;
         }
+        for table in tables {
         let n = table.len().max(2);
         for (i, &t) in table.iter().enumerate() {
             let place = 1.0 - i as f32 / (n - 1) as f32;
@@ -252,6 +253,7 @@ impl World {
             let step = (target - base) * 0.15;
             self.fame.fans[t] = (base + step).max(500.0);
             self.fame.moved[t][C_FINISH] += step;
+        }
         }
         let snapshot = self.fame.fans.clone();
         self.fame.past.push(snapshot);

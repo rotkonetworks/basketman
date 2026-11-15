@@ -11,7 +11,9 @@ use crate::theme::{self, Backdrop};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::view3d::Preset;
 
+/// Clubs in a division, and the number of divisions.
 pub(crate) const TEAMS: usize = 12;
+pub(crate) const DIVISIONS: usize = 3;
 pub(crate) const GAP: f32 = 16.0;
 /// Storage key for the court view preference.
 const VIEW_KEY: &str = "basketman.view";
@@ -202,7 +204,7 @@ impl App {
         theme::install(&cc.egui_ctx);
         #[allow(unused_mut)]
         let mut app = App {
-            world: World::generate(1, TEAMS),
+            world: World::generate_tiers(1, TEAMS, DIVISIONS),
             seed: 1,
             started: false,
             career: false,
@@ -781,7 +783,7 @@ impl App {
 
     /// Start a new career in charge of `team` in the world of `self.seed`.
     pub(crate) fn begin(&mut self, team: TeamId) {
-        self.world = World::new_career(self.seed, TEAMS);
+        self.world = World::new_career_tiers(self.seed, TEAMS, DIVISIONS);
         self.team = team;
         let _ = self.world.apply(Command::TakeCharge(team));
         self.mail = None;
@@ -1005,6 +1007,12 @@ impl App {
         bd.card(ui, |ui| {
             ui.set_width(ui.available_width());
             theme::eyebrow(ui, "Standings");
+            let division = crate::calendar::division_picker(ui, &self.world);
+            ui.label(
+                RichText::new(self.world.division_name(division))
+                    .family(theme::semibold())
+                    .color(theme::TEXT_DIM),
+            );
             ui.add_space(6.0);
             egui::Grid::new("table")
                 .striped(true)
@@ -1012,7 +1020,7 @@ impl App {
                 .show(ui, |ui| {
                     header_row(ui, &["#", "Team", "W", "L", "PF", "PA", "Diff"]);
                     ui.end_row();
-                    for (rank, t) in self.world.table().into_iter().enumerate() {
+                    for (rank, t) in self.world.table_of(division).into_iter().enumerate() {
                         let s = &self.world.standings[t];
                         ui.label(theme::mono((rank + 1).to_string()).color(theme::TEXT_MUTE));
                         self.club_link(ui, t);
@@ -1037,8 +1045,12 @@ impl App {
         bd.card(ui, |ui| {
             ui.set_width(ui.available_width());
             theme::eyebrow(ui, "Fixtures and results");
+            let division = crate::calendar::viewed_division(ui, &self.world);
             ui.label(
-                RichText::new("Every game of the season. A score opens its box score.")
+                RichText::new(format!(
+                    "{}. Every game of the season. A score opens its box score.",
+                    self.world.division_name(division)
+                ))
                     .color(theme::TEXT_DIM),
             );
             ui.add_space(6.0);

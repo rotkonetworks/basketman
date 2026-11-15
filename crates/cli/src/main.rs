@@ -1,4 +1,4 @@
-//! Headless season runner: `basketman [seed] [teams]`, or
+//! Headless season runner: `basketman [seed] [clubs per division] [divisions]`, or
 //! `basketman lab [games]` for the tactics matrix.
 //! Used to eyeball stat distributions while tuning the engine.
 //! `basketman play` is the line-delimited JSON protocol for agents and
@@ -126,8 +126,9 @@ fn main() {
     }
     let seed: u64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1);
     let n_teams: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(12);
+    let divisions: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(3);
 
-    let mut w = World::new_career(seed, n_teams);
+    let mut w = World::new_career_tiers(seed, n_teams, divisions);
     let first = w.play_round()[0];
     let f = &w.fixtures[first];
     print_box(&w, f.home, f.away, f.result.as_ref().unwrap());
@@ -135,19 +136,21 @@ fn main() {
         w.play_round();
     }
 
-    println!("\nStandings");
-    for (rank, t) in w.table().into_iter().enumerate() {
-        let s = &w.standings[t];
-        let games = (s.wins + s.losses) as f32;
-        println!(
-            "  {:>2}. {:<22} {:>2}-{:<2}  {:>5.1} - {:<5.1}",
-            rank + 1,
-            w.teams[t].name,
-            s.wins,
-            s.losses,
-            s.points_for as f32 / games,
-            s.points_against as f32 / games
-        );
+    for d in 0..w.division_count() {
+        println!("\nStandings: {}", w.division_name(d));
+        for (rank, t) in w.table_of(d).into_iter().enumerate() {
+            let s = &w.standings[t];
+            let games = (s.wins + s.losses) as f32;
+            println!(
+                "  {:>2}. {:<22} {:>2}-{:<2}  {:>5.1} - {:<5.1}",
+                rank + 1,
+                w.teams[t].name,
+                s.wins,
+                s.losses,
+                s.points_for as f32 / games,
+                s.points_against as f32 / games
+            );
+        }
     }
 
     let mut total = BoxLine::default();

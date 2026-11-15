@@ -328,7 +328,14 @@ fn halls(seed: u64, world: &World) -> Vec<Arena> {
                 0.5
             };
             let city = t.name.rsplit_once(' ').map_or(t.name.as_str(), |c| c.0);
-            Arena::generate(seed, id, city, rank)
+            let mut hall = Arena::generate(seed, id, city, rank);
+            // The lower the division, the smaller the hall.
+            let scale = crate::divisions::HALL_SCALE[t.division.min(4)];
+            if scale < 1.0 {
+                hall.capacity = ((hall.capacity as f32 * scale) as u32 / 50 * 50)
+                    .max(crate::arena::MIN_CAPACITY / 2);
+            }
+            hall
         })
         .collect()
 }
@@ -429,11 +436,6 @@ impl World {
                 _ => l.rounds.push((round, cat, amount)),
             }
         }
-    }
-
-    /// Rounds in the regular season.
-    fn regular_rounds(&self) -> usize {
-        2 * self.teams.len().saturating_sub(1)
     }
 
     /// Before a round is played: take the gate of every home game and the
@@ -636,9 +638,8 @@ impl World {
     /// open new seats, drop expired deals and tell the manager how the year
     /// went. Files the season's ledger in the history and starts a new one.
     /// Called before the table is reset.
-    pub(crate) fn econ_close_season(&mut self, table: &[TeamId], champion: TeamId) {
+    pub(crate) fn econ_close_season(&mut self, tables: &[Vec<TeamId>], champion: TeamId) {
         self.ensure_economy();
-        let n = table.len();
         let me = self.watch;
         let semi = |t: TeamId| {
             self.playoffs
@@ -651,14 +652,18 @@ impl World {
                 .any(|s| s.is_final && (s.high == t || s.low == t))
         };
         let titled = |t: TeamId| t == champion && !self.playoffs.is_empty();
-        let mut paid: Vec<(i64, i64, f32)> = vec![(0, 0, 0.0); n];
-        for (i, &t) in table.iter().enumerate() {
+        let mut paid: Vec<(i64, i64, f32)> = vec![(0, 0, 0.0); self.teams.len()];
+        for (i, &t) in tables.iter().flatten().enumerate() {
+            let table = &tables[self.teams[t].division];
+            let i = table.iter().position(|&x| x == t).unwrap_or(i);
+            let n = table.len();
             let place = if n > 1 {
                 1.0 - i as f32 / (n - 1) as f32
             } else {
                 0.5
             };
-            let mut prize = PRIZE_TOP * (n - 1 - i) as i64 / (n.max(2) - 1) as i64;
+            let mut prize = (PRIZE_TOP as f32 * self.money_scale(t)) as i64 * (n - 1 - i) as i64
+                / (n.max(2) - 1) as i64;
             let mut run = 0.0;
             if semi(t) {
                 prize += PRIZE_SEMI;
@@ -699,7 +704,10 @@ impl World {
         self.settle_bargains();
         if let Some(me) = me {
             let l = &self.econ.ledgers[me];
-            let place = table.iter().position(|&t| t == me).map_or(0, |p| p + 1);
+            let place = tables
+                .iter()
+                .find_map(|t| t.iter().position(|&x| x == me))
+                .map_or(0, |p| p + 1);
             let mut lines = String::new();
             for c in Cat::ALL {
                 if l.total(c) != 0 {

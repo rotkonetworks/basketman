@@ -39,13 +39,14 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "new_game",
             op: "new_game",
-            description: "Start a new league and take charge of one club. The same seed gives the same league and the same results for the same decisions. Returns the summary view. Call this first unless you load a save.",
+            description: "Start a new league (three divisions by default, opening in the preseason) and take charge of one club. The same seed gives the same league and the same results for the same decisions. Returns the summary view. Call this first unless you load a save.",
             schema: || {
                 obj(
                     json!({
                         "seed": {"type": "integer", "minimum": 0, "description": "Random seed, default 1."},
-                        "clubs": {"type": "integer", "minimum": 2, "maximum": 20, "description": "Number of clubs, even, default 12."},
-                        "club": {"type": "integer", "minimum": 0, "description": "Which club (0-based) you manage, default 0."}
+                        "clubs": {"type": "integer", "minimum": 2, "maximum": 20, "description": "Clubs in each division, even, default 12."},
+                        "divisions": {"type": "integer", "minimum": 1, "maximum": 3, "description": "Number of divisions, default 3. Division 0 (First Division) is the top; clubs 0..clubs-1 are in it, the next clubs in the Second, and so on."},
+                        "club": {"type": "integer", "minimum": 0, "description": "Which club (0-based) you manage, default 0 (the first club of the First Division). Starting in a lower division is the long road up."}
                     }),
                     &[],
                 )
@@ -75,6 +76,7 @@ fn tools() -> Vec<Tool> {
                         "club": {"type": "integer", "description": "Club id, for what=club or a fixtures filter."},
                         "fixture": {"type": "integer", "description": "Fixture index, for what=box_score."},
                         "round": {"type": "integer"},
+                        "division": {"type": "integer", "description": "For what=table or what=leaders: a division (0 is the First Division); default your own. what=league has every table."},
                         "day": {"type": "integer", "description": "For what=calendar: list everything on this day of the season, across the league."},
                         "from": {"type": "integer", "description": "For what=calendar: first day of a range of events (with to; club filters)."},
                         "to": {"type": "integer"},

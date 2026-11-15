@@ -351,10 +351,10 @@ impl World {
     /// Maybe a sponsor asks for one of the user's players.
     fn appearance_request(&mut self, rng: &mut Rng) {
         let Some(me) = self.watch else { return };
-        if self.round + 2 >= 2 * self.teams.len().saturating_sub(1) {
+        if self.round + 2 >= self.regular_rounds() {
             return;
         }
-        let today = (self.round as u32 - 1) * 7 + crate::inbox::MATCH_DAY;
+        let today = self.round_base(self.round - 1) + crate::inbox::MATCH_DAY;
         if self.fame.asks.iter().any(|a| a.open_on(today + 1)) {
             return;
         }

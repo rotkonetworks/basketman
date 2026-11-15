@@ -240,6 +240,9 @@ pub struct World {
     /// reserve games that follow in a bare league.
     #[serde(default)]
     pub round_seeds: Vec<(usize, u64)>,
+    /// How many divisions there are and how many go up and down.
+    #[serde(default)]
+    pub tiers: crate::divisions::Tiers,
 }
 
 const CITIES: [&str; 20] = [
@@ -287,15 +290,26 @@ impl World {
     /// A fresh league with `n_teams` clubs of twelve players and a double
     /// round-robin schedule. `n_teams` must be even and at most 20.
     pub fn generate(seed: u64, n_teams: usize) -> World {
-        assert!(n_teams >= 2 && n_teams.is_multiple_of(2) && n_teams <= CITIES.len());
+        World::generate_tiers(seed, n_teams, 1)
+    }
+
+    /// A league of `divisions` divisions of `per_division` clubs each, the
+    /// top one first. Lower divisions have weaker squads, smaller halls and
+    /// smaller budgets. `per_division` must be even.
+    pub fn generate_tiers(seed: u64, per_division: usize, divisions: usize) -> World {
+        let n_teams = per_division * divisions;
+        assert!(per_division >= 2 && per_division.is_multiple_of(2));
+        assert!((1..=5).contains(&divisions) && n_teams <= CITIES.len() * NICKNAMES.len());
         let mut rng = Rng::new(seed);
         let mut players: Vec<Player> = Vec::new();
-        let mut teams = Vec::new();
+        let mut teams: Vec<Team> = Vec::new();
 
-        for (id, city) in CITIES.iter().enumerate().take(n_teams) {
+        for id in 0..n_teams {
+            let city = CITIES[id % CITIES.len()];
+            let division = id / per_division;
             // Clubs differ, but not by so much that the better squad cannot
-            // be outcoached.
-            let quality = 9.1 + rng.f32() * 1.8;
+            // be outcoached. Each division down is a step weaker.
+            let quality = 9.1 - crate::divisions::QUALITY_STEP * division as f32 + rng.f32() * 1.8;
             let mut roster = Vec::new();
             for slot in 0..12 {
                 let pid = players.len() as PlayerId;
@@ -312,17 +326,20 @@ impl World {
                 (tactics.offense, tactics.defense) = (head.offense, head.defense);
                 known = 0.65 + head.tactics as f32 * 0.015;
             }
+            let mut nick = rng.range(0, NICKNAMES.len() as u32) as usize;
+            // Two clubs of one town do not share a name.
+            let mut name = format!("{} {}", city, NICKNAMES[nick]);
+            while teams.iter().any(|t| t.name == name) {
+                nick = (nick + 1) % NICKNAMES.len();
+                name = format!("{} {}", city, NICKNAMES[nick]);
+            }
             teams.push(Team {
                 id,
-                name: format!(
-                    "{} {}",
-                    city,
-                    NICKNAMES[rng.range(0, NICKNAMES.len() as u32) as usize]
-                ),
+                name,
                 playbook: vec![TacticSlot::new("Tactic 1", tactics, known)],
                 active: 0,
                 roster,
-                budget: 1_000_000,
+                budget: crate::divisions::START_BUDGET[division.min(4)],
                 schedule: Schedule::default(),
                 delegate_training: true,
                 assistant_notes: Vec::new(),
@@ -331,7 +348,7 @@ impl World {
                 belief: 0.6,
                 office,
                 instructions: Default::default(),
-                division: 0,
+                division,
             });
         }
 
@@ -371,7 +388,11 @@ impl World {
             team_stats: vec![TeamStats::default(); n_teams],
             players,
             standings: vec![Standing::default(); n_teams],
-            fixtures: schedule(n_teams),
+            fixtures: Vec::new(),
+            tiers: crate::divisions::Tiers {
+                divisions,
+                ..Default::default()
+            },
             teams,
             round: 0,
             econ: Default::default(),
@@ -382,6 +403,7 @@ impl World {
             draft_day: 0,
             round_seeds: Vec::new(),
         };
+        world.fixtures = schedule_tiers(&world.teams);
         world.date_fixtures();
         world.econ = crate::finance::Economy::generate(seed, &world);
         world.ensure_fame();
@@ -393,6 +415,14 @@ impl World {
     /// opens in the training camp, four weeks before the first league game.
     pub fn new_career(seed: u64, n_teams: usize) -> World {
         let mut world = World::generate(seed, n_teams);
+        world.begin_preseason();
+        world
+    }
+
+    /// A new career in a league of `divisions` divisions, opening in the
+    /// training camp.
+    pub fn new_career_tiers(seed: u64, per_division: usize, divisions: usize) -> World {
+        let mut world = World::generate_tiers(seed, per_division, divisions);
         world.begin_preseason();
         world
     }
@@ -443,19 +473,6 @@ impl World {
 
     pub fn season_over(&self) -> bool {
         self.round >= self.rounds()
-    }
-
-    /// Team ids sorted by wins, then point difference.
-    pub fn table(&self) -> Vec<TeamId> {
-        let mut ids: Vec<TeamId> = (0..self.teams.len()).collect();
-        ids.sort_by_key(|&t| {
-            let s = &self.standings[t];
-            (
-                std::cmp::Reverse(s.wins),
-                std::cmp::Reverse(s.points_for as i64 - s.points_against as i64),
-            )
-        });
-        ids
     }
 
     /// Play every fixture of the current round still to be played, then the
@@ -929,9 +946,11 @@ pub fn lineup<'a>(team: &'a Team, players: &'a [Player]) -> Lineup<'a> {
     }
 }
 
-/// Double round-robin by the circle method; second half mirrors home/away.
-pub(crate) fn schedule(n: usize) -> Vec<Fixture> {
-    let mut ids: Vec<TeamId> = (0..n).collect();
+/// Double round-robin by the circle method over `ids`; second half mirrors
+/// home/away.
+pub(crate) fn schedule(ids: &[TeamId], division: usize) -> Vec<Fixture> {
+    let n = ids.len();
+    let mut ids: Vec<TeamId> = ids.to_vec();
     let mut fixtures = Vec::new();
     for round in 0..n - 1 {
         for i in 0..n / 2 {
@@ -944,7 +963,7 @@ pub(crate) fn schedule(n: usize) -> Vec<Fixture> {
                 result: None,
                 playoff: false,
                 day: 0,
-                division: 0,
+                division,
             });
         }
         ids[1..].rotate_right(1);
@@ -958,11 +977,26 @@ pub(crate) fn schedule(n: usize) -> Vec<Fixture> {
             result: None,
             playoff: false,
             day: 0,
-            division: 0,
+            division,
         })
         .collect();
     fixtures.extend(mirrored);
     fixtures
+}
+
+/// Every division's schedule, the rounds of all divisions together.
+pub(crate) fn schedule_tiers(teams: &[Team]) -> Vec<Fixture> {
+    let divisions = teams.iter().map(|t| t.division + 1).max().unwrap_or(1);
+    let mut all: Vec<Fixture> = Vec::new();
+    for d in 0..divisions {
+        let ids: Vec<TeamId> = teams.iter().filter(|t| t.division == d).map(|t| t.id).collect();
+        if ids.len() >= 2 {
+            all.extend(schedule(&ids, d));
+        }
+    }
+    // Stable: within a round, the top division first.
+    all.sort_by_key(|f| f.round);
+    all
 }
 
 /// How strongly an attribute belongs to guards (+) or bigs (-).

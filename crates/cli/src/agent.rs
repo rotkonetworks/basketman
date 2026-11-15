@@ -312,13 +312,17 @@ impl Session {
         let seed = get_u64(a, "seed")?.unwrap_or(1);
         let clubs = get_u64(a, "clubs")?.unwrap_or(12) as usize;
         let club = get_u64(a, "club")?.unwrap_or(0) as usize;
+        let divisions = get_u64(a, "divisions")?.unwrap_or(3) as usize;
         if !(2..=20).contains(&clubs) || !clubs.is_multiple_of(2) {
             return Err(bad("clubs must be an even number from 2 to 20"));
         }
-        if club >= clubs {
-            return Err(bad(format!("club must be 0..={}", clubs - 1)));
+        if !(1..=3).contains(&divisions) {
+            return Err(bad("divisions must be 1, 2 or 3"));
         }
-        let mut w = World::new_career(seed, clubs);
+        if club >= clubs * divisions {
+            return Err(bad(format!("club must be 0..={}", clubs * divisions - 1)));
+        }
+        let mut w = World::new_career_tiers(seed, clubs, divisions);
         w.apply(Command::TakeCharge(club))?;
         self.world = Some(w);
         self.view(&json!({"what": "summary"}))
@@ -381,7 +385,11 @@ impl Session {
                 }
                 v
             }
-            "table" => to_json(&w.view_table()),
+            "table" => match get_u64(a, "division")? {
+                Some(d) if (d as usize) < w.division_count() => to_json(&w.view_table_of(d as usize)),
+                Some(_) => return Err(bad("no such division")),
+                None => to_json(&w.view_table()),
+            },
             "fixtures" => {
                 let mut f = w.view_fixtures();
                 if let Some(r) = get_u64(a, "round")? {
@@ -389,6 +397,9 @@ impl Session {
                 }
                 if let Some(c) = get_u64(a, "club")? {
                     f.retain(|x| x.home == c as usize || x.away == c as usize);
+                }
+                if let Some(d) = get_u64(a, "division")? {
+                    f.retain(|x| x.division == d as usize);
                 }
                 to_json(&f)
             }
@@ -431,7 +442,16 @@ impl Session {
                 }
                 v
             }
-            "leaders" => to_json(&w.view_leaders(get_u64(a, "n")?.unwrap_or(15) as usize)),
+            "leaders" => {
+                let n = get_u64(a, "n")?.unwrap_or(15) as usize;
+                match get_u64(a, "division")? {
+                    Some(d) if (d as usize) < w.division_count() => {
+                        to_json(&w.view_leaders_in(d as usize, n))
+                    }
+                    Some(_) => return Err(bad("no such division")),
+                    None => to_json(&w.view_leaders(n)),
+                }
+            }
             "league" => to_json(&w.view_league(me).ok_or_else(none)?),
             "finance" => to_json(&w.view_finance(me).ok_or_else(none)?),
             "fans" => to_json(&w.view_finance(me).ok_or_else(none)?.fans),

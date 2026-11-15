@@ -13,6 +13,7 @@ pub mod command;
 pub mod court;
 pub mod days;
 pub mod debt;
+pub mod divisions;
 pub mod dressing;
 pub mod engine;
 pub mod facility;

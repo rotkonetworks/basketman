@@ -3,8 +3,10 @@
 use basketman_core::league::World;
 use eframe::egui::{self, Color32, FontId, Pos2, RichText, Sense, Shape, Stroke, Ui, vec2};
 
-use crate::app::{App, TEAMS};
+use crate::app::{App, DIVISIONS, TEAMS};
 use crate::theme::{self, Backdrop};
+
+const DIVISION_NAMES: [&str; 3] = ["First Division", "Second Division", "Third Division"];
 
 const BALL: Color32 = Color32::from_rgb(0xE8, 0x6A, 0x1C);
 
@@ -13,10 +15,12 @@ const BALL: Color32 = Color32::from_rgb(0xE8, 0x6A, 0x1C);
 pub(crate) struct Candidate {
     pub name: String,
     pub strength: f32,
+    /// 0 is the First Division.
+    pub division: usize,
 }
 
 pub(crate) fn candidates(seed: u64) -> Vec<Candidate> {
-    let w = World::generate(seed, TEAMS);
+    let w = World::generate_tiers(seed, TEAMS, DIVISIONS);
     w.teams
         .iter()
         .map(|t| {
@@ -29,6 +33,7 @@ pub(crate) fn candidates(seed: u64) -> Vec<Candidate> {
             Candidate {
                 name: t.name.clone(),
                 strength: ov.iter().take(8).sum::<f32>() / 8.0,
+                division: t.division,
             }
         })
         .collect()
@@ -63,9 +68,10 @@ impl App {
         }
         let mut order: Vec<usize> = (0..self.candidates.1.len()).collect();
         order.sort_by(|&a, &b| {
-            self.candidates.1[b]
-                .strength
-                .total_cmp(&self.candidates.1[a].strength)
+            let (x, y) = (&self.candidates.1[a], &self.candidates.1[b]);
+            x.division
+                .cmp(&y.division)
+                .then(y.strength.total_cmp(&x.strength))
         });
         let mut start = false;
 
@@ -143,15 +149,31 @@ impl App {
                                     });
                                     ui.label(
                                         RichText::new(
-                                            "Strongest squad first. A weaker club means a more \
-                                         patient board.",
+                                            "Three divisions. Strongest squad first in each. A \
+                                         weaker club means a more patient board.",
                                         )
                                         .color(theme::TEXT_DIM),
                                     );
                                     ui.add_space(8.0);
                                     let best = self.candidates.1[order[0]].strength;
-                                    for (rank, &t) in order.iter().enumerate() {
+                                    let mut shown_division = usize::MAX;
+                                    let mut rank = 0;
+                                    for &t in order.iter() {
                                         let c = &self.candidates.1[t];
+                                        if c.division != shown_division {
+                                            shown_division = c.division;
+                                            rank = 0;
+                                            ui.add_space(8.0);
+                                            ui.label(theme::eyebrow_text(DIVISION_NAMES[c.division.min(2)]));
+                                            let note = match c.division {
+                                                0 => "The top. The best squads, the biggest halls, the playoffs.",
+                                                1 => "A step down: weaker squads, smaller halls and less money. Two clubs go up each year.",
+                                                _ => "Starting at the bottom is the long road. The squads are weak, the halls small and the money tight. Finish in the top two to go up, and keep climbing for years to reach the First Division.",
+                                            };
+                                            ui.label(RichText::new(note).size(12.5).color(theme::TEXT_DIM));
+                                            ui.add_space(4.0);
+                                        }
+                                        rank += 1;
                                         let (rect, response) = ui.allocate_exact_size(
                                             vec2(ui.available_width(), 34.0),
                                             Sense::click(),
@@ -175,7 +197,7 @@ impl App {
                                         painter.text(
                                             egui::pos2(rect.left() + 10.0, mid),
                                             egui::Align2::LEFT_CENTER,
-                                            format!("{:>2}", rank + 1),
+                                            format!("{:>2}", rank),
                                             FontId::new(12.0, egui::FontFamily::Monospace),
                                             theme::TEXT_MUTE,
                                         );
@@ -194,7 +216,7 @@ impl App {
                                             if picked { theme::ACCENT } else { theme::TEXT },
                                         );
                                         // Squad strength as a bar against the best.
-                                        let full = 150.0;
+                                        let full = (rect.width() - 235.0).clamp(30.0, 150.0);
                                         let x0 = rect.right() - full - 54.0;
                                         let share =
                                             ((c.strength - 6.0) / (best - 6.0)).clamp(0.05, 1.0);
