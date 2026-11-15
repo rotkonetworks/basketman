@@ -35,8 +35,12 @@ pub(crate) fn moments(rec: &Recording, what: &str) -> Vec<f32> {
                     let ok = made.is_none_or(|m| {
                         rec.events
                             .iter()
-                            .find(|e| e.time >= f.time - 0.01 && matches!(e.kind, EventKind::Shot { .. }))
-                            .is_some_and(|e| matches!(e.kind, EventKind::Shot { made, .. } if made == m))
+                            .find(|e| {
+                                e.time >= f.time - 0.01 && matches!(e.kind, EventKind::Shot { .. })
+                            })
+                            .is_some_and(
+                                |e| matches!(e.kind, EventKind::Shot { made, .. } if made == m),
+                            )
                     });
                     if ok {
                         out.push(f.time);
@@ -60,7 +64,9 @@ pub(crate) fn moments(rec: &Recording, what: &str) -> Vec<f32> {
             .events
             .iter()
             .filter_map(|e| match e.kind {
-                EventKind::Rebound { offensive, .. } if offensive == (what == "offreb") => Some(e.time),
+                EventKind::Rebound { offensive, .. } if offensive == (what == "offreb") => {
+                    Some(e.time)
+                }
                 _ => None,
             })
             .collect(),
@@ -85,7 +91,11 @@ pub(crate) fn viewpoint(
 ) -> Option<(super::Vec3, super::Vec3)> {
     use super::v3;
     let f = rec.frames.get(rec.frame_at(time + 0.3))?;
-    let hoop = if f.offense == 0 { (26.425, 7.5) } else { (1.575, 7.5) };
+    let hoop = if f.offense == 0 {
+        (26.425, 7.5)
+    } else {
+        (1.575, 7.5)
+    };
     // The man the moment is about: whoever is shooting, jumping for a rebound
     // or holding the ball near it, else the ball itself.
     let mut who = None;

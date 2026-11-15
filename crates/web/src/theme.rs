@@ -170,6 +170,9 @@ pub struct Backdrop {
     sharp: TextureHandle,
     blur: TextureHandle,
     aspect: f32,
+    /// The weight-room photograph, as an alpha mask of its lit forms.
+    gym: TextureHandle,
+    gym_aspect: f32,
     /// Where the photo sits on screen this frame.
     rect: Rect,
     /// Inside the shell's own glass panels: cards are quiet inner boxes
@@ -199,7 +202,23 @@ impl Backdrop {
         };
         let (sharp, size) = load("backdrop", include_bytes!("../assets/wilt.png"));
         let (blur, _) = load("backdrop-blur", include_bytes!("../assets/wilt_blur.png"));
+        let gym = image::load_from_memory(include_bytes!("../assets/wilt_gym.png"))
+            .expect("bundled photograph is a valid PNG")
+            .to_luma8();
+        let gym_size = [gym.width() as usize, gym.height() as usize];
+        let gym = ctx.load_texture(
+            "gym",
+            egui::ColorImage::new(
+                gym_size,
+                gym.pixels()
+                    .map(|p| Color32::from_rgba_unmultiplied(244, 238, 226, p.0[0]))
+                    .collect(),
+            ),
+            TextureOptions::LINEAR,
+        );
         Backdrop {
+            gym,
+            gym_aspect: gym_size[0] as f32 / gym_size[1] as f32,
             sharp,
             blur,
             aspect: size[0] as f32 / size[1] as f32,
@@ -223,6 +242,18 @@ impl Backdrop {
             self.rect,
             Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
             Color32::from_white_alpha(PHOTO_OPACITY),
+        );
+    }
+
+    /// The weight-room photograph as light on a dark wall: the same quiet
+    /// treatment as the title page's figure, the other way round. `height`
+    /// tall, top left corner at `at`.
+    pub fn gym_ghost(&self, ui: &Ui, at: egui::Pos2, height: f32) {
+        ui.painter().image(
+            self.gym.id(),
+            Rect::from_min_size(at, vec2(height * self.gym_aspect, height)),
+            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+            Color32::from_white_alpha(70),
         );
     }
 

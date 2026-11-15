@@ -959,6 +959,8 @@ mod tests {
             holder: None,
             pose: Default::default(),
             whistle: false,
+            cut: false,
+            swish: false,
         }
     }
 

@@ -45,7 +45,7 @@ const DUNK_RANGE: f32 = 1.1;
 /// Seconds a free throw shooter takes before he goes up.
 const FT_ROUTINE: f32 = 0.7;
 /// Longest the players take to line up for a free throw, seconds.
-const FT_LINEUP: f32 = 4.0;
+const FT_LINEUP: f32 = 3.0;
 /// Metres within which a body counts as at his spot.
 const SPOT_NEAR: f32 = 0.5;
 /// Seconds from a dead ball to the ball being in play, counting what the ball
@@ -55,7 +55,7 @@ const INBOUND_WAIT: f32 = 3.2;
 /// board: the ball is already at the basket and he goes straight back up.
 const PUTBACK_EDGE: f32 = 0.25;
 /// Seconds the floor stands still after a foul away from a shot.
-const DEAD_FOUL: f32 = 1.5;
+const DEAD_FOUL: f32 = 1.2;
 /// A man who would still be further than this from a rebound when it comes
 /// down is not in the running for it.
 const REB_REACH: f32 = 2.5;

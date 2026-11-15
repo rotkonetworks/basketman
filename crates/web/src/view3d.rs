@@ -7,11 +7,11 @@
 //! natively and in the browser. Units are metres; the court lies in the x/y
 //! plane as everywhere else (x along it 0..28, y across it 0..15, z up).
 
+mod action;
 pub(crate) mod arena;
 pub(crate) mod boards;
-mod action;
-pub(crate) mod finder;
 mod figure;
+pub(crate) mod finder;
 mod font;
 pub(crate) mod gait;
 

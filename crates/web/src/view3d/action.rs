@@ -9,12 +9,14 @@
 //! a release, a catch and a block meet the recorded path and not a guess.
 //! Everything is in the body frame of `gait`: x forward, y to his left, z up.
 
+#![allow(clippy::needless_range_loop, clippy::manual_memcpy)]
+
 use basketman_core::replay::{Action, ShotStage, Style};
 
 use super::gait::{
     ANKLE, Dims, ELBOW, FINGERS, HAIR_HIGH, HAIR_LOW, HEAD_TOP, HEEL, HIP, JERSEY_TOP, KNEE,
-    NECK_BASE, NECK_TOP, PELVIS, Pose, SHORTS_END, SHORTS_HIGH, SHORTS_LOW, SHOULDER,
-    SHOULDER_MID, TOE, TORSO_LOW, WRIST, ik2, smoothstep,
+    NECK_BASE, NECK_TOP, PELVIS, Pose, SHORTS_END, SHORTS_HIGH, SHORTS_LOW, SHOULDER, SHOULDER_MID,
+    TOE, TORSO_LOW, WRIST, ik2, smoothstep,
 };
 use super::{BALL_RADIUS, Vec3, v3};
 
@@ -158,11 +160,18 @@ fn plan(d: &Dims, a: &Act, base: &Pose) -> Plan {
                     p.crouch = d.leg * if layup { 0.10 } else { 0.24 } * e;
                     p.lean = 0.10 * e;
                     p.ball = Some(mix(hold, low, e));
-                    p.twist = if style == Style::Hook { -0.5 * s * e } else { 0.0 };
+                    p.twist = if style == Style::Hook {
+                        -0.5 * s * e
+                    } else {
+                        0.0
+                    };
                 }
                 ShotStage::Rise => {
                     let e = ease(u);
-                    p.crouch = d.leg * 0.24 * (1.0 - ease(u * 2.0).min(1.0)) * (if layup { 0.5 } else { 1.0 });
+                    p.crouch = d.leg
+                        * 0.24
+                        * (1.0 - ease(u * 2.0).min(1.0))
+                        * (if layup { 0.5 } else { 1.0 });
                     p.lean = 0.10 * (1.0 - e);
                     p.point = lift_frac * 0.6;
                     p.ball = Some(mix(low, top, ease((u * 1.15).min(1.0))));
@@ -174,11 +183,19 @@ fn plan(d: &Dims, a: &Act, base: &Pose) -> Plan {
                         p.foot[0] = v3(0.0, 0.0, 0.03 * e);
                         p.foot[1] = v3(0.0, 0.0, 0.03 * e);
                     }
-                    p.twist = if style == Style::Hook { -0.5 * s * (1.0 - e) } else { 0.0 };
+                    p.twist = if style == Style::Hook {
+                        -0.5 * s * (1.0 - e)
+                    } else {
+                        0.0
+                    };
                 }
                 ShotStage::Release | ShotStage::Fall | ShotStage::Follow => {
                     let released = a.ball.is_some();
-                    p.point = if a.stage == ShotStage::Follow { 0.0 } else { 0.5 };
+                    p.point = if a.stage == ShotStage::Follow {
+                        0.0
+                    } else {
+                        0.5
+                    };
                     let hang = v3(0.06, s * (sh + 0.04), sz - arm * 0.85);
                     let held_top = rec.filter(|b| b.z > 1.5).unwrap_or(top);
                     let fol = if a.stage == ShotStage::Follow {
@@ -195,7 +212,11 @@ fn plan(d: &Dims, a: &Act, base: &Pose) -> Plan {
                     p.ball = None;
                     let wr = grip(d, v3(0.0, s * sh, sz), target);
                     p.wrist[sd] = Some(mix(wr, hang, fol));
-                    p.flick[sd] = if a.stage == ShotStage::Release { u } else { 1.0 - fol };
+                    p.flick[sd] = if a.stage == ShotStage::Release {
+                        u
+                    } else {
+                        1.0 - fol
+                    };
                     // The other hand drops away from the ball.
                     p.wrist[other] = Some(mix(
                         v3(0.14, -s * (sh + 0.2), sz + 0.05),
@@ -207,7 +228,11 @@ fn plan(d: &Dims, a: &Act, base: &Pose) -> Plan {
                         p.foot[other] = v3(-0.1, 0.0, d.leg * 0.05);
                         p.lean = 0.05;
                         if style == Style::Dunk {
-                            p.wrist[other] = Some(grip(d, v3(0.0, -s * sh, sz), held_top + v3(0.0, -s * 0.1, 0.0)));
+                            p.wrist[other] = Some(grip(
+                                d,
+                                v3(0.0, -s * sh, sz),
+                                held_top + v3(0.0, -s * 0.1, 0.0),
+                            ));
                         }
                     }
                     if a.stage == ShotStage::Fall {
@@ -221,7 +246,11 @@ fn plan(d: &Dims, a: &Act, base: &Pose) -> Plan {
             }
             // Ball in hand until the release: both hands on it.
             if let Some(b) = p.ball {
-                let guide = if style == Style::Hook { None } else { Some(b + v3(0.0, -s * (BALL_RADIUS + 0.03), 0.0)) };
+                let guide = if style == Style::Hook {
+                    None
+                } else {
+                    Some(b + v3(0.0, -s * (BALL_RADIUS + 0.03), 0.0))
+                };
                 p.wrist[sd] = Some(grip(d, v3(0.0, s * sh, sz), b + v3(0.0, s * 0.02, -0.04)));
                 let g_far = u > 0.55 && a.stage == ShotStage::Rise;
                 p.wrist[other] = match guide {
@@ -240,8 +269,16 @@ fn plan(d: &Dims, a: &Act, base: &Pose) -> Plan {
                 let e = ease(((u - 0.5) / 0.5).clamp(0.0, 1.0));
                 let b = mix(overhead, v3(0.2, 0.0, pz + 0.3 * d.torso), e);
                 p.ball = Some(b);
-                p.wrist[0] = Some(grip(d, v3(0.0, sh, sz), b + v3(0.0, BALL_RADIUS * 0.2, 0.0)));
-                p.wrist[1] = Some(grip(d, v3(0.0, -sh, sz), b + v3(0.0, -BALL_RADIUS * 0.2, 0.0)));
+                p.wrist[0] = Some(grip(
+                    d,
+                    v3(0.0, sh, sz),
+                    b + v3(0.0, BALL_RADIUS * 0.2, 0.0),
+                ));
+                p.wrist[1] = Some(grip(
+                    d,
+                    v3(0.0, -sh, sz),
+                    b + v3(0.0, -BALL_RADIUS * 0.2, 0.0),
+                ));
                 p.crouch += d.leg * 0.1 * e;
             } else {
                 for sd in 0..2 {
@@ -266,7 +303,10 @@ fn plan(d: &Dims, a: &Act, base: &Pose) -> Plan {
                 } else {
                     v3(0.22, sg(sd) * (sh + 0.12), reach - 0.30)
                 };
-                if blk && lead && let Some(b) = rec {
+                if blk
+                    && lead
+                    && let Some(b) = rec
+                {
                     t = b;
                 }
                 p.wrist[sd] = Some(grip(d, v3(0.0, sg(sd) * sh, sz), t));
@@ -283,7 +323,11 @@ fn plan(d: &Dims, a: &Act, base: &Pose) -> Plan {
             };
             let b = mix(from, to, e);
             for sd in 0..2 {
-                p.wrist[sd] = Some(grip(d, v3(0.0, sg(sd) * sh, sz), b + v3(0.0, sg(sd) * 0.1, 0.0)));
+                p.wrist[sd] = Some(grip(
+                    d,
+                    v3(0.0, sg(sd) * sh, sz),
+                    b + v3(0.0, sg(sd) * 0.1, 0.0),
+                ));
             }
             p.lean = 0.12 * e;
             p.crouch = d.leg * 0.04;

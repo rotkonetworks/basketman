@@ -769,6 +769,7 @@ fn recorded_act(
 
 /// The court in 3D: a flat-shaded mesh built and sorted on the CPU, with the
 /// player's names and the carrier's ring on top, as in the other views.
+#[allow(clippy::needless_range_loop)]
 fn paint_3d(
     ui: &mut Ui,
     rec: &Recording,

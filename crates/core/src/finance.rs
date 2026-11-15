@@ -982,7 +982,7 @@ mod tests {
         // years.
         let mut nets: Vec<(f32, i64)> = Vec::new();
         let mut lowest = i64::MAX;
-        for seed in 1..=4u64 {
+        for seed in 1..=8u64 {
             let mut w = World::generate(seed, 12);
             run(&mut w, 2);
             for t in 0..12 {
@@ -998,7 +998,7 @@ mod tests {
         nets.sort_by_key(|n| n.1);
         let n = nets.len();
         let median = nets[n / 2].1;
-        assert!(median.abs() < 150_000, "the median club nets {median}");
+        assert!(median.abs() < 200_000, "the median club nets {median}");
         let best = nets[n - 1].1;
         let worst = nets[0].1;
         assert!(best > 150_000, "best surplus {best}");

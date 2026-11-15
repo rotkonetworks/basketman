@@ -653,7 +653,9 @@ impl Hall {
                          tint: Color32| {
                 let square = (w - h).abs() < 1e-3;
                 match if square { &art_sq } else { &art } {
-                    Some((a, bg, ink)) => vector_plate(scene, eye, a, *bg, *ink, bl, u, up, w, h, tint),
+                    Some((a, bg, ink)) => {
+                        vector_plate(scene, eye, a, *bg, *ink, bl, u, up, w, h, tint)
+                    }
                     None => plate(scene, eye, uv, bl, u, up, w, h, tint),
                 }
             };

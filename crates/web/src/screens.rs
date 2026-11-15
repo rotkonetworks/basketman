@@ -114,6 +114,12 @@ impl App {
                     scene.intersect(full),
                     scene,
                 );
+                // The weight room, faint on the wall behind the practice
+                // floor, where there is wall to see it on.
+                if tab == Tab::Training && tier == Tier::Wide && scene.height() > 520.0 {
+                    let h = scene.height() * 0.56;
+                    bd.gym_ghost(ui, scene.left_top() + vec2(0.0, 30.0), h);
+                }
                 let salt = if tab == Tab::Training {
                     "training"
                 } else {
