@@ -561,6 +561,7 @@ impl World {
         self.season += 1;
         self.round = 0;
         self.day = 0;
+        self.draft_day = 0;
         self.fixtures = schedule(n);
         self.standings = vec![Standing::default(); n];
         self.team_stats = vec![TeamStats::default(); n];
@@ -579,6 +580,8 @@ impl World {
             m.day = 0;
         }
 
+        // Every season opens with a training camp.
+        self.begin_preseason();
         self.reserve_summer();
         let staff_news = self.staff_summer(&crate::league::FIRST_NAMES, &crate::league::LAST_NAMES);
         self.econ_open_season();
@@ -666,7 +669,7 @@ impl World {
         }
         let table = self.table();
         let seed = |t: TeamId| table.iter().position(|&x| x == t).unwrap_or(usize::MAX);
-        let sunday = (self.round as u32).saturating_sub(1) * 7 + crate::inbox::MATCH_DAY + 1;
+        let sunday = self.round_base(self.round.saturating_sub(1)) + crate::inbox::MATCH_DAY + 1;
         if self.playoffs.is_empty() {
             if !self.season_over() {
                 return;
@@ -740,7 +743,13 @@ impl World {
             return;
         }
         let round = self.round;
-        for s in self.playoffs.iter().filter(|s| s.winner().is_none()) {
+        let base = self.round_base(round);
+        for (k, s) in self
+            .playoffs
+            .iter()
+            .filter(|s| s.winner().is_none())
+            .enumerate()
+        {
             // Game two is at the lower seed's.
             let (home, away) = if s.wins[0] + s.wins[1] == 1 {
                 (s.low, s.high)
@@ -753,6 +762,8 @@ impl World {
                 away,
                 result: None,
                 playoff: true,
+                day: base + 5 + (k % 2) as u32,
+                division: 0,
             });
         }
     }

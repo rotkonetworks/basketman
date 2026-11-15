@@ -22,7 +22,7 @@ use crate::dressing::standing as room_words;
 use crate::engine::BoxLine;
 use crate::finance::Cat;
 use crate::health::medical;
-use crate::inbox::{OfferState, date};
+use crate::inbox::OfferState;
 use crate::instructions::Instructions;
 use crate::league::{TeamId, World};
 use crate::legal::{Waiting, waiting};
@@ -396,8 +396,13 @@ pub struct ClubPublic {
 pub struct Calendar {
     pub season: u16,
     pub day: u32,
+    /// "Friday 9 October 2026".
     pub date: String,
+    /// "Fri 9 Oct".
+    pub date_short: String,
     pub weekday: &'static str,
+    /// "preseason", "season", "playoffs" or "offseason".
+    pub phase: &'static str,
     pub round: usize,
     pub rounds: usize,
     pub season_over: bool,
@@ -408,7 +413,15 @@ pub struct Calendar {
     pub next_stop: &'static str,
     pub next_stop_day: Option<u32>,
     pub draft_on: bool,
+    /// The day the draft is (or will be) held, once the season is over.
+    pub draft_day: Option<u32>,
     pub champion: Option<TeamId>,
+    /// The manager has a friendly today; it is played when the day passes.
+    pub friendly_today: bool,
+    /// Days of training camp before the first league week.
+    pub preseason_days: u32,
+    /// Everything on today's calendar across the league.
+    pub today: Vec<crate::calendar::CalEvent>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -418,6 +431,8 @@ pub struct NextGame {
     pub opponent: TeamId,
     pub opponent_name: String,
     pub home: bool,
+    pub day: u32,
+    pub date: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -879,10 +894,22 @@ impl World {
             .map(|m| m.day)
             .min();
         let match_day = (!self.season_over()).then(|| self.match_day());
+        let draft_day = (self.season_over()).then(|| {
+            if self.draft_day == 0 {
+                self.default_draft_day()
+            } else {
+                self.draft_day
+            }
+        });
         let (next_stop, next_stop_day) = if self.match_today() {
             ("match_day", Some(self.day))
-        } else if self.draft.is_some() || (self.season_over() && pending_mail.is_none()) {
+        } else if self.draft.is_some() {
             ("draft", Some(self.day))
+        } else if let Some(d) = draft_day {
+            match pending_mail {
+                Some(m) if m < d => ("mail", Some(m)),
+                _ => ("draft", Some(d.max(self.day))),
+            }
         } else {
             match (pending_mail, match_day) {
                 (Some(m), Some(g)) if m <= g => ("mail", Some(m)),
@@ -891,11 +918,22 @@ impl World {
                 (None, None) => ("draft", Some(self.day)),
             }
         };
+        let phase = if self.season_over() {
+            "offseason"
+        } else if self.in_preseason() {
+            "preseason"
+        } else if self.fixtures.iter().any(|f| f.playoff) {
+            "playoffs"
+        } else {
+            "season"
+        };
         Calendar {
             season: self.season + 1,
             day: self.day,
-            date: date(self.day),
-            weekday: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][(self.day % 7) as usize],
+            date: self.day_long(self.day),
+            date_short: self.day_label(self.day),
+            weekday: self.weekday(self.day),
+            phase,
             round: self.round.min(self.rounds()),
             rounds: self.rounds(),
             season_over: self.season_over(),
@@ -904,7 +942,11 @@ impl World {
             next_stop,
             next_stop_day,
             draft_on: self.draft.is_some(),
+            draft_day,
             champion: self.champion,
+            friendly_today: self.friendly_today().is_some(),
+            preseason_days: self.preseason_days,
+            today: self.events_on(self.day),
         }
     }
 
@@ -1139,7 +1181,7 @@ impl World {
             .map(|m| MessageView {
                 id: m.id,
                 day: m.day,
-                date: date(m.day),
+                date: self.day_label(m.day),
                 kind: kind_label(m.kind),
                 from: m.from.clone(),
                 subject: m.subject.clone(),
@@ -1201,7 +1243,11 @@ impl World {
             .fixtures
             .iter()
             .enumerate()
-            .find(|(_, f)| f.round == self.round && (f.home == club || f.away == club));
+            .find(|(_, f)| {
+                f.round == self.round
+                    && f.result.is_none()
+                    && (f.home == club || f.away == club)
+            });
         let wages: i64 = team
             .roster
             .iter()
@@ -1234,6 +1280,8 @@ impl World {
                     opponent: opp,
                     opponent_name: self.teams[opp].name.clone(),
                     home: f.home == club,
+                    day: f.day,
+                    date: self.day_label(f.day),
                 }
             }),
             unread: self.unread(),

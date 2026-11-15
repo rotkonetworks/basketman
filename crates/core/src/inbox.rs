@@ -328,44 +328,6 @@ impl World {
         }
     }
 
-    /// Day the next round is played on.
-    pub fn match_day(&self) -> u32 {
-        self.round as u32 * 7 + MATCH_DAY
-    }
-
-    pub fn match_today(&self) -> bool {
-        !self.season_over() && self.day >= self.match_day()
-    }
-
-    /// Move through the calendar until something wants the manager: a game,
-    /// or new mail.
-    pub fn advance(&mut self) -> Stop {
-        loop {
-            if self.match_today() {
-                return Stop::MatchDay;
-            }
-            let pending =
-                self.desk.messages.iter().any(|m| m.day > self.day) || !self.desk.bids.is_empty();
-            if self.draft.is_some() {
-                return Stop::Draft;
-            }
-            if self.season_over() && !pending {
-                self.begin_draft();
-                // With nobody to wait for, the draft is already over.
-                return if self.draft.is_some() {
-                    Stop::Draft
-                } else {
-                    Stop::Mail
-                };
-            }
-            self.day += 1;
-            self.daily();
-            if self.desk.messages.iter().any(|m| m.day == self.day) {
-                return Stop::Mail;
-            }
-        }
-    }
-
     pub(crate) fn post(
         &mut self,
         day: u32,
@@ -839,7 +801,7 @@ impl World {
     }
 
     /// Things that happen because a day has passed.
-    fn daily(&mut self) {
+    pub(crate) fn daily(&mut self) {
         let day = self.day;
         for o in &mut self.desk.offers {
             if o.state == OfferState::Open && o.expires < day {
@@ -1050,13 +1012,9 @@ impl World {
         self.press_before(opp, rank);
     }
 
-    /// Everything a played round puts in the post. `played` are the round's
-    /// fixtures, `before` the user's players' overall before the week's
-    /// training.
-    pub(crate) fn after_round(&mut self, played: &[usize], before: &[(PlayerId, f32)]) {
-        let round = self.round - 1;
-        let today = round as u32 * 7 + MATCH_DAY;
-        self.day = self.day.max(today);
+    /// What a block of games puts in the post at once: the manager's match
+    /// report and the press's questions about it.
+    pub(crate) fn after_games(&mut self, played: &[usize]) {
         let Some(me) = self.watch else { return };
         let best = |lines: &[(PlayerId, BoxLine)]| {
             lines
@@ -1066,7 +1024,6 @@ impl World {
         };
         let line_text =
             |l: &BoxLine| format!("{} points, {} rebounds, {} assists", l.pts, l.reb(), l.ast);
-
         // The match report.
         let mine = played.iter().copied().find(|&i| {
             let f = &self.fixtures[i];
@@ -1076,6 +1033,7 @@ impl World {
             && let Some(r) = self.fixtures[i].result.clone()
         {
             let f = &self.fixtures[i];
+            let gameday = f.day;
             let side = if f.home == me { 0 } else { 1 };
             let opp = self.teams[[f.away, f.home][side]].name.clone();
             let (us, them) = (r.score[side], r.score[1 - side]);
@@ -1134,7 +1092,7 @@ impl World {
                 if side == 0 { "at home to" } else { "away at" },
             );
             self.post(
-                today,
+                gameday,
                 Kind::Match,
                 "Assistant coach",
                 subject,
@@ -1148,10 +1106,27 @@ impl World {
         {
             let side = if self.fixtures[i].home == me { 0 } else { 1 };
             let won = r.score[side] > r.score[1 - side];
+            let (round, day) = (self.fixtures[i].round, self.fixtures[i].day);
             self.settle_pledge(round, won);
-            self.press_after(today, i);
+            self.press_after(day, i);
         }
+    }
 
+    /// Everything a played round puts in the post. `played` are the round's
+    /// fixtures, `before` the user's players' overall before the week's
+    /// training.
+    pub(crate) fn after_round(&mut self, played: &[usize], before: &[(PlayerId, f32)]) {
+        let round = self.round - 1;
+        let today = self.round_base(round) + MATCH_DAY;
+        let Some(me) = self.watch else { return };
+        let best = |lines: &[(PlayerId, BoxLine)]| {
+            lines
+                .iter()
+                .max_by(|a, b| a.1.game_score().total_cmp(&b.1.game_score()))
+                .copied()
+        };
+        let line_text =
+            |l: &BoxLine| format!("{} points, {} rebounds, {} assists", l.pts, l.reb(), l.ast);
         // Sunday: the round around the league.
         let table = self.table();
         let place = table.iter().position(|&t| t == me).unwrap_or(0) + 1;

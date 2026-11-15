@@ -160,8 +160,28 @@ impl World {
         }
     }
 
-    /// The reserve games that go with a round of first-team fixtures.
-    pub(crate) fn reserve_round(&mut self, played: &[usize], seeds: &[u64]) {
+    /// The reserve games that go with a round of first-team fixtures:
+    /// the same pairings, played midweek.
+    pub(crate) fn reserves_for(&mut self, round: usize) {
+        if self.reserve_rounds_done > round {
+            return;
+        }
+        self.reserve_rounds_done = round + 1;
+        let played: Vec<usize> = (0..self.fixtures.len())
+            .filter(|&i| self.fixtures[i].round == round && !self.fixtures[i].playoff)
+            .collect();
+        // The seed of the league game, if it was played; a game of its own
+        // otherwise, so the reserves never disturb the world's stream.
+        let seeds: Vec<u64> = played
+            .iter()
+            .map(|&i| {
+                self.round_seeds
+                    .iter()
+                    .find(|s| s.0 == i)
+                    .map_or(self.econ.seed ^ ((self.season as u64) << 32) ^ (i as u64) << 8, |s| s.1)
+            })
+            .collect();
+        self.round_seeds.clear();
         self.manage_reserves();
         let n = self.players.len();
         self.reserve_stats.resize(n, BoxLine::default());
@@ -170,7 +190,7 @@ impl World {
             self.reserve_table = vec![Standing::default(); self.teams.len()];
         }
         let regulation = (self.rules.periods as u32 * self.rules.period_secs) as f32;
-        for (&i, &seed) in played.iter().zip(seeds) {
+        for (&i, &seed) in played.iter().zip(&seeds) {
             let f = &self.fixtures[i];
             if f.playoff {
                 continue;
@@ -253,6 +273,7 @@ impl World {
     pub(crate) fn reserve_summer(&mut self) {
         self.reserve_table = vec![Standing::default(); self.teams.len()];
         self.reserve_log.clear();
+        self.reserve_rounds_done = 0;
         for line in &mut self.reserve_stats {
             *line = BoxLine::default();
         }

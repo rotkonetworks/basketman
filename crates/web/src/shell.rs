@@ -90,7 +90,7 @@ impl Group {
     /// The pages of a group. The draft is one only while it is held.
     pub(crate) fn pages(self, draft: bool) -> Vec<Tab> {
         match self {
-            Group::Home => vec![Tab::Inbox],
+            Group::Home => vec![Tab::Inbox, Tab::Calendar],
             Group::Team => vec![Tab::Squad, Tab::Tactics, Tab::Training, Tab::Reserves],
             Group::Club => vec![Tab::Staff, Tab::Finances, Tab::Arena],
             Group::Market if draft => vec![Tab::Scouting, Tab::Trade, Tab::Draft],
@@ -103,7 +103,7 @@ impl Group {
     /// The group a page belongs to, links and detail pages included.
     pub(crate) fn of(tab: Tab) -> Group {
         match tab {
-            Tab::Inbox => Group::Home,
+            Tab::Inbox | Tab::Calendar => Group::Home,
             Tab::Squad
             | Tab::Tactics
             | Tab::Training
@@ -143,6 +143,9 @@ pub(crate) struct Shell {
     /// Which tab of a tabbed panel is open, per screen.
     pub tactics_tab: usize,
     pub league_tab: usize,
+    /// The calendar: the month shown (year, 1..=12) and the day picked.
+    pub cal_month: Option<(i32, u8)>,
+    pub cal_day: Option<u32>,
     /// The draggable parts of a match screen.
     pub hud: crate::matchview::Hud,
     /// Scenes, kept as pictures until something changes.
@@ -408,10 +411,7 @@ pub(crate) fn vitals(app: &App) -> Vitals {
         .iter()
         .position(|&t| t == app.team)
         .map_or(0, |p| p + 1);
-    let next = w
-        .fixtures
-        .iter()
-        .find(|f| f.round == w.round && (f.home == app.team || f.away == app.team));
+    let next = w.user_fixture().map(|i| &w.fixtures[i]);
     let next = match next {
         Some(f) if f.home == app.team => format!("v {}", w.teams[f.away].name),
         Some(f) => format!("at {}", w.teams[f.home].name),
@@ -424,12 +424,16 @@ pub(crate) fn vitals(app: &App) -> Vitals {
         balance: money(w.teams[app.team].budget),
         room: format!("{:.0}%", w.teams[app.team].belief * 100.0),
         next,
-        date: format!(
-            "{} / round {} of {}",
-            basketman_core::inbox::date(w.day),
-            w.round.min(rounds),
-            rounds
-        ),
+        date: if w.in_preseason() {
+            format!("{} / training camp", w.day_label(w.day))
+        } else {
+            format!(
+                "{} / round {} of {}",
+                w.day_label(w.day),
+                w.round.min(rounds),
+                rounds
+            )
+        },
     }
 }
 
@@ -1055,8 +1059,9 @@ mod tests {
                 seen += 1;
             }
         }
-        // Twelve destinations, Film and Arena added, Draft too.
-        assert_eq!(seen, 15);
+        // Twelve destinations, Film and Arena added, Draft too, and the
+        // calendar under Home.
+        assert_eq!(seen, 16);
         for t in Tab::ALL {
             assert!(
                 Group::ALL.iter().any(|g| g.pages(true).contains(&t)),

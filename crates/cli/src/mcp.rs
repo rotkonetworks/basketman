@@ -20,7 +20,7 @@ const SUPPORTED: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11
 const INSTRUCTIONS: &str = "You manage a basketball club in a deterministic league sim. Start with new_game (or load_game). \
 Then call view with what=summary: it says what the game is waiting for. Read the inbox (view what=inbox): offers for your players, press questions, \
 sponsor proposals, appearance requests and the draft need answers; the finance view has the ticket price (SetTicketPrice), budgets (MoveBudget) and facilities (UpgradeFacility); SetMedia gives players media work for fame and fans; use legal_actions to see exactly which commands are valid and their choices, then apply_command. \
-Move time with advance (stops at match day, new mail or the draft) and play_round on match days. Leave standing_rules with set_instructions \
+Move time with advance (stops at match day, new mail or the draft), continue (one day) and play_round on match days. Leave standing_rules with set_instructions \
 if you do not want to coach live. Other clubs' players are shown as ranges that narrow when you shortlist them.";
 
 struct Tool {
@@ -75,6 +75,9 @@ fn tools() -> Vec<Tool> {
                         "club": {"type": "integer", "description": "Club id, for what=club or a fixtures filter."},
                         "fixture": {"type": "integer", "description": "Fixture index, for what=box_score."},
                         "round": {"type": "integer"},
+                        "day": {"type": "integer", "description": "For what=calendar: list everything on this day of the season, across the league."},
+                        "from": {"type": "integer", "description": "For what=calendar: first day of a range of events (with to; club filters)."},
+                        "to": {"type": "integer"},
                         "unread_only": {"type": "boolean"},
                         "n": {"type": "integer"}
                     }),
@@ -106,10 +109,16 @@ fn tools() -> Vec<Tool> {
             schema: || obj(json!({}), &[]),
         },
         Tool {
+            name: "continue",
+            op: "continue",
+            description: "Pass one day. Whatever is scheduled for it happens: other clubs' games, reserve games, preseason friendlies, camp training. Returns the new date and what is on it for your club (`today`), and `stop` if the new day holds mail, a game for you (match_day) or the draft. If you have a game today, nothing is passed (stop=match_day): play it first. Use advance to jump to the next thing that needs you.",
+            schema: || obj(json!({}), &[]),
+        },
+        Tool {
             name: "play_round",
             op: "play_round",
-            description: "Play this round's games on a match day without coaching live. With instructions=true your game is coached by your standing instructions (see set_instructions); otherwise your assistant coach runs it. Returns the scores.",
-            schema: || obj(json!({"instructions": {"type": "boolean"}}), &[]),
+            description: "Play this round's games on a match day without coaching live. By default the whole round (Friday to Sunday) is played at once. With today=true only today's games are played (yours with your standing instructions or the assistant) and the rest of the weekend is played as the days pass. With instructions=true your game is coached by your standing instructions (see set_instructions); otherwise your assistant coach runs it. Returns the scores.",
+            schema: || obj(json!({"instructions": {"type": "boolean"}, "today": {"type": "boolean"}}), &[]),
         },
         Tool {
             name: "suggest_tactics",
@@ -137,8 +146,8 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "live_kickoff",
             op: "kickoff",
-            description: "Coach today's game yourself, live. Only on a match day. After this the world is locked until live_finish: use live_state, live_step and live_input, then live_finish. Set instructions=true to have your standing rules applied automatically while you step. You cannot abort a started game.",
-            schema: || obj(json!({"instructions": {"type": "boolean"}}), &[]),
+            description: "Coach today's game yourself, live. Only on a match day. After this the world is locked until live_finish: use live_state, live_step and live_input, then live_finish. Set instructions=true to have your standing rules applied automatically while you step. Set today=true to hold back only today's games instead of the whole round. You cannot abort a started game.",
+            schema: || obj(json!({"instructions": {"type": "boolean"}, "today": {"type": "boolean"}}), &[]),
         },
         Tool {
             name: "live_state",

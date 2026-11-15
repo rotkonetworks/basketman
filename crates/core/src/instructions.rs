@@ -529,19 +529,36 @@ impl World {
     /// `play_round` would, and the log gets `PlayRound`; otherwise the game
     /// is played live, stepped by a `Coach`, and logged as `PlayLive`.
     pub(crate) fn play_with_instructions(&mut self) -> Result<Vec<usize>, CommandError> {
+        self.play_with_instructions_scoped(crate::league::Scope::Round)
+    }
+
+    /// As `play_with_instructions`, for the whole round or for today only.
+    pub(crate) fn play_with_instructions_scoped(
+        &mut self,
+        scope: crate::league::Scope,
+    ) -> Result<Vec<usize>, CommandError> {
+        use crate::league::Scope;
         let me: TeamId = self.watch.ok_or(CommandError::NoClub)?;
         if self.season_over() {
             return Err(CommandError::Refused("The season is over.".into()));
         }
         let instructions = self.teams[me].instructions.clone();
+        if scope == Scope::Day && self.user_fixture().is_none() {
+            return Err(CommandError::Refused(
+                "There is no game for you this round.".into(),
+            ));
+        }
         let live = if instructions.rules.is_empty() {
             None
         } else {
-            self.kickoff(me)
+            self.kickoff_scoped(me, scope)
         };
         let Some(mut live) = live else {
-            let played = self.play_round();
-            self.log.push(crate::command::Command::PlayRound);
+            let (played, command) = match scope {
+                Scope::Round => (self.play_round(), crate::command::Command::PlayRound),
+                Scope::Day => (self.play_today(), crate::command::Command::PlayToday),
+            };
+            self.log.push(command);
             return Ok(played);
         };
         let mut coach = Coach::new(&instructions, &self.rules);

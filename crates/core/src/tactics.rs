@@ -459,6 +459,11 @@ impl TacticSlot {
         ) != self.drilled
     }
 
+    /// Time spent playing the system, other than drilling it: a friendly.
+    pub fn rehearse(&mut self, gain: f32) {
+        self.train_week(gain);
+    }
+
     fn train_week(&mut self, gain: f32) {
         self.familiarity = (self.familiarity() + gain).min(1.0);
         self.drilled = (

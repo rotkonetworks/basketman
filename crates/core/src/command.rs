@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::assistant;
 use crate::books::FacilityKind;
 use crate::inbox::{Deal, OfferState, Stop};
-use crate::league::{LiveInput, TeamId, World};
+use crate::league::{LiveInput, Scope, TeamId, World};
 use crate::media::MediaLevel;
 use crate::player::PlayerId;
 use crate::staff::Job;
@@ -32,8 +32,20 @@ pub enum Command {
     TakeCharge(TeamId),
     /// Let the calendar run until a game, new mail or the draft.
     Advance,
+    /// Pass one day. Whatever is scheduled for it happens: other clubs'
+    /// games, reserve games, friendlies. Does nothing if the manager has a
+    /// game to play first.
+    Continue,
     /// Play this round's games without coaching any of them.
     PlayRound,
+    /// Play only today's games, the manager's with the assistant (or the
+    /// standing instructions) in charge. The rest of the round follows on
+    /// its days.
+    PlayToday,
+    /// A live game of `PlayToday`'s scope; logged by `World::full_time`.
+    PlayLiveToday {
+        inputs: Vec<(u32, LiveInput)>,
+    },
     /// Coach this round's game of the user's club live: the inputs were
     /// applied after that many `step` calls (see `LiveRound`). Logged by
     /// `World::full_time`; replayed by `apply`.
@@ -185,8 +197,10 @@ impl std::error::Error for CommandError {}
 pub struct Outcome {
     /// Something to tell the user, if the game had something to say.
     pub note: Option<String>,
-    /// `Advance`: why the calendar stopped.
+    /// `Advance`, `Continue`: why the calendar stopped, if it did.
     pub stop: Option<Stop>,
+    /// `Advance`, `Continue`: the day the calendar stands at.
+    pub day: Option<u32>,
     /// `PlayRound`: indices of the fixtures played.
     pub played: Vec<usize>,
     /// `CopyTactic`: the playbook index of the new entry.
@@ -223,7 +237,7 @@ impl World {
     /// A live game is logged by `full_time` as `PlayLive`, not by this.
     pub fn apply(&mut self, cmd: Command) -> Result<Outcome, CommandError> {
         let outcome = self.execute(&cmd)?;
-        if matches!(cmd, Command::PlayWithInstructions) {
+        if matches!(cmd, Command::PlayWithInstructions | Command::PlayToday) {
             // It logged the game it played, not itself.
             return Ok(outcome);
         }
@@ -275,14 +289,25 @@ impl World {
                 }
                 self.take_charge(*team);
             }
-            Command::Advance => out.stop = Some(self.advance()),
+            Command::Advance => {
+                out.stop = Some(self.advance());
+                out.day = Some(self.day);
+            }
+            Command::Continue => {
+                out.stop = self.continue_day();
+                out.day = Some(self.day);
+            }
+            Command::PlayToday => out.played = self.play_with_instructions_scoped(Scope::Day)?,
+            Command::PlayLiveToday { inputs } => {
+                out.played = self.replay_live(inputs, Scope::Day)?
+            }
             Command::PlayRound => {
                 if self.season_over() {
                     return Err(refused("The season is over."));
                 }
                 out.played = self.play_round();
             }
-            Command::PlayLive { inputs } => out.played = self.replay_live(inputs)?,
+            Command::PlayLive { inputs } => out.played = self.replay_live(inputs, Scope::Round)?,
             Command::MarkRead(id) => {
                 match self.desk.messages.iter().find(|m| m.id == *id) {
                     None => return Err(CommandError::OutOfRange("message")),

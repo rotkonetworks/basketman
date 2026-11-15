@@ -438,7 +438,7 @@ impl World {
 
     /// Before a round is played: take the gate of every home game and the
     /// round's share of sponsor money, and note what wages the round costs.
-    pub(crate) fn econ_before_games(&mut self, played: &[usize]) {
+    pub(crate) fn econ_gates(&mut self, played: &[usize]) {
         self.ensure_economy();
         if self.econ.crowds.len() < self.fixtures.len() {
             self.econ.crowds.resize(self.fixtures.len(), (0, 0));
@@ -470,6 +470,13 @@ impl World {
             l.last_attendance = att;
             l.last_gate = gate;
         }
+    }
+
+    /// When a round's first game is about to be played: the round's share
+    /// of sponsor, broadcast and shop money and running costs. `played` are
+    /// all the round's fixtures.
+    pub(crate) fn econ_round_start(&mut self, played: &[usize]) {
+        self.ensure_economy();
         let regular = self.round < self.regular_rounds();
         let rounds = self.regular_rounds().max(1) as i64;
         for club in 0..self.teams.len() {

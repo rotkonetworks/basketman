@@ -60,6 +60,9 @@ pub struct Team {
     /// `instructions.rs`.
     #[serde(default)]
     pub instructions: crate::instructions::Instructions,
+    /// 0 is the top division.
+    #[serde(default)]
+    pub division: usize,
 }
 
 fn trusting() -> f32 {
@@ -137,6 +140,13 @@ pub struct Fixture {
     /// A playoff game: it decides a series, not the table.
     #[serde(default)]
     pub playoff: bool,
+    /// Day of the season's calendar the game is played on; see
+    /// `calendar.rs`.
+    #[serde(default)]
+    pub day: u32,
+    /// The division the game belongs to.
+    #[serde(default)]
+    pub division: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -214,6 +224,22 @@ pub struct World {
     /// Fame, fans, media work and the hall of fame; see `fame.rs`.
     #[serde(default)]
     pub fame: crate::fame::FameBook,
+    /// Days of preseason before the first league week; 0 in a bare league.
+    #[serde(default)]
+    pub preseason_days: u32,
+    /// Preseason friendlies: played on their own days, never in the table.
+    #[serde(default)]
+    pub friendlies: Vec<Fixture>,
+    /// Rounds whose reserve games have been played.
+    #[serde(default)]
+    pub reserve_rounds_done: usize,
+    /// Day the draft is held; 0 until the season is over.
+    #[serde(default)]
+    pub draft_day: u32,
+    /// Seeds of this round's games already played, by fixture, for the
+    /// reserve games that follow in a bare league.
+    #[serde(default)]
+    pub round_seeds: Vec<(usize, u64)>,
 }
 
 const CITIES: [&str; 20] = [
@@ -305,6 +331,7 @@ impl World {
                 belief: 0.6,
                 office,
                 instructions: Default::default(),
+                division: 0,
             });
         }
 
@@ -349,10 +376,24 @@ impl World {
             round: 0,
             econ: Default::default(),
             fame: Default::default(),
+            preseason_days: 0,
+            friendlies: Vec::new(),
+            reserve_rounds_done: 0,
+            draft_day: 0,
+            round_seeds: Vec::new(),
         };
+        world.date_fixtures();
         world.econ = crate::finance::Economy::generate(seed, &world);
         world.ensure_fame();
         world.sign_first_deals();
+        world
+    }
+
+    /// A fresh league for a new career: like `generate`, but the calendar
+    /// opens in the training camp, four weeks before the first league game.
+    pub fn new_career(seed: u64, n_teams: usize) -> World {
+        let mut world = World::generate(seed, n_teams);
+        world.begin_preseason();
         world
     }
 
@@ -373,6 +414,27 @@ impl World {
         self.teams
             .iter()
             .position(|t| t.roster.contains(&p) || t.reserves.contains(&p))
+    }
+
+    /// How many divisions there are.
+    pub fn division_count(&self) -> usize {
+        self.teams.iter().map(|t| t.division + 1).max().unwrap_or(1)
+    }
+
+    /// "First Division", "Second Division" and so on.
+    pub fn division_name(&self, division: usize) -> String {
+        const NAMES: [&str; 5] = ["First", "Second", "Third", "Fourth", "Fifth"];
+        match NAMES.get(division) {
+            Some(n) => format!("{n} Division"),
+            None => format!("Division {}", division + 1),
+        }
+    }
+
+    /// The clubs of a division, by id.
+    pub fn division_teams(&self, division: usize) -> Vec<TeamId> {
+        (0..self.teams.len())
+            .filter(|&t| self.teams[t].division == division)
+            .collect()
     }
 
     pub fn rounds(&self) -> usize {
@@ -396,23 +458,49 @@ impl World {
         ids
     }
 
-    /// Play every fixture of the current round, then run a week of training
-    /// and wages. Returns the indices of the fixtures played.
+    /// Play every fixture of the current round still to be played, then the
+    /// round's weekly business (training, health, wages) as the last game
+    /// finishes. The days before the round's first game pass first: a
+    /// preseason runs its course. Returns the indices of the fixtures
+    /// played.
     pub fn play_round(&mut self) -> Vec<usize> {
-        let (played, seeds) = self.draw_round();
-        self.complete_round(played, seeds, None)
+        self.run_up_to_round();
+        let (played, seeds) = self.draw_block(u32::MAX);
+        let last = self.last_day_of(&played);
+        let out = self.complete_block(played, seeds, None);
+        self.settle_to(last);
+        out
     }
 
     /// Start this round with `team`'s game played live: the caller steps
     /// `LiveRound::game` to the end and hands it back to `full_time`. `None`
     /// if the team has no game left. The game is seeded exactly as
-    /// `play_round` would seed it.
+    /// `play_round` would seed it. The round's other games wait.
     pub fn kickoff(&mut self, team: TeamId) -> Option<LiveRound> {
+        self.kickoff_scoped(team, Scope::Round)
+    }
+
+    /// Like `kickoff`, but only the games up to the day of `team`'s own are
+    /// held back for it; later days of the round play on their own days.
+    pub fn kickoff_today(&mut self, team: TeamId) -> Option<LiveRound> {
+        self.kickoff_scoped(team, Scope::Day)
+    }
+
+    pub(crate) fn kickoff_scoped(&mut self, team: TeamId, scope: Scope) -> Option<LiveRound> {
         let fixture = (0..self.fixtures.len()).find(|&i| {
             let f = &self.fixtures[i];
-            f.round == self.round && (f.home == team || f.away == team)
+            f.round == self.round && f.result.is_none() && (f.home == team || f.away == team)
         })?;
-        let (played, seeds) = self.draw_round();
+        let by = match scope {
+            Scope::Round => u32::MAX,
+            Scope::Day => self.fixtures[fixture].day,
+        };
+        let target = match scope {
+            Scope::Round => self.next_game_day().unwrap_or(self.day),
+            Scope::Day => self.fixtures[fixture].day,
+        };
+        self.skip_to(target);
+        let (played, seeds) = self.draw_block(by);
         let n = played.iter().position(|&i| i == fixture)?;
         let f = &self.fixtures[fixture];
         let side = if f.home == team { 0 } else { 1 };
@@ -431,14 +519,17 @@ impl World {
             inputs: Vec::new(),
             played,
             seeds,
+            scope,
         })
     }
 
     /// Book a finished live game and play the rest of its round. What the
     /// coach did is appended to `log` as `Command::PlayLive`.
     pub fn full_time(&mut self, live: LiveRound) -> Vec<usize> {
-        self.log.push(Command::PlayLive {
-            inputs: live.inputs.clone(),
+        let inputs = live.inputs.clone();
+        self.log.push(match live.scope {
+            Scope::Round => Command::PlayLive { inputs },
+            Scope::Day => Command::PlayLiveToday { inputs },
         });
         self.book(live)
     }
@@ -449,13 +540,14 @@ impl World {
     pub(crate) fn replay_live(
         &mut self,
         inputs: &[(u32, LiveInput)],
+        scope: Scope,
     ) -> Result<Vec<usize>, CommandError> {
         let me = self.watch.ok_or(CommandError::NoClub)?;
         if self.season_over() {
             return Err(CommandError::Refused("The season is over.".into()));
         }
         let mut live = self
-            .kickoff(me)
+            .kickoff_scoped(me, scope)
             .ok_or_else(|| CommandError::Refused("There is no game for you this round.".into()))?;
         for (at, input) in inputs {
             while live.steps < *at && !live.game.is_over() {
@@ -471,11 +563,14 @@ impl World {
 
     fn book(&mut self, live: LiveRound) -> Vec<usize> {
         let (result, recording) = live.game.finish();
-        self.complete_round(
+        let last = self.last_day_of(&live.played);
+        let out = self.complete_block(
             live.played,
             live.seeds,
             Some((live.fixture, result, recording)),
-        )
+        );
+        self.settle_to(last);
+        out
     }
 
     /// True if fixture `i` was recorded and can be watched again.
@@ -493,55 +588,101 @@ impl World {
         }
     }
 
-    /// This round's fixtures and a seed for each. Every game gets its own
-    /// seed up front, so the games are independent and the result is the
-    /// same however many threads simulate them.
-    fn draw_round(&mut self) -> (Vec<usize>, Vec<u64>) {
+    /// The fixtures of the current round still to play that are due by day
+    /// `by`, and a seed for each. Every game gets its own seed up front, so
+    /// the games are independent and the result is the same however many
+    /// threads simulate them.
+    pub(crate) fn draw_block(&mut self, by: u32) -> (Vec<usize>, Vec<u64>) {
         let played: Vec<usize> = (0..self.fixtures.len())
-            .filter(|&i| self.fixtures[i].round == self.round)
+            .filter(|&i| {
+                let f = &self.fixtures[i];
+                f.round == self.round && f.result.is_none() && f.day <= by
+            })
             .collect();
-        let seeds = played.iter().map(|_| self.rng.next_u64()).collect();
+        let seeds: Vec<u64> = played.iter().map(|_| self.rng.next_u64()).collect();
+        self.round_seeds
+            .extend(played.iter().copied().zip(seeds.iter().copied()));
         (played, seeds)
     }
 
-    fn complete_round(
+    pub(crate) fn last_day_of(&self, fixtures: &[usize]) -> u32 {
+        fixtures
+            .iter()
+            .map(|&i| self.fixtures[i].day)
+            .max()
+            .unwrap_or(self.day)
+    }
+
+    /// Simulate a batch of games, in parallel when the feature is on.
+    /// `record` says which are recorded for the viewer.
+    pub(crate) fn simulate_batch(
+        &self,
+        jobs: &[(TeamId, TeamId, u64, bool)],
+    ) -> Vec<(GameResult, Option<Recording>)> {
+        let simulate = |&(home, away, seed, record): &(TeamId, TeamId, u64, bool)| {
+            let home = lineup(&self.teams[home], &self.players);
+            let away = lineup(&self.teams[away], &self.players);
+            let rng = &mut Rng::new(seed);
+            // Recording does not change the result, only keeps it.
+            if record {
+                let (result, recording) = simulate_recorded(&home, &away, &self.rules, rng);
+                (result, Some(recording))
+            } else {
+                (simulate_game(&home, &away, &self.rules, rng), None)
+            }
+        };
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            jobs.par_iter().map(simulate).collect()
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            jobs.iter().map(simulate).collect()
+        }
+    }
+
+    /// Play a block of the round: `played` are fixture indices with a seed
+    /// each, one of which may already have been played live. When the last
+    /// game of the round is in, the round's weekly business follows.
+    pub(crate) fn complete_block(
         &mut self,
         played: Vec<usize>,
         seeds: Vec<u64>,
         live: Option<(usize, GameResult, Recording)>,
     ) -> Vec<usize> {
+        let round = self.round;
+        let first = !self
+            .fixtures
+            .iter()
+            .any(|f| f.round == round && f.result.is_some());
+        let all: Vec<usize> = (0..self.fixtures.len())
+            .filter(|&i| self.fixtures[i].round == round)
+            .collect();
+        if first {
+            self.econ_round_start(&all);
+        }
+        self.econ_gates(&played);
         let skip = live.as_ref().map(|l| l.0);
-        self.econ_before_games(&played);
-        let simulate = |(&i, &seed): (&usize, &u64)| {
-            if Some(i) == skip {
-                return None;
-            }
-            let f = &self.fixtures[i];
-            let home = lineup(&self.teams[f.home], &self.players);
-            let away = lineup(&self.teams[f.away], &self.players);
-            let rng = &mut Rng::new(seed);
-            // Recording does not change the result, only keeps it.
-            Some(
-                if self.watch == Some(f.home) || self.watch == Some(f.away) {
-                    let (result, recording) = simulate_recorded(&home, &away, &self.rules, rng);
-                    (result, Some(recording))
-                } else {
-                    (simulate_game(&home, &away, &self.rules, rng), None)
-                },
-            )
-        };
-        #[cfg(feature = "parallel")]
-        let results: Vec<Option<(GameResult, Option<Recording>)>> = {
-            use rayon::prelude::*;
-            played.par_iter().zip(&seeds).map(simulate).collect()
-        };
-        #[cfg(not(feature = "parallel"))]
-        let results: Vec<Option<(GameResult, Option<Recording>)>> =
-            played.iter().zip(&seeds).map(simulate).collect();
+        let jobs: Vec<(TeamId, TeamId, u64, bool)> = played
+            .iter()
+            .zip(&seeds)
+            .filter(|(i, _)| Some(**i) != skip)
+            .map(|(&i, &seed)| {
+                let f = &self.fixtures[i];
+                let record = self.watch == Some(f.home) || self.watch == Some(f.away);
+                (f.home, f.away, seed, record)
+            })
+            .collect();
+        let mut simulated = self.simulate_batch(&jobs).into_iter();
         let mut live = live.map(|(_, result, recording)| (result, Some(recording)));
 
-        for (&i, result) in played.iter().zip(results) {
-            let Some((result, recording)) = result.or_else(|| live.take()) else {
+        for &i in &played {
+            let Some((result, recording)) = (if Some(i) == skip {
+                live.take()
+            } else {
+                simulated.next()
+            }) else {
                 continue;
             };
             if let Some(recording) = recording
@@ -592,10 +733,40 @@ impl World {
             self.after_game(i, &result);
             self.fixtures[i].result = Some(result);
         }
-        self.reserve_round(&played, &seeds);
+        self.after_games(&played);
+        self.send_off(&played);
+        let done = self
+            .fixtures
+            .iter()
+            .all(|f| f.round != round || f.result.is_some());
+        if done {
+            self.close_round(round, all);
+        }
+        played
+    }
+
+    /// The last game of a round is in: the week's business. Reserves have
+    /// played, injuries heal, the squad trains, wages are paid, the
+    /// playoffs move on and the post goes out.
+    fn close_round(&mut self, round: usize, all: Vec<usize>) {
+        self.reserves_for(round);
         self.health_week();
         self.dressing_week();
+        let before = self.weekly_training();
+        self.pay_wages();
+        self.round += 1;
+        self.playoffs_step(&all);
+        self.after_round(&all, &before);
+        self.econ_after_round();
+        self.fame_week(&all);
+        if self.season_over() && self.draft_day == 0 {
+            self.draft_day = self.default_draft_day();
+        }
+    }
 
+    /// A week of training for every squad, from the assistant's plans or
+    /// the manager's. Returns the user's players' overall before it.
+    pub(crate) fn weekly_training(&mut self) -> Vec<(PlayerId, f32)> {
         let before: Vec<(PlayerId, f32)> = self.watch.map_or(Vec::new(), |t| {
             self.teams[t]
                 .roster
@@ -610,7 +781,6 @@ impl World {
         }
         // Media work and events take some of the week's training.
         let media = self.media_factors();
-        let mut paid = Vec::new();
         for team in &mut self.teams {
             let gym = self
                 .econ
@@ -633,6 +803,14 @@ impl World {
                 team.active,
                 team.schedule.familiarity_gain() * team.office.drilling(),
             );
+        }
+        before
+    }
+
+    /// A round's wages: players and staff, a fifty-second of the year each.
+    fn pay_wages(&mut self) {
+        let mut paid = Vec::new();
+        for team in &self.teams {
             let wages: i64 = team
                 .roster
                 .iter()
@@ -646,14 +824,16 @@ impl World {
             self.transact(team, -players, crate::finance::Cat::PlayerWages);
             self.transact(team, -staff, crate::finance::Cat::StaffWages);
         }
-        self.round += 1;
-        self.playoffs_step(&played);
-        self.after_round(&played, &before);
-        self.econ_after_round();
-        self.fame_week(&played);
-        self.send_off(&played);
-        played
     }
+}
+
+/// How much of the round a played game takes with it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope {
+    /// Every game of the round still to play.
+    Round,
+    /// The games up to the day of the user's own.
+    Day,
 }
 
 /// A round whose other games wait while one is played live.
@@ -671,6 +851,8 @@ pub struct LiveRound {
     inputs: Vec<(u32, LiveInput)>,
     played: Vec<usize>,
     seeds: Vec<u64>,
+    /// What the rest of the block holds.
+    pub scope: Scope,
 }
 
 /// Something the coach does during a live game.
@@ -761,6 +943,8 @@ pub(crate) fn schedule(n: usize) -> Vec<Fixture> {
                 away,
                 result: None,
                 playoff: false,
+                day: 0,
+                division: 0,
             });
         }
         ids[1..].rotate_right(1);
@@ -773,6 +957,8 @@ pub(crate) fn schedule(n: usize) -> Vec<Fixture> {
             away: f.home,
             result: None,
             playoff: false,
+            day: 0,
+            division: 0,
         })
         .collect();
     fixtures.extend(mirrored);

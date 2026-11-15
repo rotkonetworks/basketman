@@ -3,7 +3,7 @@
 //! the manager.
 
 use basketman_core::command::Command;
-use basketman_core::inbox::{Kind, Message, OfferState, Stop, date};
+use basketman_core::inbox::{Kind, Message, OfferState, Stop};
 use eframe::egui::{self, Align2, FontId, RichText, Sense, Stroke, Ui, vec2};
 
 use crate::app::{App, Tab, money};
@@ -31,11 +31,8 @@ impl App {
         if self.world.match_today() {
             let opponent = self
                 .world
-                .fixtures
-                .iter()
-                .find(|f| {
-                    f.round == self.world.round && (f.home == self.team || f.away == self.team)
-                })
+                .user_fixture()
+                .map(|i| &self.world.fixtures[i])
                 .map(|f| if f.home == self.team { f.away } else { f.home });
             let hint = match opponent {
                 Some(t) => format!(
@@ -52,9 +49,9 @@ impl App {
             .fill(theme::TEXT)
             .stroke(Stroke::NONE);
             if ui.add(play).on_hover_text(hint).clicked() {
-                self.live = self.world.kickoff(self.team);
+                self.live = self.world.kickoff_today(self.team);
                 if self.live.is_none() {
-                    let _ = self.world.apply(Command::PlayRound);
+                    let _ = self.world.apply(Command::PlayToday);
                 }
                 self.touchline = Default::default();
                 self.playback = crate::matchview::Playback::start();
@@ -68,7 +65,7 @@ impl App {
                 let team = self.team;
                 let played = self
                     .world
-                    .apply(Command::PlayRound)
+                    .apply(Command::PlayToday)
                     .map(|o| o.played)
                     .unwrap_or_default();
                 self.last_game = played.into_iter().find(|&i| {
@@ -91,7 +88,40 @@ impl App {
             }
             return;
         }
-        if theme::primary_button(ui, true, "Continue") {
+        let friendly = self.world.friendly_today().is_some();
+        let label = if friendly { "Play friendly" } else { "Continue" };
+        let hint = if friendly {
+            "A friendly is on today. It is played when the day passes; your assistant picks the side."
+        } else {
+            "Pass one day. Other clubs play their games on their days."
+        };
+        if ui
+            .add(
+                egui::Button::new(
+                    RichText::new(label)
+                        .family(theme::semibold())
+                        .color(theme::BG),
+                )
+                .fill(theme::TEXT)
+                .stroke(Stroke::NONE),
+            )
+            .on_hover_text(hint)
+            .clicked()
+        {
+            if let Some(Stop::Draft) = self
+                .world
+                .apply(Command::Continue)
+                .ok()
+                .and_then(|o| o.stop)
+            {
+                self.go(Tab::Draft);
+            }
+        }
+        if ui
+            .button(if compact { "Skip" } else { "Next event" })
+            .on_hover_text("Jump to the next thing that needs you: a game, mail or the draft.")
+            .clicked()
+        {
             match self.world.apply(Command::Advance).ok().and_then(|o| o.stop) {
                 Some(Stop::Mail) => {
                     let newest = self.world.inbox().iter().find(|m| !m.read).map(|m| m.id);
@@ -203,7 +233,7 @@ impl App {
                             if waiting {
                                 "needs an answer".to_string()
                             } else {
-                                date(m.day)
+                                self.world.day_label(m.day)
                             },
                             FontId::new(11.5, egui::FontFamily::Monospace),
                             if waiting {
@@ -251,7 +281,7 @@ impl App {
         bd.card(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.set_min_height(420.0);
-            theme::eyebrow(ui, &format!("{} / {}", m.kind.label(), date(m.day)));
+            theme::eyebrow(ui, &format!("{} / {}", m.kind.label(), self.world.day_label(m.day)));
             ui.add_space(2.0);
             ui.label(RichText::new(&m.subject).font(FontId::new(24.0, theme::semibold())));
             ui.label(RichText::new(format!("From {}", m.from)).color(theme::TEXT_DIM));

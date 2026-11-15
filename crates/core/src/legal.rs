@@ -239,9 +239,30 @@ impl World {
             json!({}),
             Some(Command::Advance),
         ));
+        out.push(spec(
+            "Continue",
+            "Pass one day: other clubs' games, reserve games and friendlies are played on their days. Does nothing while you have a game to play today.",
+            None,
+            json!({}),
+            Some(Command::Continue),
+        ));
         let over = self
             .season_over()
             .then(|| "The season is over.".to_string());
+        let no_game = if over.is_some() {
+            over.clone()
+        } else if self.user_fixture().is_none() {
+            Some("You have no game this round.".to_string())
+        } else {
+            None
+        };
+        out.push(spec(
+            "PlayToday",
+            "Play only today's games, with the assistant coaching yours; the rest of the round is played on its days.",
+            no_game,
+            json!({}),
+            Some(Command::PlayToday),
+        ));
         out.push(spec(
             "PlayRound",
             "Play this round's games with the assistant coaching yours.",
@@ -259,6 +280,13 @@ impl World {
         out.push(spec(
             "PlayLive",
             "Not for direct use: a live game you coach is played with the live match requests of the protocol, and logged as this.",
+            Some("Use kickoff and live inputs.".into()),
+            json!({}),
+            None,
+        ));
+        out.push(spec(
+            "PlayLiveToday",
+            "Not for direct use: a live game of today's games only, logged as this.",
             Some("Use kickoff and live inputs.".into()),
             json!({}),
             None,

@@ -2,7 +2,7 @@
 //! and Back retraces the steps. Also the two pages only links lead to: a
 //! club's page and a played game's page.
 
-use basketman_core::inbox::{MATCH_DAY, date};
+
 use basketman_core::league::TeamId;
 use basketman_core::player::PlayerId;
 use eframe::egui::{self, FontId, RichText, Sense, Stroke, Ui, vec2};
@@ -187,19 +187,19 @@ impl App {
                             if only.is_some_and(|t| f.home != t && f.away != t) {
                                 continue;
                             }
-                            let day = f.round as u32 * 7 + MATCH_DAY;
+                            let day = f.day;
                             if f.round != round && only.is_none() {
                                 round = f.round;
                                 let label = if f.playoff {
-                                    format!("Playoffs / {}", date(day))
+                                    format!("Playoffs / {}", w.day_label(day))
                                 } else {
-                                    format!("Round {} / {}", f.round + 1, date(day))
+                                    format!("Round {} / {}", f.round + 1, w.day_label(day))
                                 };
                                 ui.label(theme::eyebrow_text(&label));
                                 ui.end_row();
                             }
                             if only.is_some() {
-                                ui.label(theme::mono(date(day)).color(theme::TEXT_MUTE));
+                                ui.label(theme::mono(w.day_label(day)).color(theme::TEXT_MUTE));
                             }
                             self.club_link(ui, f.home);
                             match &f.result {
@@ -488,12 +488,12 @@ impl App {
         };
         self.back_row(ui);
         let f = self.world.fixtures[i].clone();
-        let day = f.round as u32 * 7 + MATCH_DAY;
+        let day = f.day;
         let taped = self.world.has_tape(i);
         let mut watch = false;
         bd.card(ui, |ui| {
             ui.set_width(ui.available_width());
-            theme::eyebrow(ui, &format!("Round {} / {}", f.round + 1, date(day)));
+            theme::eyebrow(ui, &format!("Round {} / {}", f.round + 1, self.world.day_label(day)));
             ui.add_space(2.0);
             ui.horizontal_wrapped(|ui| {
                 let big =

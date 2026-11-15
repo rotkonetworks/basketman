@@ -19,6 +19,8 @@ const VIEW_KEY: &str = "basketman.view";
 #[derive(PartialEq, Clone, Copy)]
 pub(crate) enum Tab {
     Inbox,
+    /// The month view under Home.
+    Calendar,
     Squad,
     Tactics,
     Training,
@@ -49,8 +51,9 @@ pub(crate) enum Tab {
 
 impl Tab {
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    pub(crate) const ALL: [Tab; 12] = [
+    pub(crate) const ALL: [Tab; 13] = [
         Tab::Inbox,
+        Tab::Calendar,
         Tab::Squad,
         Tab::Tactics,
         Tab::Training,
@@ -67,6 +70,7 @@ impl Tab {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Tab::Inbox => "Inbox",
+            Tab::Calendar => "Calendar",
             Tab::Squad => "Squad",
             Tab::Tactics => "Tactics",
             Tab::Training => "Training",
@@ -459,10 +463,21 @@ impl App {
                     }
                 }
                 // `SHOT_ROUNDS=12` plays that many rounds instead of three.
-                let rounds = std::env::var("SHOT_ROUNDS")
+                // `SHOT_DAYS=10` instead passes that many days of the camp.
+                let days: Option<u32> = std::env::var("SHOT_DAYS")
                     .ok()
-                    .and_then(|n| n.parse().ok())
-                    .unwrap_or(3);
+                    .and_then(|n| n.parse().ok());
+                let rounds = if days.is_some() {
+                    0
+                } else {
+                    std::env::var("SHOT_ROUNDS")
+                        .ok()
+                        .and_then(|n| n.parse().ok())
+                        .unwrap_or(3)
+                };
+                for _ in 0..days.unwrap_or(0) {
+                    let _ = app.world.apply(Command::Continue);
+                }
                 for _ in 0..rounds {
                     let played = app.world.play_round();
                     app.last_game = played.into_iter().find(|&i| {
@@ -515,7 +530,7 @@ impl App {
                     }
                 }
                 // Let the week's mail arrive.
-                while app.world.advance() == basketman_core::inbox::Stop::Mail {}
+                while days.is_none() && app.world.advance() == basketman_core::inbox::Stop::Mail {}
                 // `--screenshot file draft` plays the season out to the draft;
                 // `--screenshot file trade` shows a deal half built.
                 if tab == Some("draft") {
@@ -766,7 +781,7 @@ impl App {
 
     /// Start a new career in charge of `team` in the world of `self.seed`.
     pub(crate) fn begin(&mut self, team: TeamId) {
-        self.world = World::generate(self.seed, TEAMS);
+        self.world = World::new_career(self.seed, TEAMS);
         self.team = team;
         let _ = self.world.apply(Command::TakeCharge(team));
         self.mail = None;

@@ -170,6 +170,18 @@ fn outcome_json(w: &World, o: &Outcome) -> Value {
     if let Some(s) = o.slot {
         out.insert("slot".into(), json!(s));
     }
+    if let Some(d) = o.day {
+        out.insert("date".into(), json!(w.day_label(d)));
+        out.insert("weekday".into(), json!(w.weekday(d)));
+        // What is on the new day for the manager's own club.
+        let mine: Vec<Value> = w
+            .events_on(d)
+            .iter()
+            .filter(|e| me.is_some() && (e.home == me || e.away == me) || e.home.is_none())
+            .map(|e| to_json(e))
+            .collect();
+        out.insert("today".into(), Value::Array(mine));
+    }
     if !o.played.is_empty() {
         out.insert("played".into(), json!(o.played));
         let games: Vec<Value> = o
@@ -252,8 +264,13 @@ impl Session {
             "trade_check" => self.trade_check(a),
             "apply" => self.apply(a.get("command").unwrap_or(a)),
             "advance" => self.apply(&json!("Advance")),
+            "continue" => self.apply(&json!("Continue")),
             "play_round" => {
-                if get_bool(a, "instructions")?.unwrap_or(false) {
+                let today = get_bool(a, "today")?.unwrap_or(false);
+                if today {
+                    // Standing instructions, if there are any, coach it.
+                    self.apply(&json!("PlayToday"))
+                } else if get_bool(a, "instructions")?.unwrap_or(false) {
                     self.apply(&json!("PlayWithInstructions"))
                 } else {
                     self.apply(&json!("PlayRound"))
@@ -301,7 +318,7 @@ impl Session {
         if club >= clubs {
             return Err(bad(format!("club must be 0..={}", clubs - 1)));
         }
-        let mut w = World::generate(seed, clubs);
+        let mut w = World::new_career(seed, clubs);
         w.apply(Command::TakeCharge(club))?;
         self.world = Some(w);
         self.view(&json!({"what": "summary"}))
@@ -384,7 +401,36 @@ impl Session {
             }
             "market" => to_json(&w.view_market(me).ok_or_else(none)?),
             "draft" => to_json(&w.view_draft(me)),
-            "calendar" => to_json(&w.view_calendar()),
+            "calendar" => {
+                let mut v = to_json(&w.view_calendar());
+                // `day`, or `from` and `to`: what is on, across the league
+                // (or for one `club`).
+                let (from, to) = match get_u64(a, "day")? {
+                    Some(d) => (Some(d as u32), Some(d as u32)),
+                    None => (
+                        get_u64(a, "from")?.map(|x| x as u32),
+                        get_u64(a, "to")?.map(|x| x as u32),
+                    ),
+                };
+                if from.is_some() || to.is_some() {
+                    let from = from.unwrap_or(0);
+                    let to = to.unwrap_or(from + 30);
+                    let club = get_u64(a, "club")?.map(|c| c as usize);
+                    let events: Vec<Value> = w
+                        .calendar_events(from, to)
+                        .iter()
+                        .filter(|e| club.is_none() || e.home == club || e.away == club)
+                        .map(|e| {
+                            let mut j = to_json(e);
+                            j["date"] = json!(w.day_label(e.day));
+                            j["weekday"] = json!(w.weekday(e.day));
+                            j
+                        })
+                        .collect();
+                    v["events"] = Value::Array(events);
+                }
+                v
+            }
             "leaders" => to_json(&w.view_leaders(get_u64(a, "n")?.unwrap_or(15) as usize)),
             "league" => to_json(&w.view_league(me).ok_or_else(none)?),
             "finance" => to_json(&w.view_finance(me).ok_or_else(none)?),
@@ -456,9 +502,12 @@ impl Session {
                 "there is no game today: advance to match day first",
             ));
         }
-        let round = w
-            .kickoff(me)
-            .ok_or_else(|| AgentError::new("no_game", "There is no game for you this round."))?;
+        let round = if get_bool(a, "today")?.unwrap_or(false) {
+            w.kickoff_today(me)
+        } else {
+            w.kickoff(me)
+        }
+        .ok_or_else(|| AgentError::new("no_game", "There is no game for you this round."))?;
         let coach = use_rules.then(|| Coach::new(&w.teams[me].instructions, &w.rules));
         self.live = Some(Live {
             round,

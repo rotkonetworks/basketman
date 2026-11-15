@@ -54,7 +54,8 @@ The MCP tool names and the line-protocol operations are the same set (the tool `
 | `legal_actions` | What the game is waiting for, and every kind of command with its parameters and an example. |
 | `apply_command` | Carry out one `Command`. |
 | `advance` | Move the calendar to the next match day, new mail or the draft. |
-| `play_round` | Play this round's games without coaching live, optionally with standing instructions. |
+| `continue` | Pass exactly one day. Returns the new `date`, `weekday` and `today` (what is on that day for your club), and `stop` if the new day holds mail, a game of yours or the draft. |
+| `play_round` | Play this round's games without coaching live, optionally with standing instructions. With `today=true` only today's games are played (see Time). |
 | `suggest_tactics` | A valid `Tactics` value with a fit rotation. |
 | `trade_check` | Ask the other club's general manager about a deal without making it. |
 | `set_instructions` | Store standing match instructions. |
@@ -68,6 +69,14 @@ The line protocol also has `get_instructions` and `ping`.
 Start with `new_game` and `view` with `what=summary`. The summary has the calendar, the record, the budget, the next game and `waiting`, which says what the game needs from you next. Then look at `view` with `what=own` for the whole club and `what=inbox` for the mail.
 
 `waiting.kind` is one of `draft_pick`, `offer`, `press`, `sponsor_offer`, `appearance`, `match_day` or `nothing`. An open transfer offer for one of your players lapses if you leave it. A sponsor's appearance request (`appearance`, with a `request` index) lapses after a few days; accepted, it pays the fee on the day of the event. A press question lapses after the next round. A draft pick holds the calendar: `advance` will not get past the draft until you pick, with `DraftPick` or `DraftAuto`. Answer these with `apply_command`, using the choices in `legal_actions`.
+
+## Time
+
+A new game opens in the preseason: four weeks of training camp (days 0 to 27, day 0 a Monday in early September), with four friendlies arranged for every club. Friendlies are played on their own days, automatically (your assistant picks the side, your standing instructions do not apply), and do not count in the table or the season's averages; they do tire, sharpen, hurt and cheer the players, rehearse the system you play, and each one of yours sends a mail. Opening day is day 28 to 34. A league round is a week: reserve games on Wednesday, league games on Friday, Saturday and Sunday (your club's first-listed fixture is always on Saturday). Weekly work (training, health, wages, the post) runs once per round, when its last game is in; in the camp it runs once a week without wages. After the last round and the playoffs the season is over, the draft is held on a Thursday about two weeks later, contracts, ageing and retirements happen with it, and the next season opens in its camp.
+
+`view` with `what=summary` has `calendar` with `day`, `date`, `weekday`, `phase` (`preseason`, `season`, `playoffs`, `offseason`), `match_today`, `friendly_today`, `draft_day`, `next_stop` and `today`, everything on today's calendar across the league. `view` with `what=calendar` also takes `day`, or `from` and `to` (day numbers), and optionally `club`, and returns `events`: each has a `day`, `date`, `weekday`, `kind` (`League`, `Playoff`, `Friendly`, `Reserve`, `Marker`, `Draft`), `home`, `away`, `played`, `score` and `division`.
+
+`advance` runs days until `stop` is `match_day` (a league or playoff game of yours is due), `mail` (mail arrived that day) or `draft`. It plays every other game on its own day on the way. `continue` passes one day and reports `stop` the same way, or no `stop` for a quiet day; with a game of yours due it does nothing and says `match_day`. `play_round` and `PlayWithInstructions` play the whole round (the rest of the weekend too) and so does a live game from `live_kickoff`; `play_round` with `today=true` (the `PlayToday` command), and `live_kickoff` with `today=true` (logged as `PlayLiveToday`), play only the games due by your game's day, and the rest of the round is played as the days pass. `Stop` never has other values: to know why time stopped, read `stop`, `waiting` and `today`.
 
 The loop is: answer what waits, adjust the club if you want to, `advance` until `stop` is `match_day`, then `play_round` or coach live, and repeat. When the season ends the draft opens, and when it is done the next season starts.
 

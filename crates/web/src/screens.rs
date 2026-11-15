@@ -174,6 +174,7 @@ impl App {
             | Tab::Game
             | Tab::Film => 640.0,
             Tab::Reserves => 600.0,
+            Tab::Calendar => 340.0,
             _ => 420.0,
         }
     }
@@ -197,6 +198,7 @@ impl App {
     pub(crate) fn page_body(&mut self, ui: &mut Ui, bd: &Backdrop, tab: Tab) {
         match tab {
             Tab::Inbox => {}
+            Tab::Calendar => self.calendar_page(ui, bd),
             Tab::Squad => self.squad(ui, bd),
             Tab::Tactics => {}
             Tab::Training => self.training(ui, bd),

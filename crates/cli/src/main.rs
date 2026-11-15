@@ -127,7 +127,7 @@ fn main() {
     let seed: u64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1);
     let n_teams: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(12);
 
-    let mut w = World::generate(seed, n_teams);
+    let mut w = World::new_career(seed, n_teams);
     let first = w.play_round()[0];
     let f = &w.fixtures[first];
     print_box(&w, f.home, f.away, f.result.as_ref().unwrap());
