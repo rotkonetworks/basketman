@@ -754,8 +754,11 @@ impl World {
                     club_name: self.teams[s.club].name.clone(),
                     from_year: year(s.from_season),
                     to_year: s.to_season.map(year),
-                    wins: s.wins,
-                    losses: s.losses,
+                    // The season in progress counts for the job he holds.
+                    wins: s.wins
+                        + if s.ended == Ending::Current { self.standings[s.club].wins } else { 0 },
+                    losses: s.losses
+                        + if s.ended == Ending::Current { self.standings[s.club].losses } else { 0 },
                     best_place: s.places.iter().map(|p| p.1).min(),
                     titles: s.titles,
                     ended: match s.ended {
@@ -812,5 +815,20 @@ impl World {
             transfer_budget: books.transfer_budget,
             your_club_stature: self.watch.map(|m| self.stature(m)),
         })
+    }
+}
+
+impl World {
+    /// Make `club` lose its manager and call, whatever the manager's name
+    /// is worth. Not a player action: for the screenshot harness and tests.
+    pub fn stage_offer(&mut self, club: TeamId) -> Option<usize> {
+        self.career.reputation = self.career.reputation.max(self.stature(club) as i32);
+        self.manager_out(club, "staged");
+        if self.open_job_offers().iter().all(|&i| self.career.offers[i].club != club) {
+            self.make_offer(club, "Your name was the first they thought of.");
+        }
+        self.open_job_offers()
+            .into_iter()
+            .find(|&i| self.career.offers[i].club == club)
     }
 }

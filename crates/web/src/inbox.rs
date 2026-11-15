@@ -349,6 +349,9 @@ impl App {
             if let Some(i) = m.press {
                 self.press_buttons(ui, i);
             }
+            if let Some(i) = m.job {
+                self.job_buttons(ui, i);
+            }
             if !m.players.is_empty() {
                 ui.add_space(14.0);
                 ui.horizontal_wrapped(|ui| {

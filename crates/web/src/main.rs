@@ -4,6 +4,7 @@
 mod app;
 mod arena;
 mod board;
+mod club_ui;
 mod coach;
 mod fame_ui;
 mod film;
