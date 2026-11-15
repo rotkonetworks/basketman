@@ -223,6 +223,32 @@ impl World {
         }
     }
 
+    /// A save from before the calendar has fixtures without days: give them
+    /// the old calendar's (a round a week, the game on Saturday, no
+    /// preseason), so time passes in a loaded world as it did when it was
+    /// saved. A dated world always has round 0 at day 5 or later.
+    pub(crate) fn ensure_calendar(&mut self) {
+        if self.fixtures.is_empty() || self.fixtures.iter().any(|f| f.day != 0) {
+            return;
+        }
+        self.date_fixtures();
+        let mut seen: Vec<(usize, usize)> = Vec::new();
+        let base = self.preseason_days;
+        for f in self.fixtures.iter_mut().filter(|f| f.playoff) {
+            let k = match seen.iter_mut().find(|s| s.0 == f.round) {
+                Some(s) => {
+                    s.1 += 1;
+                    s.1 - 1
+                }
+                None => {
+                    seen.push((f.round, 1));
+                    0
+                }
+            };
+            f.day = base + 7 * f.round as u32 + 5 + (k % 2) as u32;
+        }
+    }
+
     /// Arrange the preseason friendlies: four rounds of pairings, each club
     /// meeting somebody from its own division.
     pub(crate) fn arrange_friendlies(&mut self) {

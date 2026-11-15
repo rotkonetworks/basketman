@@ -13,7 +13,7 @@ use crate::league::{TeamId, World};
 
 /// How much weaker, in the units of a squad's average quality, each
 /// division down is.
-pub const QUALITY_STEP: f32 = 1.0;
+pub const QUALITY_STEP: f32 = 1.05;
 /// What a club of each division starts with in the bank.
 pub const START_BUDGET: [i64; 5] = [1_000_000, 650_000, 420_000, 300_000, 250_000];
 /// How big a hall is, against the top division's.

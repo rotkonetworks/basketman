@@ -88,6 +88,8 @@ pub fn decode(bytes: &[u8]) -> Result<World, SaveError> {
     // Saves from before arenas and sponsors existed get theirs here.
     world.ensure_economy();
     world.ensure_fame();
+    // Saves from before the calendar get their game days.
+    world.ensure_calendar();
     Ok(world)
 }
 
@@ -240,6 +242,62 @@ mod tests {
             w.tapes.len()
         );
         assert!(sizes[2] < 1_500_000, "{sizes:?}");
+    }
+
+    #[test]
+    fn a_save_from_before_the_calendar_keeps_time_passing() {
+        let mut w = World::generate(6, 8);
+        w.apply(Command::TakeCharge(0)).unwrap();
+        for _ in 0..3 {
+            while w.apply(Command::Advance).unwrap().stop != Some(Stop::MatchDay) {}
+            w.apply(Command::PlayRound).unwrap();
+        }
+        assert_eq!(w.round, 3);
+        let bytes = encode(&w);
+        let json = decompress_to_vec_with_limit(&bytes[HEADER..], LIMIT).unwrap();
+        let mut v: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        let obj = v.as_object_mut().unwrap();
+        for k in [
+            "friendlies",
+            "preseason_days",
+            "reserve_rounds_done",
+            "draft_day",
+            "round_seeds",
+            "tiers",
+        ] {
+            obj.remove(k);
+        }
+        for f in obj["fixtures"].as_array_mut().unwrap() {
+            let f = f.as_object_mut().unwrap();
+            f.remove("day");
+            f.remove("division");
+        }
+        for t in obj["teams"].as_array_mut().unwrap() {
+            t.as_object_mut().unwrap().remove("division");
+        }
+        let mut old = MAGIC.to_vec();
+        old.push(VERSION);
+        old.extend(compress_to_vec(&serde_json::to_vec(&v).unwrap(), LEVEL));
+        let mut loaded = decode(&old).expect("an old save opens");
+        // The old calendar: a round a week, the game on Saturday.
+        assert_eq!(loaded.match_day(), 3 * 7 + 5);
+        assert!(loaded.fixtures.iter().all(|f| f.day == f.round as u32 * 7 + 5));
+        assert!(!loaded.match_today());
+        // Time passes before the game: mail first, then the match day.
+        let mut stops = Vec::new();
+        for _ in 0..6 {
+            let s = loaded.apply(Command::Advance).unwrap().stop.unwrap();
+            stops.push(s);
+            if s == Stop::MatchDay {
+                break;
+            }
+        }
+        assert_eq!(stops.last(), Some(&Stop::MatchDay));
+        assert!(stops.contains(&Stop::Mail), "{stops:?}");
+        assert_eq!(loaded.day, 26);
+        loaded.apply(Command::PlayRound).unwrap();
+        assert_eq!(loaded.round, 4);
+        assert_eq!(loaded.match_day(), 33);
     }
 
     #[test]

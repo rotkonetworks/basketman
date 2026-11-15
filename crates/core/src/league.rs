@@ -767,6 +767,7 @@ impl World {
     /// playoffs move on and the post goes out.
     fn close_round(&mut self, round: usize, all: Vec<usize>) {
         self.reserves_for(round);
+        self.round_seeds.clear();
         self.health_week();
         self.dressing_week();
         let before = self.weekly_training();

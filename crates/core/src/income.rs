@@ -41,6 +41,15 @@ impl World {
             } else {
                 rec.divisions.iter().collect()
             };
+            let played = rec.division_of(club);
+            let now = self.teams[club].division;
+            match played {
+                // Just promoted: the bottom of the new division's expectations;
+                // just relegated: the top of the new one.
+                Some(d) if d > now => return self.division_size(club) - 1,
+                Some(d) if d < now => return 0,
+                _ => {}
+            }
             if let Some(p) = tables
                 .iter()
                 .find_map(|t| t.iter().position(|r| r.0 == club))

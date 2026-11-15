@@ -11,7 +11,7 @@ fn mean(v: &[f64]) -> f64 {
 }
 
 fn main() {
-    let (mut top_vs_bottom, mut top_vs_mid, mut top_vs_all) = (vec![], vec![], vec![]);
+    let (mut top_vs_bottom, mut top_vs_mid, mut top_vs_top, mut top_vs_all) = (vec![], vec![], vec![], vec![]);
     let mut rows = Vec::new();
     for seed in 1..=3u64 {
         let mut w = World::new_career_tiers(seed, 12, 3);
@@ -54,6 +54,7 @@ fn main() {
                 let rate = wins / n as f64;
                 top_vs_all.push(rate);
                 if rank >= 10 { top_vs_bottom.push(rate); }
+                if rank < 4 { top_vs_top.push(rate); }
                 if (4..10).contains(&rank) { top_vs_mid.push(rate); }
             }
         }
@@ -67,5 +68,5 @@ fn main() {
     println!("Third Division's two best against the First Division, win rate per game:");
     println!("  all clubs {:.2}, the top four {:.2}, mid-table {:.2}, bottom two {:.2}",
         mean(&top_vs_all),
-        0.0, mean(&top_vs_mid), mean(&top_vs_bottom));
+        mean(&top_vs_top), mean(&top_vs_mid), mean(&top_vs_bottom));
 }
