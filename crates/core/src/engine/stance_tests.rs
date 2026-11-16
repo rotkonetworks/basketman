@@ -242,6 +242,12 @@ fn a_ball_handler_who_has_picked_up_stays_put_and_does_not_dribble_again() {
                     if p.dribble == Dribble::Live {
                         again += 1;
                     }
+                    if p.dribble == Dribble::NotYet {
+                        // The ball is taken out again (a whistle, a throw-in
+                        // by the man who had it): a new hold, not the old.
+                        held = None;
+                        continue;
+                    }
                     // A finish carries him to the rim; anything else is a pivot and a plant.
                     let r = if rim { 6.0 } else { 1.8 };
                     if pos.dist(at) > r {

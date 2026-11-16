@@ -330,6 +330,14 @@ impl Game {
         }
         let Some((t, h)) = self.handler.who else { return };
         let pos = self.m[t][h].pos;
+        // A man taking the ball out, even the one who had it when the whistle
+        // blew, holds it in both hands on his way to the line: he does not
+        // dribble it there, and what he did before the stop is over.
+        if self.play.inb.is_some_and(|ib| ib.who == h) && t == o {
+            self.handler.state = Dribble::NotYet;
+            self.handler.pivot = pos;
+            return;
+        }
         let speed = self.m[t][h].vel.len();
         let planned = self
             .play
