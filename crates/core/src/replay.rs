@@ -604,6 +604,48 @@ pub enum ShotStage {
     Follow,
 }
 
+/// What the legs are doing, from the angle between where he goes and where
+/// his body faces.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Footwork {
+    /// Planted, weight even.
+    #[default]
+    Stand,
+    /// Running forward, feet under the body's line.
+    Run,
+    /// Defensive shuffle: sideways, feet apart, never crossing.
+    Slide,
+    /// Backpedalling: going backward, still facing the play.
+    Backpedal,
+    /// A crossover or side step with the ball.
+    Crossover,
+    /// Turning on a planted foot (`Pose::planted`).
+    Pivot,
+    /// A post player's drop step: planted foot, the other swings round.
+    DropStep,
+    /// Sprinting out at a shooter.
+    Closeout,
+    /// Short choppy steps at the end of a closeout.
+    Chop,
+    /// A two-footed plant into a shot.
+    JumpStop,
+}
+
+/// Where the ball handler is in his dribble.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Dribble {
+    /// Not the ball handler (or an old recording).
+    #[default]
+    None,
+    /// Has the ball in two hands and has not dribbled: he may pivot, pass,
+    /// shoot or start a dribble.
+    NotYet,
+    /// Dribbling with one hand (`Pose::hand`).
+    Live,
+    /// Picked up the dribble, two hands: he may only pivot, pass or shoot.
+    PickedUp,
+}
+
 /// What one player is doing in a frame.
 ///
 /// `lift_cm` is how far his feet are off the floor; it follows a simple arc
@@ -625,6 +667,33 @@ pub struct Pose {
     /// How far into the shot he is (only for `Action::Shooting`).
     #[serde(default)]
     pub stage: ShotStage,
+    /// Hips and chest: a unit vector in court coordinates scaled by 127, or
+    /// zero in a recording that has none.
+    #[serde(default)]
+    pub body: [i8; 2],
+    /// Where the eyes look, within about 80 degrees of `body`.
+    #[serde(default)]
+    pub gaze: [i8; 2],
+    /// The way he actually moves, scaled by 127; `speed_dm` is how fast, in
+    /// tenths of a metre per second.
+    #[serde(default)]
+    pub moving: [i8; 2],
+    #[serde(default)]
+    pub speed_dm: u8,
+    #[serde(default)]
+    pub foot: Footwork,
+    /// The planted foot of a pivot: 0 none, 1 left, 2 right.
+    #[serde(default)]
+    pub planted: u8,
+    /// Balance in percent: 100 set and square, low when off his feet.
+    #[serde(default)]
+    pub balance: u8,
+    /// The ball handler's dribble.
+    #[serde(default)]
+    pub dribble: Dribble,
+    /// Dribbling hand: 1 right, -1 left, 0 none.
+    #[serde(default)]
+    pub hand: i8,
 }
 
 impl Default for Pose {
@@ -637,11 +706,44 @@ impl Default for Pose {
             contact: Pose::NO_CONTACT,
             style: Style::Jumper,
             stage: ShotStage::Gather,
+            body: [0, 0],
+            gaze: [0, 0],
+            moving: [0, 0],
+            speed_dm: 0,
+            foot: Footwork::Stand,
+            planted: 0,
+            balance: 100,
+            dribble: Dribble::None,
+            hand: 0,
         }
     }
 }
 
 impl Pose {
+    fn unit(a: [i8; 2]) -> Option<Vec2> {
+        (a != [0, 0]).then(|| v(a[0] as f32 / 127.0, a[1] as f32 / 127.0).norm())
+    }
+
+    /// The way his hips and chest point, if the recording has it.
+    pub fn body_dir(&self) -> Option<Vec2> {
+        Pose::unit(self.body)
+    }
+
+    /// The way his eyes look, if the recording has it.
+    pub fn gaze_dir(&self) -> Option<Vec2> {
+        Pose::unit(self.gaze)
+    }
+
+    /// The way he moves, if he does.
+    pub fn move_dir(&self) -> Option<Vec2> {
+        Pose::unit(self.moving)
+    }
+
+    /// His speed in metres per second.
+    pub fn speed(&self) -> f32 {
+        self.speed_dm as f32 / 10.0
+    }
+
     pub const NO_CONTACT: u8 = 255;
 
     /// Feet off the floor, in metres.

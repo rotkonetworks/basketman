@@ -10,6 +10,7 @@ use super::defense::{self, View, is_zone};
 use super::flight::{self, Path};
 use super::offense;
 use super::shot::{self, Errors};
+use super::stance::{Handler, Skill, Stance};
 use super::{BoxLine, DT, GameResult, Lineup, Pause, Rules, Shout, Side};
 use crate::court::{
     KEY_DEPTH, KEY_HALF_WIDTH, BALL_RADIUS, BOARD_HALF, BOARD_LOW, BOARD_Y, GRAVITY, HOOP, LENGTH, NO_CHARGE_RADIUS, RIM_HEIGHT, ShotKind,
@@ -22,6 +23,8 @@ use crate::replay::{
 };
 use crate::rng::Rng;
 use crate::tactics::{Brief, DefenseScheme, OffenseSet, Press};
+
+mod stance_hooks;
 
 // ---- the shot's error model -------------------------------------------
 /// Scale of the error of an average shooter's open shot in play, against
@@ -294,6 +297,8 @@ fn heft(anchor: f32) -> f32 {
 struct Cache {
     /// Top speed of each of the ten.
     top: [f32; 10],
+    /// Body skills of each of the ten (turning, sliding, balance).
+    skill: [Skill; 10],
     /// A defender's reaction time before the zone's reading is added.
     lag: [f32; 5],
     /// What the defense thinks of each attacker as a shooter, and how much
@@ -326,7 +331,7 @@ struct Mover {
 impl Mover {
     /// One tick toward `aim` (the target, or a point that goes round a body
     /// in the way); `r` is his body radius, which keeps him on the court.
-    fn step(&mut self, top: f32, aim: Vec2, r: f32) {
+    fn step(&mut self, top: f32, accel: f32, aim: Vec2, r: f32) {
         let to = aim - self.pos;
         let dist = to.len();
         let speed = (top * self.pace).min(dist * 3.5);
@@ -336,7 +341,7 @@ impl Mover {
             Vec2::ZERO
         };
         let dv = want - self.vel;
-        let limit = ACCEL * DT * if self.hard { BRAKE } else { 1.0 };
+        let limit = ACCEL * accel * DT * if self.hard { BRAKE } else { 1.0 };
         // Compared as squares: the root is only needed when he is held to
         // the most he can change his velocity in a tick.
         let len2 = dv.dot(dv);
@@ -734,6 +739,10 @@ pub(super) struct Game {
     /// The rebounders of the shot in the air have been sent up.
     /// Where the ten stood at the start of the tick.
     prev_pos: [[Vec2; 5]; 2],
+    /// Body, eyes, legwork and balance of each player (attack frame).
+    st: [[Stance; 5]; 2],
+    /// The ball handler's dribble.
+    handler: Handler,
 }
 
 impl Game {
@@ -780,6 +789,7 @@ impl Game {
             bulk_dirty: true,
             cache: Cache {
                 top: [0.0; 10],
+                skill: [Skill::new(10.0, 10.0, 10.0); 10],
                 lag: [0.0; 5],
                 threat: [0.0; 5],
                 cushion: [0.0; 5],
@@ -803,6 +813,8 @@ impl Game {
             loose: None,
             ft_spot: [Vec2::ZERO; 10],
             prev_pos: [[Vec2::ZERO; 5]; 2],
+            st: [[Stance::new(v(0.0, 1.0)); 5]; 2],
+            handler: Handler::NONE,
             m,
             frame: 0,
             play: Play::idle(),
@@ -877,6 +889,12 @@ impl Game {
                             m.vel = m.vel * -1.0;
                         }
                     }
+                    for side in &mut self.st {
+                        for s in side {
+                            s.flip();
+                        }
+                    }
+                    self.handler.flip();
                     self.frame = o;
                     if let Some((path, _)) = self.loose.as_mut() {
                         *path = path.flipped();
@@ -1404,12 +1422,15 @@ impl Game {
                 };
             }
         }
+        let wants = self.stance_wants();
+        self.stance_turn(&wants);
         for t in 0..2 {
             for k in 0..5 {
                 let top = self.cache.top[t * 5 + k];
                 let w = self.way[t * 5 + k];
                 let aim = if w.x.is_nan() { self.m[t][k].target } else { w };
-                self.m[t][k].step(top, aim, bulk[t * 5 + k].r);
+                let (cap, accel) = self.stance_limits(t, k, aim);
+                self.m[t][k].step(top * cap, accel, aim, bulk[t * 5 + k].r);
             }
         }
         if let Some(h) = self.play.holder {
@@ -1426,6 +1447,7 @@ impl Game {
                 self.set_for[t][k] = if still { self.set_for[t][k] + DT } else { 0.0 };
             }
         }
+        self.stance_after(&wants);
         self.watch_stuck();
         self.move_ball();
         self.pick_up();
@@ -1589,6 +1611,11 @@ impl Game {
             let side = &self.sides[t];
             for k in 0..5 {
                 self.cache.top[t * 5 + k] = 4.6 + side.eff(side.on[k], Attr::Speed) * 0.16;
+                self.cache.skill[t * 5 + k] = Skill::new(
+                    side.eff(side.on[k], Attr::Speed),
+                    side.eff(side.on[k], Attr::Footwork),
+                    side.eff(side.on[k], Attr::Strength),
+                );
             }
         }
         let side = self.def();
@@ -5486,13 +5513,8 @@ impl Game {
                 self.op(self.play.guard[k])
             });
         }
-        if let Some(to) = toward {
-            let d = to - me.pos;
-            // Only worth recording when it is not simply the way he runs.
-            if d.len() > 0.05 && (speed < 0.5 || me.vel.dot(d.norm()) < speed * 0.8) {
-                pose.facing = self.face_court(d);
-            }
-        }
+        let _ = toward;
+        self.stance_pose(t, k, &mut pose);
         pose
     }
 

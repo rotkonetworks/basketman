@@ -19,6 +19,7 @@ mod flight;
 mod floor;
 mod offense;
 mod shot;
+mod stance;
 pub use shot::make_rate;
 #[cfg(test)]
 mod relations_tests;
@@ -1049,3 +1050,6 @@ pub fn simulate_recorded(
     *rng = game.rng.clone();
     (game.result(), game.rec.unwrap_or_default())
 }
+
+#[cfg(test)]
+mod stance_diag;
