@@ -38,6 +38,12 @@ mod stance_hooks;
 /// Scale of the error of an average shooter's open shot in play, against
 /// the free throw's `FT_SCALE`: a live shot is taken on the run of a play,
 /// with a crowd and a clock.
+/// What a shot adds to the attention a man draws, and how much of it is
+/// worth in contest on his next look.
+const SHOT_HEAT: f32 = 0.16;
+const HEAT_CONTEST: f32 = 0.55;
+/// A pass the passer reads as likelier than this to be lost is not thrown.
+const SWING_RISK_MAX: f32 = 0.22;
 const GAME: f32 = 1.14;
 /// What a live two, a three and a finish at the rim add or take off the
 /// error, on top of their own base: the part of in-game difficulty that
@@ -2991,6 +2997,17 @@ impl Game {
         (kind, c, near)
     }
 
+    /// How the shot looks to the man who has it: the defense has had its eye
+    /// on a man who has been shooting, and his look is the tighter for it.
+    fn look_seen(&self, k: usize) -> (ShotKind, f32, Option<usize>) {
+        let (kind, c, near) = self.look(k);
+        (kind, (c + HEAT_CONTEST * self.heat_of(k)).min(1.4), near)
+    }
+
+    fn heat_of(&self, k: usize) -> f32 {
+        self.off().slots[self.off().on[k]].heat
+    }
+
     /// 0 = nobody near, 1 = a hand in the face. At the rim every body in the
     /// way counts, so a crowded paint can go above 1.
     fn contest(&self, p: Vec2, k: usize, rim: bool) -> (f32, Option<usize>) {
@@ -3150,7 +3167,7 @@ impl Game {
             Brief::Pass => 0.07,
             _ => 0.0,
         };
-        1.18 + 0.40 * (left - 12.0) / 12.0 - pace - (usage - 0.9) * 0.06 + told
+        1.18 + 0.40 * (left - 12.0) / 12.0 - pace - (usage - 0.9) * 0.035 + told
     }
 
     /// Seconds a ball picked off at `from` takes to reach defender `dk`'s hand:
@@ -3198,6 +3215,7 @@ impl Game {
             } else {
                 (c_now + dur * 0.6).min(1.0)
             };
+            let c = (c + HEAT_CONTEST * self.heat_of(j)).min(1.4);
             let value = self.ev(j, kind, c, near, false) - self.pass_risk(h, j) * 1.6;
             if value > bar && value > self.threshold(j, left - 1.0) {
                 weights[j] = value - bar + 0.04;
@@ -3260,7 +3278,7 @@ impl Game {
         if self.play.lane[h] > LANE_WARN {
             return self.gather(0.3, self.play.dribbled);
         }
-        let (kind, c, near) = self.look(h);
+        let (kind, c, near) = self.look_seen(h);
         let value = self.ev(h, kind, c * self.play.edge, near, self.play.dribbled);
         // A player who made the opening himself is expected to finish it.
         let created = matches!(
@@ -3395,7 +3413,7 @@ impl Game {
                 }
             }
             OffenseSet::PostUp => {
-                if h != post && self.in_post(post) && self.pass_risk(h, post) < 0.10 && r < 0.8 {
+                if h != post && self.in_post(post) && self.pass_risk(h, post) < 0.10 && r < 0.55 {
                     self.pass(h, post, false)
                 } else if r < 0.25 {
                     self.drive(h, 0.0)
@@ -3411,7 +3429,7 @@ impl Game {
                     self.drive(h, 0.0)
                 } else if h == star {
                     self.swing(h)
-                } else if !spent && self.outside(star) && self.pass_risk(h, star) < 0.09 && r < 0.85
+                } else if !spent && self.outside(star) && self.pass_risk(h, star) < 0.09 && r < 0.55
                 {
                     self.pass(h, star, false)
                 } else if r < 0.5 {
@@ -3435,7 +3453,13 @@ impl Game {
             if j == h || pj.dist(HOOP) < 4.5 || pj.y > 12.0 {
                 continue;
             }
-            *w = (1.0 - self.pass_risk(h, j) * 7.0).max(0.03) / (1.0 + p.dist(pj));
+            let (kind, c, near) = self.look_seen(j);
+            let open = self.ev(j, kind, c, near, false);
+            let risk = self.pass_risk(h, j);
+            if risk > SWING_RISK_MAX {
+                continue;
+            }
+            *w = (1.0 - risk * 3.0).max(0.05) / (1.0 + p.dist(pj)) * (0.3 + open * open);
             if self.play.from == Some(j) {
                 *w *= 0.4;
             }
@@ -3749,7 +3773,7 @@ impl Game {
             return self.turnover(h, TurnoverKind::Stripped, Some(dk), 0.7);
         }
 
-        let (kind, c, near) = self.look(h);
+        let (kind, c, near) = self.look_seen(h);
         let value = self.ev(h, kind, c, near, true);
         let vision = 0.35 + (self.oe(h, Attr::Passing) + self.oe(h, Attr::Iq)) / 40.0 * 0.65;
         if self.rng.chance(vision)
@@ -4075,7 +4099,7 @@ impl Game {
         self.play.edge = (if won { 0.6 } else { 1.0 }
             - POST_ROOM * (gained - POST_PAR).clamp(-0.6, 1.2))
         .clamp(0.3, 1.2);
-        let (kind, c, near) = self.look(h);
+        let (kind, c, near) = self.look_seen(h);
         let value = self.ev(h, kind, c * self.play.edge, near, false);
         let vision = 0.3 + (self.oe(h, Attr::Passing) + self.oe(h, Attr::Iq)) / 40.0 * 0.6;
         if self.rng.chance(vision)
@@ -4583,6 +4607,11 @@ impl Game {
             if kind == ShotKind::Three {
                 line.tpa += 1;
             }
+        }
+        {
+            let o = self.play.o;
+            let slot = self.sides[o].on[h];
+            self.sides[o].slots[slot].heat += SHOT_HEAT;
         }
         let who = self.oid(h);
         // A shot in the first seconds of a possession that began on a live ball

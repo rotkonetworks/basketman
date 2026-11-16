@@ -194,6 +194,18 @@ impl Game {
                         // Up in the shooter's face.
                         let up = v3(me.x + (ball.x - me.x) * 0.15, me.y + (ball.y - me.y) * 0.15, sh[0].z + 0.8 * arm);
                         goal = [(up, HandKind::Up), (up, HandKind::Up)];
+                    } else if !on_ball
+                        && holder.is_none()
+                        && let Some(Flight { kind: FlightKind::Pass { from, .. }, t: ft, .. }) = flight
+                        && ft < 0.6
+                        && self.m[o][from].pos.dist(me) < 2.4
+                    {
+                        // He has just thrown it: the man on him keeps his hands
+                        // where they were, in front of him, until it is gone.
+                        let to_b = (self.m[o][from].pos - me).norm();
+                        for i in 0..2 {
+                            goal[i] = (hands::guard_goal(sh[i], to_b, i, arm), HandKind::Guard);
+                        }
                     } else if on_ball && holder.is_some() {
                         let to_b = (ball - me).norm();
                         let i = if hands::right_of(body).dot(ball - me) >= 0.0 { RIGHT } else { LEFT };

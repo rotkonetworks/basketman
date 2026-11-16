@@ -40,6 +40,8 @@ use crate::tactics::{DefenseScheme, OffenseSet, Press, Tactics};
 
 /// Simulation step in seconds.
 const DT: f32 = 0.1;
+/// How much of a man's heat is gone after a possession of fourteen seconds.
+const HEAT_FADE: f32 = 0.08;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Rules {
@@ -201,6 +203,9 @@ struct Slot {
     form: f32,
     /// Seconds on court.
     played: f32,
+    /// How much the defense has had to attend to him this game: grows with
+    /// every shot he takes and fades as the possessions go.
+    heat: f32,
     line: BoxLine,
     /// -1..=1, how hard he is going after it: lifted by the bench, or
     /// deflated by it. Fades back to 0 over a few minutes.
@@ -283,6 +288,7 @@ impl Side {
                         * (1.0 + 0.05 * (p.morale - 0.5))
                         * (1.0 - 0.12 * (1.0 - p.sharp)),
                     played: 0.0,
+                    heat: 0.0,
                     line: BoxLine::default(),
                     drive: 0.0,
                     focus: 0.0,
@@ -523,6 +529,7 @@ impl Side {
             s.fatigue = s.fatigue.clamp(0.0, 1.0);
             // Whatever was said from the bench wears off in about five minutes.
             let fade = dur / 300.0;
+            s.heat *= 1.0 - HEAT_FADE * (dur / 14.0).min(2.0);
             s.drive -= s.drive.clamp(-fade, fade);
             s.focus -= s.focus.clamp(-fade, fade);
         }

@@ -11,15 +11,15 @@ use crate::replay::{Dribble, HandKind, PassKind, PassOutcome, TurnoverKind};
 
 /// Metres of aim error at no distance, and per metre thrown, for a chest
 /// pass by a passer of rating 10.
-const AIM_BASE: f32 = 0.06;
-const AIM_PER_M: f32 = 0.015;
+const AIM_BASE: f32 = 0.04;
+const AIM_PER_M: f32 = 0.009;
 /// Seconds before a defender sees the ball go, before his anticipation.
 const SEE_BASE: f32 = 0.16;
 const SEE_SKILL: f32 = 0.008;
 /// How far past his arm a defender can get a hand to a ball by leaning.
 const LUNGE_REACH: f32 = 0.35;
 /// How likely a defender who can reach a pass goes for it, at rating 10.
-const TRY_BASE: f32 = 0.30;
+const TRY_BASE: f32 = 0.12;
 const TRY_SKILL: f32 = 0.030;
 const TRY_AGGRESSION: f32 = 0.25;
 /// Metres within which a hand and the ball are in contact.
@@ -29,6 +29,8 @@ const CATCH: f32 = 0.33;
 /// Seconds past its arrival that a missed pass is followed before it is
 /// just a loose ball.
 const OVERTIME: f32 = 0.45;
+/// Metres from the line of the ball within which a defender gets in its way.
+const CLOSE_LANE: f32 = 0.95;
 
 #[derive(Copy, Clone)]
 pub(super) struct Spec {
@@ -90,6 +92,7 @@ pub(super) struct Thrown {
     pub receiver_seen: bool,
     /// The ball has been inside the lines (a throw-in starts outside).
     pub entered: bool,
+    pub dbg: [(Vec2, V3, V3); 5],
 }
 
 /// A ball nobody holds, after a pass was fumbled or tipped.
@@ -272,21 +275,46 @@ impl Game {
                 safe *= 1.0 - self.try_odds(dk) * 0.45;
             }
         }
-        // A hand already in the way as it leaves him.
+        // A hand that is in the way: out in the lane, or up in front of him.
         let d = 1 - self.play.o;
         for dk in 0..5 {
+            let mut hit = false;
+            let vel = self.m[d][dk].vel;
             for i in 0..2 {
                 let hp = self.hands[d][dk].h[i].p;
                 let mut tau = 0.0;
-                while tau < plan.dur.min(0.5) {
+                while tau < plan.dur {
                     let (bp, bz) = plan.path.at(tau);
-                    let gap = V3 { x: hp.x - bp.x, y: hp.y - bp.y, z: hp.z - bz }.len();
-                    if gap < HIT + 0.08 {
-                        safe *= 1.0 - 0.6;
+                    // He has moved by the time the ball is there.
+                    let s = (tau + 0.25) * 0.6;
+                    let dx = hp.x + vel.x * s - bp.x;
+                    let dy = hp.y + vel.y * s - bp.y;
+                    let dz = hp.z - bz;
+                    if dx * dx + dy * dy + dz * dz < (HIT + 0.06) * (HIT + 0.06) {
+                        hit = true;
                         break;
                     }
-                    tau += 0.04;
+                    tau += 0.02;
                 }
+            }
+            if hit {
+                safe *= 0.15;
+            } else {
+                // Close to the ball's line: he steps into it, and a hand or a
+                // leg comes with him.
+                let q = self.dp(dk);
+                let mut dmin = f32::MAX;
+                let mut tau = 0.0;
+                while tau < plan.dur {
+                    let (bp, bz) = plan.path.at(tau);
+                    if bz < 2.4 {
+                        let near = q + vel * ((tau + 0.25) * 0.4);
+                        dmin = dmin.min(near.dist(bp));
+                    }
+                    tau += 0.05;
+                }
+                let k = (1.0 - dmin / CLOSE_LANE).clamp(0.0, 1.0);
+                safe *= 1.0 - 0.55 * k * k;
             }
         }
         let mut risk = 1.0 - safe;
@@ -322,7 +350,7 @@ impl Game {
             consider(PassKind::Bounce, self, 0.012);
         }
         if passing >= 8.0 && d < 13.0 {
-            consider(PassKind::Overhead, self, 0.010);
+            consider(PassKind::Overhead, self, 0.022);
         }
         let pj = self.m[o][j].pos;
         if passing >= 9.0 && (pj.dist(HOOP) < 4.0 || d > 7.0) {
@@ -399,7 +427,7 @@ impl Game {
                     if (V3 { x: hp.x - bp.x, y: hp.y - bp.y, z: hp.z - bz }).len() < HIT + 0.04 {
                         return true;
                     }
-                    tau += 0.04;
+                    tau += 0.015;
                 }
             }
         }
@@ -498,7 +526,7 @@ impl Game {
             kind: FlightKind::Pass { from: h, to: j },
             path: Some(plan.path),
         });
-        self.play.thrown = Some(Thrown { kind, speed: sp.speed, attempt, receiver_seen: false, entered: rel.x.abs() <= 7.5 && rel.y >= 0.0 && rel.y <= LENGTH });
+        self.play.thrown = Some(Thrown { kind, speed: sp.speed, attempt, receiver_seen: false, entered: rel.x.abs() <= 7.5 && rel.y >= 0.0 && rel.y <= LENGTH, dbg: std::array::from_fn(|dk| (self.dp(dk), self.hands[1 - o][dk].h[0].p, self.hands[1 - o][dk].h[1].p)) });
         self.play.holder = None;
         self.play.tips = 0;
         self.play.def_touch = false;
@@ -600,6 +628,15 @@ impl Game {
     fn defender_on_pass(&mut self, f: Flight, ts: f32, dk: usize, gap: f32, from: usize, to: usize, th: Thrown) -> Option<End> {
         let path = f.path.unwrap_or_else(Path::new);
         let (bp, bz, bv, bvz) = path.state(ts);
+        if std::env::var("DBG").is_ok() {
+            eprintln!("  DEF attempt {} d_to_passer {:.2} d_to_recv {:.2} hands {:?} {:?} z {:.2} {:.2}", th.attempt[dk].is_some(), self.dp(dk).dist(self.m[self.play.o][from].pos), self.dp(dk).dist(self.m[self.play.o][to].pos), self.hands[1-self.play.o][dk].h[0].kind, self.hands[1-self.play.o][dk].h[1].kind, self.hands[1-self.play.o][dk].h[0].p.z, self.hands[1-self.play.o][dk].h[1].p.z);
+        }
+        if std::env::var("DBG").is_ok() {
+            let o2 = self.play.o;
+            let (dp0, h0, h1) = th.dbg[dk];
+            let now = (self.dp(dk), self.hands[1 - o2][dk].h[0].p, self.hands[1 - o2][dk].h[1].p);
+            eprintln!("  TIP ts {ts:.2} ball {:.2},{:.2},{bz:.2} | at release def {:.2},{:.2} h0 {:.2},{:.2},{:.2} h1 {:.2},{:.2},{:.2} | now def {:.2},{:.2} h0 {:.2},{:.2},{:.2} h1 {:.2},{:.2},{:.2} kinds {:?} {:?}", bp.x,bp.y, dp0.x,dp0.y,h0.x,h0.y,h0.z,h1.x,h1.y,h1.z, now.0.x,now.0.y,now.1.x,now.1.y,now.1.z,now.2.x,now.2.y,now.2.z, self.hands[1-o2][dk].h[0].kind, self.hands[1-o2][dk].h[1].kind);
+        }
         dbg_out("defender", ts, f.dur, bp, bz);
         let speed = (bv.dot(bv) + bvz * bvz).sqrt();
         let steal = self.de(dk, Attr::Steal);
@@ -607,7 +644,7 @@ impl Game {
         let dead_on = (1.0 - gap / HIT).clamp(0.0, 1.0);
         // Taking it cleanly: hands, and a ball that is not too hard, on the
         // palm and not the fingertips.
-        let p_take = (0.22 + 0.020 * (0.6 * steal + 0.4 * hands - 10.0) + 0.30 * dead_on - 0.018 * (speed - 8.0).max(0.0))
+        let p_take = (0.10 + 0.020 * (0.6 * steal + 0.4 * hands - 10.0) + 0.30 * dead_on - 0.018 * (speed - 8.0).max(0.0))
             .clamp(0.05, 0.85);
         let who = self.did(dk);
         let _ = who;
@@ -662,12 +699,12 @@ impl Game {
         let back = (self.m[o][from].pos - me).norm();
         let looking = (self.st[o][to].gaze.dot(back) * 0.5 + 0.5).clamp(0.0, 1.0);
         let run = self.m[o][to].vel.len();
-        let base = 0.985 + 0.0015 * hands_skill;
-        let pen = 0.30 * (stretch - 0.85).max(0.0).powi(2)
-            + 0.04 * (speed - 12.0).max(0.0) / 4.0
-            + 0.035 * (1.0 - looking)
-            + 0.002 * run
-            + 0.025 * (gap / CATCH);
+        let base = 0.992 + 0.001 * hands_skill;
+        let pen = 0.20 * (stretch - 0.85).max(0.0).powi(2)
+            + 0.03 * (speed - 12.0).max(0.0) / 4.0
+            + 0.02 * (1.0 - looking)
+            + 0.001 * run
+            + 0.012 * (gap / CATCH);
         let p = (base - pen).clamp(0.40, 0.995);
         if std::env::var("DBG").is_ok() {
             eprintln!("  catchp {p:.2} stretch {stretch:.2} speed {speed:.1} looking {looking:.2} run {run:.1} gap {gap:.2}");
