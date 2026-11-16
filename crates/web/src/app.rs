@@ -847,6 +847,62 @@ impl App {
                     app.playback.time = live.game.time();
                     app.live = Some(live);
                 }
+                // `--screenshot file match pregame` is the screen before any game.
+                if args.get(i + 3).map(String::as_str) == Some("pregame") {
+                    app.world.replay = None;
+                    app.last_game = None;
+                }
+                // `--screenshot file match review` plays a live game to the
+                // first call the user may challenge and stops there;
+                // `SHOT_REVIEW_SKIP=n` plays on past the first n.
+                if args.get(i + 3).map(String::as_str) == Some("review")
+                    && let Some(mut live) = app.world.kickoff(app.team)
+                {
+                    use basketman_core::engine::Pause;
+                    let skip: usize = std::env::var("SHOT_REVIEW_SKIP")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0);
+                    let mut seen = 0;
+                    while !live.game.is_over() {
+                        if let Some(Pause::Review(side)) = live.step()
+                            && side == live.side
+                        {
+                            if seen >= skip {
+                                app.touchline.review_open = true;
+                                break;
+                            }
+                            seen += 1;
+                        }
+                    }
+                    if app.touchline.review_open {
+                        app.playback.time = live.game.time();
+                        // `SHOT_REVIEW_AT=1.0` challenges it and shows the
+                        // picture that many seconds later.
+                        if let Some(at) = std::env::var("SHOT_REVIEW_AT")
+                            .ok()
+                            .and_then(|v| v.parse::<f32>().ok())
+                        {
+                            live.input(basketman_core::league::LiveInput::Challenge);
+                            app.touchline.review_open = false;
+                            app.playback.time += at;
+                        }
+                        // `SHOT_REVIEW_FINISH=1` plays the game out and books it.
+                        if std::env::var("SHOT_REVIEW_FINISH").is_ok() {
+                            live.input(basketman_core::league::LiveInput::AutoSubs(true));
+                            while !live.game.is_over() {
+                                live.step();
+                            }
+                            app.last_game = Some(live.fixture);
+                            app.world.full_time(live);
+                            app.playback.time = 600.0;
+                        } else {
+                            app.live = Some(live);
+                        }
+                    } else {
+                        eprintln!("no call to challenge in this game");
+                    }
+                }
                 // `SHOT_HUD=full|minimal|clean` and `SHOT_PANEL_ALPHA=0.4`.
                 match std::env::var("SHOT_HUD").as_deref() {
                     Ok("minimal") => app.sh.hud.prefs.level = 1,

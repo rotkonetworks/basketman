@@ -70,6 +70,22 @@ pub(crate) fn moments(rec: &Recording, what: &str) -> Vec<f32> {
                 _ => None,
             })
             .collect(),
+        // A whistle: the first frame of each run with an arm up.
+        "whistle" => rec
+            .frames
+            .windows(2)
+            .filter(|w| w[1].whistler > 0 && w[0].whistler == 0)
+            .map(|w| w[1].time)
+            .collect(),
+        // A challenge, as it was made.
+        "review" => rec
+            .events
+            .iter()
+            .filter_map(|e| match e.kind {
+                EventKind::Review { .. } => Some(e.time),
+                _ => None,
+            })
+            .collect(),
         "ft" => rec
             .events
             .iter()
