@@ -10,6 +10,7 @@ mod balance;
 mod export;
 mod feeds;
 mod lab;
+mod lab_hands;
 mod lab_officials;
 mod mcp;
 mod play;
@@ -114,6 +115,7 @@ fn main() {
             Some("stats") => lab::stats(games.unwrap_or(400)),
             Some("finish") => lab::finish(games.unwrap_or(300)),
             Some("stance") => lab::stance(games.unwrap_or(120)),
+            Some("hands") => lab_hands::run(games.unwrap_or(60)),
             Some("transition") if std::env::args().nth(3).as_deref() == Some("watch") => {
                 let arg = |i: usize| std::env::args().nth(i).and_then(|s| s.parse::<usize>().ok());
                 lab::transition_watch(arg(4).unwrap_or(0), arg(5).unwrap_or(0), 8.0)

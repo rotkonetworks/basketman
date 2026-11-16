@@ -88,6 +88,7 @@ impl Game {
         let ball_z = self.play.ball_h;
         let holder = self.play.holder;
         let flight = self.play.flight;
+        self.hands_prev = self.hands;
         for t in 0..2 {
             for k in 0..5 {
                 let (arm, _, _) = self.arm_of(t, k);
@@ -103,7 +104,18 @@ impl Game {
                     (hands::rest_goal(sh[1], body, LEFT, arm), HandKind::Rest),
                 ];
                 let held = t == o && holder == Some(k);
-                if held {
+                let winding = t == o && self.play.throw.is_some_and(|th| th.from == k);
+                if winding {
+                    let th = self.play.throw.unwrap_or_else(|| unreachable!());
+                    let p = th.rel;
+                    if th.two {
+                        goal = [(p, HandKind::Throw), (p, HandKind::Throw)];
+                    } else {
+                        goal[th.hand] = (p, HandKind::Throw);
+                        let j = 1 - th.hand;
+                        goal[j] = (hands::guard_goal(sh[j], body, j, arm), HandKind::Guard);
+                    }
+                } else if held {
                     let shooting = self.play.shot.is_some_and(|s| s.shooter == k)
                         && matches!(self.play.phase, Phase::Gather { .. } | Phase::Air | Phase::Line { .. });
                     if shooting {
@@ -131,10 +143,23 @@ impl Game {
                     && (k == from || k == to)
                 {
                     if k == to {
-                        // A target, then the catch: the hand on the ball's side.
-                        let i = if hands::right_of(body).dot(ball - me) >= 0.0 { RIGHT } else { LEFT };
+                        // A target, then the catch: the hand on the ball's side,
+                        // taken to where the ball will be a moment on.
+                        let (ft, path, dur) = flight.map(|f| (f.t, f.path, f.dur)).unwrap_or((0.0, None, 0.0));
+                        let (ap, az) = match path {
+                            Some(p) => {
+                                // Where a hand can meet it, if there is such a place.
+                                let see = 0.06 + 0.25 * (1.0 - (self.st[t][k].gaze.dot((self.m[t][from].pos - me).norm()) * 0.5 + 0.5).clamp(0.0, 1.0));
+                                match self.reach_for(t, k, &p, dur, ft, see) {
+                                    Some((q, _)) => (q.xy(), q.z),
+                                    None => p.at(ft + 0.10),
+                                }
+                            }
+                            None => (ball, ball_z),
+                        };
+                        let i = if hands::right_of(body).dot(ap - me) >= 0.0 { RIGHT } else { LEFT };
                         let near = ball.dist(me) < 2.2;
-                        goal[i] = (v3(ball.x, ball.y, ball_z), if near { HandKind::Catch } else { HandKind::Target });
+                        goal[i] = (v3(ap.x, ap.y, az), if near { HandKind::Catch } else { HandKind::Target });
                         let j = 1 - i;
                         goal[j] = (hands::guard_goal(sh[j], body, j, arm), HandKind::Guard);
                     } else {
@@ -145,6 +170,19 @@ impl Game {
                             goal[i] = (v3(me.x + dir.x * 0.7, me.y + dir.y * 0.7, sh[i].z - 0.2 * arm), HandKind::Throw);
                         }
                     }
+                } else if t != o && matches!(flight, Some(Flight { kind: FlightKind::Pass { .. }, .. })) && self.pass_hand_goals(k, flight.map_or(0.0, |f| f.t)).is_some() {
+                    let g = self.pass_hand_goals(k, flight.map_or(0.0, |f| f.t)).unwrap_or_else(|| unreachable!());
+                    // The hand nearer the ball goes for it, the other is up.
+                    let i = if (g.x - sh[0].x).powi(2) + (g.y - sh[0].y).powi(2) + (g.z - sh[0].z).powi(2)
+                        <= (g.x - sh[1].x).powi(2) + (g.y - sh[1].y).powi(2) + (g.z - sh[1].z).powi(2)
+                    {
+                        RIGHT
+                    } else {
+                        LEFT
+                    };
+                    goal[i] = (g, HandKind::Reach);
+                    let j = 1 - i;
+                    goal[j] = (hands::guard_goal(sh[j], body, j, arm), HandKind::Guard);
                 } else if t != o {
                     // A defender.
                     let man = self.play.guard[k];

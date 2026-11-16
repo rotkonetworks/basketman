@@ -4,7 +4,7 @@
 //! `court.rs`) and are mirrored when possession changes, so players really do
 //! have to run back. Indices `k` are court indices 0..5 into `Side::on`.
 
-use super::ball::{self, Ball, Flown, Hand, v3};
+use super::ball::{self, Ball, Flown, Hand, V3, v3};
 use super::contact::{self, Bulk, Touch};
 use super::defense::{self, View, is_zone};
 use super::flight::{self, Path};
@@ -30,6 +30,8 @@ use crate::tactics::{Brief, DefenseScheme, OffenseSet, Press};
 
 mod finish;
 mod hands_hooks;
+mod passing;
+use passing::{Scramble, Throw, Thrown};
 mod stance_hooks;
 
 // ---- the shot's error model -------------------------------------------
@@ -749,6 +751,13 @@ struct Play {
     go: [f32; 5],
     /// A throw-in under way.
     inb: Option<Inb>,
+    /// A pass being wound up, one in the air, and a ball that was tipped or
+    /// fumbled and is loose.
+    throw: Option<Throw>,
+    thrown: Option<Thrown>,
+    scramble: Option<Scramble>,
+    /// Passes this man has held on to because a hand was in the way.
+    aborts: u8,
 }
 
 /// A throw-in: who takes the ball out, who is to get it, where from, where
@@ -843,8 +852,9 @@ pub(super) struct Game {
     restart_cut: bool,
     /// The officials, if a crew was assigned: what they see and call.
     ofc: Option<Ofc>,
-    /// Both hands of each player (attack frame).
+    /// Both hands of each player (attack frame), and as they were a tick ago.
     hands: [[Hands; 5]; 2],
+    hands_prev: [[Hands; 5]; 2],
 }
 
 impl Game {
@@ -923,6 +933,7 @@ impl Game {
             restart_cut: false,
             ofc: None,
             hands: [[Hands::NONE; 5]; 2],
+            hands_prev: [[Hands::NONE; 5]; 2],
             m,
             frame: 0,
             play: Play::idle(),
@@ -1006,8 +1017,18 @@ impl Game {
                     for side in &mut self.hands {
                         for hs in side {
                             for h in &mut hs.h {
-                                h.p.x = -h.p.x;
-                                h.p.y = -h.p.y;
+                                let q = h.p.xy().flipped();
+                                h.p.x = q.x;
+                                h.p.y = q.y;
+                            }
+                        }
+                    }
+                    for side in &mut self.hands_prev {
+                        for hs in side {
+                            for h in &mut hs.h {
+                                let q = h.p.xy().flipped();
+                                h.p.x = q.x;
+                                h.p.y = q.y;
                             }
                         }
                     }
@@ -1985,7 +2006,14 @@ impl Game {
                 }) => t > self.reaction(k),
                 _ => false,
             };
-            let (target, pace) = if reacting {
+            let receiving = match self.play.flight {
+                Some(Flight { kind: FlightKind::Pass { to, .. }, to: aim, path: Some(_), .. }) if to == k => Some(aim),
+                _ => None,
+            };
+            let (target, pace) = if let Some(aim) = receiving {
+                // Coming to the ball.
+                (aim, 0.95)
+            } else if reacting {
                 // The ball is going the other way: he turns and runs back.
                 (v(pos.x * 0.7, (pos.y + 9.0).min(LENGTH - 2.0)), 1.0)
             } else if self.play.holder.is_none()
@@ -2308,6 +2336,8 @@ impl Game {
                 let (p, z) = path.at(t);
                 self.play.ball = p;
                 self.play.ball_h = z;
+            } else if let FlightKind::Pass { .. } = f.kind {
+                unreachable!("a pass has a path");
             } else {
                 let u = (t / dur).min(1.0);
                 self.play.ball = from.lerp(to, u);
@@ -2359,7 +2389,13 @@ impl Game {
     }
 
     fn step_phase(&mut self) -> Option<End> {
+        if self.play.throw.is_some() {
+            return self.throw_tick();
+        }
         if let Some(f) = self.play.flight {
+            if matches!(f.kind, FlightKind::Pass { .. }) && f.path.is_some() {
+                return self.pass_tick(f);
+            }
             if f.t >= f.dur {
                 self.play.flight = None;
                 return self.land(f);
@@ -3132,51 +3168,11 @@ impl Game {
         0.12 + len / 14.0 + (len - 6.0).max(0.0) * 0.035
     }
 
+    /// The chance a pass from `h` to `j` is picked off or fumbled, as the
+    /// passer reads it from the hands around the lane.
     fn pass_risk(&self, h: usize, j: usize) -> f32 {
-        let (a, b) = (self.op(h), self.op(j));
-        let len = a.dist(b);
-        let aggression = self.def().aggression();
-        let mut risk = 0.003 + (len - 6.0).max(0.0) * 0.008;
-        for dk in 0..5 {
-            let q = self.dp(dk);
-            let on_lane = q.project(a, b);
-            if on_lane.dist(a) < 0.7 {
-                continue;
-            }
-            let off_lane = q.dist(on_lane);
-            if off_lane < 1.5 {
-                // A defender watching the ball reads the pass sooner than one
-                // whose head is turned away.
-                let watch = {
-                    let g = self.st[1 - self.play.o][dk].gaze;
-                    let to_a = (a - q).norm();
-                    1.0 + 0.3 * g.dot(to_a).clamp(-0.5, 0.5)
-                };
-                // Hands around the catch (a crowded paint) are worse than a
-                // defender shading the lane.
-                let crowd = if on_lane.dist(b) < 1.2 && b.dist(HOOP) < 4.0 {
-                    // The nearer the basket the more bodies and hands there are
-                    // to go through: the entry to a man at the rim is the hardest.
-                    2.6 + CROWD_RIM * (1.0 - b.dist(HOOP) / 2.4).clamp(0.0, 1.0)
-                } else {
-                    1.0
-                };
-                risk += (1.5 - off_lane) / 1.5
-                    * 0.021
-                    * watch
-                    * self.facing_factor(1 - self.play.o, dk, a).max(0.2)
-                    * crowd
-                    * (self.de(dk, Attr::Steal) / 10.0)
-                    * (1.0 + 0.5 * aggression);
-            }
-        }
-        risk *= 1.55 - self.oe(h, Attr::Passing) / 20.0 * 1.1;
-        risk *= self.pass_stance(h, j);
-        risk *= 1.0 + 0.5 * self.off().unfamiliar;
-        if self.nearest_defender(a).1 < 1.0 {
-            risk *= 1.15;
-        }
-        risk
+        let kind = self.pass_kind(h, j);
+        self.lane_risk(h, j, kind)
     }
 
     /// The teammate with the best look, if it beats `bar` expected points.
@@ -3485,69 +3481,6 @@ impl Game {
             }
         }
         self.pass(h, j, false)
-    }
-
-    fn pass(&mut self, h: usize, j: usize, safe: bool) -> Option<End> {
-        let (a, b) = (self.op(h), self.op(j));
-        if let Some(rec) = &mut self.rec {
-            rec.passes.push(crate::replay::PassRec {
-                time: self.wall,
-                side: self.play.o as u8,
-                from: h as u8,
-                to: j as u8,
-                at: crate::replay::to_court(a, self.play.o),
-                inbound: self.play.inbound,
-                kind: crate::replay::PassKind::Chest,
-            });
-        }
-        if !safe {
-            let risk = self.pass_risk(h, j);
-            if self.rng.chance(risk) {
-                // Whoever was closest to the lane gets a hand on it.
-                let mut thief = (0, f32::MAX);
-                for dk in 0..5 {
-                    let q = self.dp(dk);
-                    let off_lane = q.dist(q.project(a, b));
-                    if off_lane < thief.1 {
-                        thief = (dk, off_lane);
-                    }
-                }
-                let end = self.turnover(h, TurnoverKind::BadPass, Some(thief.0), 0.62);
-                if let Some(End::Live(dk)) = end {
-                    // The ball goes to his hand and he takes it from there.
-                    let dur = self.steal_time(a, dk);
-                    self.steal_flew = dur;
-                    self.play.flight = Some(Flight {
-                        from: a,
-                        to: self.dp(dk),
-                        t: 0.0,
-                        // A quick hand, but the ball does not fly faster than a thrown pass can.
-                        dur,
-                        kind: FlightKind::Steal { to: dk },
-                        path: None,
-                    });
-                    self.play.holder = None;
-                    return None;
-                }
-                return end;
-            }
-            self.lapses();
-        }
-        self.play.flight = Some(Flight {
-            from: a,
-            to: b,
-            t: 0.0,
-            // Long passes have to be lobbed over the defense; one thrown
-            // behind or across the body leaves his hand late.
-            dur: Self::pass_time(a.dist(b)) + self.pass_stance_delay(h, j),
-            kind: FlightKind::Pass { from: h, to: j },
-            path: None,
-        });
-        self.play.holder = None;
-        if !matches!(self.play.phase, Phase::Advance) {
-            self.play.phase = Phase::Set;
-        }
-        None
     }
 
     /// Every pass and drive is a chance for a defender to switch off.
@@ -4839,6 +4772,7 @@ impl Game {
     fn land(&mut self, f: Flight) -> Option<End> {
         match f.kind {
             FlightKind::Pass { from, to } => {
+                self.play.aborts = 0;
                 self.play.holder = Some(to);
                 let near = self.op(to).dist(HOOP) < 2.6;
                 self.play.source = match self.play.task[to] {
@@ -5513,7 +5447,24 @@ impl Game {
         self.cut_log(ts - a.t);
         self.play.after = None;
         let (bp, bz, _, _) = a.path.state(ts);
+        let scrambled = self.play.scramble.take();
         let def_touch = self.call_touch(self.play.def_touch, bp, bz);
+        if let Some(sc) = scrambled
+            && !def_touch
+        {
+            // A pass nobody touched on its way out: the thrower's turnover.
+            let end = self.turnover(sc.passer, TurnoverKind::BadPass, None, 0.0);
+            let mut path = Path::new();
+            path.fall(
+                v(bp.x.clamp(-7.8, 7.8), bp.y.clamp(-0.3, LENGTH + 0.3)),
+                bz.max(BALL_RADIUS),
+                0.0,
+                Vec2::ZERO,
+            );
+            self.loose = Some((path, 0.0));
+            self.credit = 0.0;
+            return end;
+        }
         if def_touch {
             // Off a defender: it is the attackers' ball still, and they take
             // it in from the spot where it went out.
@@ -5551,6 +5502,9 @@ impl Game {
 
     /// A hand has the ball and keeps it.
     fn control(&mut self, a: After, ts: f32, who: usize, free_throw: bool) -> Option<End> {
+        if let Some(sc) = self.play.scramble.take() {
+            return self.finish_scramble(a, ts, who, sc);
+        }
         self.cut_log(ts - a.t);
         self.play.after = None;
         let (bp, bz, _, _) = a.path.state(ts);
@@ -6508,6 +6462,10 @@ impl Play {
             brk_logged: false,
             go: [0.9; 5],
             inb: None,
+            throw: None,
+            thrown: None,
+            scramble: None,
+            aborts: 0,
         }
     }
 }

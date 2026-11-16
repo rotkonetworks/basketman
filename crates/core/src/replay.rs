@@ -737,6 +737,24 @@ pub struct HandRec {
     pub kind: HandKind,
 }
 
+/// What became of a pass.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PassOutcome {
+    /// Still in the air (or an old recording).
+    #[default]
+    Caught,
+    /// A hand got to it and could not hold it; it was loose.
+    Bobbled,
+    /// A defender's hand tipped it.
+    Tipped,
+    /// A defender took it.
+    Stolen,
+    /// Out of bounds with nobody touching it.
+    Out,
+    /// Nobody got a hand on it.
+    Missed,
+}
+
 /// The kinds of pass.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PassKind {
@@ -950,6 +968,16 @@ pub struct PassRec {
     /// How it was thrown.
     #[serde(default)]
     pub kind: PassKind,
+    /// What became of it.
+    #[serde(default)]
+    pub outcome: PassOutcome,
+    /// The pass reached its target's hands: how far the hand was from the
+    /// ball when it made contact, in centimetres (0 where nobody touched it).
+    #[serde(default)]
+    pub contact_cm: u16,
+    /// The man whose hand touched it first, if a defender (court slot).
+    #[serde(default)]
+    pub touched_by: Option<u8>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

@@ -146,11 +146,21 @@ impl Path {
 
     /// Let the ball fall from `p` at height `z` and vertical speed `vz`,
     /// drifting at `vel` over the floor, bounce and roll to a stop.
-    pub fn fall(&mut self, mut p: Vec2, mut z: f32, mut vz: f32, mut vel: Vec2) {
+    pub fn fall(&mut self, p: Vec2, z: f32, vz: f32, vel: Vec2) {
+        self.fall_from(p, z, vz, vel, true);
+    }
+
+    /// As `fall`, but the ball may leave the court (a pass that is missed).
+    pub fn fall_open(&mut self, p: Vec2, z: f32, vz: f32, vel: Vec2) {
+        self.fall_from(p, z, vz, vel, false);
+    }
+
+    fn fall_from(&mut self, mut p: Vec2, mut z: f32, mut vz: f32, mut vel: Vec2, keep: bool) {
+        let clamp = |q: Vec2| if keep { keep_on_court(q) } else { q };
         for _ in 0..3 {
             let drop = (vz * vz + 2.0 * G * (z - BALL_RADIUS)).max(0.0).sqrt();
             let t = ((vz + drop) / G).max(0.02);
-            let p1 = keep_on_court(p + vel * t);
+            let p1 = clamp(p + vel * t);
             self.push(Arc {
                 p0: p,
                 p1,
@@ -169,7 +179,7 @@ impl Path {
             }
         }
         // Rolling out.
-        let p1 = keep_on_court(p + vel * 0.9);
+        let p1 = clamp(p + vel * 0.9);
         self.push(Arc {
             p0: p,
             p1,
