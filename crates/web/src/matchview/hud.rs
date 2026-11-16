@@ -112,6 +112,7 @@ fn ctx_of<'a>(
         colors: g.colors,
         teams: &g.teams,
         wall: ui.input(|i| i.time),
+        film: false,
     }
 }
 
@@ -288,9 +289,13 @@ impl App {
             colors: [theme::ACCENT, theme::TEXT],
         };
         let round = f.round;
-        if live.is_some() {
+        {
+            // Whatever the feeds hold belongs to the game on screen.
             let ctx = ctx_of(&self.world, ui, &g, self.playback.time, live);
-            self.sh.hud.feeds.tick(&ctx);
+            self.sh.hud.feeds.sync(&ctx);
+            if live.is_some() {
+                self.sh.hud.feeds.tick(&ctx);
+            }
         }
         let crowd = self
             .world
@@ -794,6 +799,7 @@ impl App {
                     colors: g.colors,
                     teams: &g.teams,
                     wall: ui.input(|i| i.time),
+                    film: false,
                 };
                 let feeds = &mut self.sh.hud.feeds;
                 match which {

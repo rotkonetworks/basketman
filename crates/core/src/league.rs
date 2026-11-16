@@ -535,7 +535,13 @@ impl World {
         // results are kept for `complete_block`; only the games of today
         // keep a score timeline.
         let today = f.day;
-        let others: Vec<usize> = played.iter().copied().filter(|&i| i != fixture).collect();
+        // Games of later days of the block wait: they are played, as they
+        // would have been, when the game is booked.
+        let others: Vec<usize> = played
+            .iter()
+            .copied()
+            .filter(|&i| i != fixture && self.fixtures[i].day == today)
+            .collect();
         let jobs: Vec<(TeamId, TeamId, u64, bool)> = others
             .iter()
             .map(|&i| {
@@ -548,9 +554,7 @@ impl World {
         let mut pre = Vec::new();
         let mut around = Vec::new();
         for (&i, (result, recording)) in others.iter().zip(self.simulate_batch(&jobs)) {
-            if self.fixtures[i].day == today
-                && let Some(rec) = &recording
-            {
+            if let Some(rec) = &recording {
                 around.push(crate::live_feed::Other {
                     fixture: i,
                     timeline: crate::live_feed::Timeline::of(rec),
@@ -588,8 +592,9 @@ impl World {
     pub fn full_time(&mut self, mut live: LiveRound) -> Vec<usize> {
         // If the world was changed while the game was on, the other games
         // played ahead of time are not what they would now have been.
-        if self.log.len() != live.log_len || self.round != live.round {
+        if live.stale(self) {
             live.pre.clear();
+            live.around.clear();
         }
         let inputs = live.inputs.clone();
         self.log.push(match live.scope {
@@ -953,6 +958,12 @@ pub enum LiveInput {
 }
 
 impl LiveRound {
+    /// The world was changed since kickoff, so the other games played
+    /// ahead of time are not what they would now have been.
+    pub fn stale(&self, world: &World) -> bool {
+        world.log.len() != self.log_len || world.round != self.round
+    }
+
     /// Advance the game, see `LiveMatch::step`.
     pub fn step(&mut self) -> Option<Pause> {
         self.steps += 1;

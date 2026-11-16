@@ -179,7 +179,9 @@ impl LiveRound {
             changed_side: None,
             ours: true,
         });
-        for o in &self.around {
+        // After a change to the world the others' scores are not known.
+        let around: &[Other] = if self.stale(world) { &[] } else { &self.around };
+        for o in around {
             let f = &world.fixtures[o.fixture];
             let over = now.over || key >= o.timeline.end;
             let (score, change) = o.timeline.at(key.min(o.timeline.end));
@@ -427,6 +429,43 @@ mod tests {
         let booked = w.table();
         assert_eq!(table.iter().map(|r| r.club).collect::<Vec<_>>(), booked);
         assert!(table.iter().all(|r| r.playing.is_none()));
+    }
+
+    #[test]
+    fn a_change_to_the_world_mid_game_hides_the_others_and_they_are_played_afresh() {
+        let mut w = career();
+        let mut reference = w.clone();
+        let mine = reference.user_fixture();
+        reference.apply(Command::PlayToday).unwrap();
+        let me = w.watch.unwrap();
+        let mut live = w.kickoff_today(me).unwrap();
+        while live.game.time() < 100.0 {
+            live.step();
+        }
+        let f = live.game.recording().frames.last().unwrap().clone();
+        let now = Now { period: f.period, clock: f.clock, score: f.score, over: false };
+        assert!(live.games_now(&w, now).len() > 1);
+        let rule = crate::instructions::Rule {
+            name: "x".into(),
+            when: vec![crate::instructions::Condition::MarginAtMost(-30)],
+            then: vec![crate::instructions::Action::Timeout],
+            max_fires: 1,
+            cooldown_secs: 30,
+        };
+        let ins = crate::instructions::Instructions { rules: vec![rule] };
+        w.apply(Command::SetInstructions(ins)).unwrap();
+        assert!(live.stale(&w));
+        assert_eq!(live.games_now(&w, now).len(), 1, "the others are no longer shown");
+        while !live.game.is_over() {
+            live.step();
+        }
+        let played = w.full_time(live);
+        for &i in played.iter().filter(|&&i| Some(i) != mine) {
+            assert_eq!(
+                serde_json::to_string(&reference.fixtures[i].result).unwrap(),
+                serde_json::to_string(&w.fixtures[i].result).unwrap()
+            );
+        }
     }
 
     /// Not an assertion: what the games played ahead cost at kickoff, for

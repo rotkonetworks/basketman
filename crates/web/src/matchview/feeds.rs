@@ -90,6 +90,9 @@ pub(crate) struct Ctx<'a> {
     pub teams: &'a [String; 2],
     /// Wall-clock seconds, for marks that fade.
     pub wall: f64,
+    /// Shown in the film room, where a tap sets the replay but does not
+    /// play it.
+    pub film: bool,
 }
 
 const OURS: Color32 = theme::ACCENT;
@@ -134,6 +137,11 @@ impl Feeds {
                 ..Feeds::default()
             };
         }
+    }
+
+    /// Forget what belongs to another game: the screen is on `c`'s now.
+    pub fn sync(&mut self, c: &Ctx) {
+        self.reset_for(c);
     }
 
     /// Count the game up to the time on screen, when it has moved on.
@@ -800,7 +808,12 @@ impl Feeds {
                     if s.contest > 0.66 { ", tightly guarded" } else if s.contest < 0.25 { ", wide open" } else { "" },
                 );
                 ui.add(egui::Label::new(RichText::new(text).size(12.0).color(theme::TEXT)).wrap());
-                ui.label(RichText::new("The replay has jumped to just before it.").size(11.0).color(theme::TEXT_MUTE));
+                let note = if c.film {
+                    "The replay on the Match screen is set to just before it."
+                } else {
+                    "The replay has jumped to just before it."
+                };
+                ui.label(RichText::new(note).size(11.0).color(theme::TEXT_MUTE));
             }
         });
         ui.add_space(6.0);
