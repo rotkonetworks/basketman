@@ -53,8 +53,8 @@ fn starters_sit_when_the_game_is_decided() {
 }
 
 /// The default plan is a ten-man rotation: the best five are planned for
-/// 25 to 28 of 40 minutes (a little over what they play, as garbage time and
-/// foul trouble take some), the next five for 12 to 15.
+/// 26 to 29 of 40 minutes (a little over what they play, as garbage time and
+/// foul trouble take some), the next five for 11 to 14.
 #[test]
 fn the_default_plan_is_a_ten_man_rotation() {
     for seed in 0..4u64 {
@@ -66,8 +66,8 @@ fn the_default_plan_is_a_ten_man_rotation() {
             m.sort_by(|a, b| b.total_cmp(a));
             let top = m.iter().take(5).sum::<f32>() / 5.0;
             let bench = m.iter().skip(5).take(5).sum::<f32>() / 5.0;
-            assert!((25.0..=28.0).contains(&top), "top five planned for {top:.1}");
-            assert!((12.0..=15.0).contains(&bench), "bench planned for {bench:.1}");
+            assert!((26.0..=29.0).contains(&top), "top five planned for {top:.1}");
+            assert!((11.0..=14.0).contains(&bench), "bench planned for {bench:.1}");
         }
     }
 }
@@ -176,4 +176,65 @@ fn the_side_that_is_behind_fouls_late() {
     }
     assert!(behind + ahead > 100, "too few late fouls to say anything: {}", behind + ahead);
     assert!(behind as f64 >= 2.0 * ahead as f64, "late fouls by the side behind {behind}, by the side ahead {ahead}");
+}
+
+/// The men who play are of the ages of a top division: about 28 on average,
+/// few under 21 or over 35, and the best play is between 25 and 30.
+#[test]
+fn the_men_who_play_have_a_real_age_structure() {
+    use crate::player::Position;
+    let (mut age, mut n) = (0.0f64, 0.0f64);
+    let (mut young, mut prime, mut old) = ((0.0f64, 0.0f64), (0.0f64, 0.0f64), (0.0f64, 0.0f64));
+    let (mut gw, mut gn) = (0.0f64, 0.0f64);
+    for seed in 0..8u64 {
+        let w = World::generate_tiers(1100 + seed, 12, 3);
+        for &t in &w.division_teams(0) {
+            for s in w.teams[t].tactics().rotation.iter().take(8) {
+                let p = &w.players[s.player as usize];
+                age += p.age as f64;
+                n += 1.0;
+                let b = if p.age <= 22 { &mut young } else if p.age <= 30 { &mut prime } else { &mut old };
+                b.0 += p.overall() as f64;
+                b.1 += 1.0;
+                if matches!(p.position, Position::PG | Position::SG) {
+                    gw += p.body.weight_kg as f64;
+                    gn += 1.0;
+                }
+            }
+        }
+    }
+    let mean = age / n;
+    assert!((27.0..=30.0).contains(&mean), "mean age of the rotation {mean:.1}");
+    let (y, p, o) = (young.0 / young.1, prime.0 / prime.1, old.0 / old.1);
+    assert!(p > y + 0.5, "prime {p:.2} against young {y:.2}");
+    assert!(p > o + 0.1, "prime {p:.2} against old {o:.2}");
+    let guards = gw / gn;
+    assert!((84.0..=93.0).contains(&guards), "guards weigh {guards:.1} kg");
+}
+
+/// Clubs of one division are close together: the spread of their rotations'
+/// strength (minutes-weighted overall) is about half a point, not a point.
+#[test]
+fn clubs_are_generated_close_together() {
+    let mut sds = Vec::new();
+    for seed in 0..12u64 {
+        let w = World::generate_tiers(1200 + seed, 12, 3);
+        let v: Vec<f64> = w
+            .division_teams(0)
+            .iter()
+            .map(|&t| {
+                let l = lineup(&w.teams[t], &w.players);
+                let (mut s, mut m) = (0.0f64, 0.0f64);
+                for (slot, p) in l.tactics.rotation.iter().zip(&l.players) {
+                    s += slot.minutes as f64 * p.overall() as f64;
+                    m += slot.minutes as f64;
+                }
+                s / m
+            })
+            .collect();
+        let mu = v.iter().sum::<f64>() / v.len() as f64;
+        sds.push((v.iter().map(|x| (x - mu).powi(2)).sum::<f64>() / v.len() as f64).sqrt());
+    }
+    let sd = sds.iter().sum::<f64>() / sds.len() as f64;
+    assert!((0.25..=0.6).contains(&sd), "mean sd of club strength {sd:.2}");
 }

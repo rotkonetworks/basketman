@@ -485,12 +485,12 @@ pub fn train_playbook(playbook: &mut [TacticSlot], active: usize, drill: f32) {
 
 /// Planned minutes by rank in the rotation (best player first) for the
 /// default plan. The engine normalises the column to 200, so these come out
-/// near 26.5 for the best five and 13.5 for the next five. What is played is
+/// near 27.5 for the best five and 12.5 for the next five. What is played is
 /// less for the starters (garbage time, foul trouble, tired legs) and more for
 /// the bench: about 24 and 16 of 40, a ten-man rotation as a coach plans it.
 /// Fatigue makes this the right plan: a starter at 30 minutes loses to the same
 /// club at 24 (`docs/realism.md`, "League shape").
-pub const AUTO_MINUTES: [u8; 10] = [27, 26, 26, 24, 22, 15, 14, 13, 11, 10];
+pub const AUTO_MINUTES: [u8; 10] = [28, 27, 26, 25, 23, 14, 13, 12, 10, 10];
 
 impl Tactics {
     /// Sensible default: best player per position starts, next five best come

@@ -60,7 +60,11 @@ const HOUSE: f32 = 0.5;
 /// is whistled more than a simple count of contested shots says. Fitted so
 /// that shooting fouls are about half of all fouls without losing the
 /// free-throw rate (see `docs/realism.md`, "League shape").
-pub(super) const SHOOTING_FOULS: f32 = 1.10;
+pub(super) const SHOOTING_FOULS: f32 = 1.06;
+/// Contact on the ball and off it (reaching, hands, a body in the way) that
+/// is whistled, as a multiple of what the floor calls illegal: the crews
+/// of a FIBA league let little of it go, and a first version let more.
+const HAND_CHECKS: f32 = 1.1;
 /// Seconds a whistle is shown in the replay and the official's arm is up.
 const SIGNAL: f32 = 1.0;
 /// How fast the officials run, m/s.
@@ -429,6 +433,10 @@ impl Game {
         let (contact, sev) = if kind == FoulKind::ReachIn && self.hacking(fouler.0) {
             (true, HACK_SEV)
         } else {
+            let sev = match kind {
+                FoulKind::ReachIn | FoulKind::Pushing | FoulKind::Holding | FoulKind::Blocking => sev * HAND_CHECKS,
+                _ => sev,
+            };
             (contact, sev)
         };
         if self.ofc.is_none() {

@@ -1381,7 +1381,7 @@ fn generate_body(base_height: f32, guardness: f32, strength: f32, rng: &mut Rng)
     let standing_reach_cm = height_cm * 1.30 + ape * 0.5 + rng.f32() * 5.0 - 2.5;
     // Guards are lean, but not as lean as the formula for the bigs would have
     // them: a European guard of 191 cm weighs about 88 kg.
-    let build = if guardness > 0.0 { 23.7 - guardness * 0.1 } else { 23.3 - guardness * 0.9 };
+    let build = if guardness > 0.0 { 24.2 - guardness * 0.1 } else { 23.3 - guardness * 0.9 };
     let bmi = build + (strength - 10.0) * 0.18 + rng.f32() * 1.6 - 0.8;
     let metres = height_cm / 100.0;
     Body {
@@ -1431,8 +1431,8 @@ pub(crate) fn age_gap(age: u8) -> f32 {
     let a = age as f32;
     if age < 27 {
         (27.0 - a) * 0.25
-    } else if age > 28 {
-        (a - 28.0) * 0.16
+    } else if age > 27 {
+        (a - 27.0) * 0.15
     } else {
         0.0
     }
