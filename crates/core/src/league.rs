@@ -321,7 +321,7 @@ impl World {
             let division = id / per_division;
             // Clubs differ, but not by so much that the better squad cannot
             // be outcoached. Each division down is a step weaker.
-            let quality = 10.0 - crate::divisions::QUALITY_STEP * division as f32 + rng.f32() * CLUB_SPREAD;
+            let quality = 10.35 - crate::divisions::QUALITY_STEP * division as f32 + rng.f32() * CLUB_SPREAD;
             let mut roster = Vec::new();
             for slot in 0..12 {
                 let pid = players.len() as PlayerId;

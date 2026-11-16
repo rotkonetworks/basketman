@@ -3624,3 +3624,24 @@ pub fn foulkinds(worlds: usize) {
         println!("  {:<14} {:5.2} per team ({:4.1}%)", k.label(), tot[k as usize] / n, tot[k as usize] / pf * 100.0);
     }
 }
+
+/// `lab level [worlds]`: the level of the league as generated: mean overall,
+/// three-point and close-shot ratings of the first division's top eight, and
+/// the mean age.
+pub fn level(worlds: usize) {
+    let (mut ov, mut tp, mut cs, mut age, mut n) = (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    for k in 0..worlds {
+        let w = World::generate_tiers(7000 + k as u64, 12, 3);
+        for &t in &w.division_teams(0) {
+            for s in w.teams[t].tactics().rotation.iter().take(8) {
+                let p = &w.players[s.player as usize];
+                ov += p.overall() as f64;
+                tp += p.attrs[Attr::ThreePoint] as f64;
+                cs += p.attrs[Attr::CloseShot] as f64;
+                age += p.age as f64;
+                n += 1.0;
+            }
+        }
+    }
+    println!("top-8 rotation: overall {:.2}  three-point {:.2}  close shot {:.2}  age {:.1}", ov / n, tp / n, cs / n, age / n);
+}

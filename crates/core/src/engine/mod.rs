@@ -431,7 +431,7 @@ impl Side {
             return -1e6;
         }
         let frac = (elapsed + 120.0) / regulation;
-        let stay = if self.on.contains(&i) { 240.0 } else { 0.0 };
+        let stay = if self.on.contains(&i) { 300.0 } else { 0.0 };
         // Once the game is decided the five planned for the most minutes sit.
         let rested = if self.garbage && self.is_regular(i) { GARBAGE_REST } else { 0.0 };
         s.target_secs * frac - s.played + stay - s.fatigue * 150.0 - rested
