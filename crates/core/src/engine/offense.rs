@@ -5,7 +5,7 @@
 //! player or screener); the other three are filled in position order.
 //! `flip` mirrors the set so it is not always run to the same side.
 
-use crate::court::{Vec2, v};
+use crate::court::{HOOP, Vec2, v};
 use crate::tactics::{Board, OffenseSet};
 
 const CORNER: Vec2 = v(6.95, 1.0);
@@ -76,9 +76,48 @@ pub(super) fn spots(
 ) -> ([Vec2; 5], [Option<Vec2>; 5]) {
     let mut out = ([Vec2::ZERO; 5], [None; 5]);
     for (k, place) in places(lead, big).into_iter().enumerate() {
-        let spot = board.spots[place];
+        let spot = keep_out(board.spots[place]);
         out.0[k] = v(spot.x * flip, spot.y);
         out.1[k] = board.runs[place].map(|p| v(p.x * flip, p.y));
     }
     out
+}
+
+/// Nobody is drawn to stand under the basket: a set is a place to start
+/// from, and a man who starts inside this radius is a shot waiting for a pass
+/// (and the lane rule would have him out of there in three seconds anyway).
+pub(crate) const STAY_OUT: f32 = 2.1;
+
+pub(crate) fn keep_out(p: Vec2) -> Vec2 {
+    let d = p - HOOP;
+    if d.len() >= STAY_OUT {
+        return p;
+    }
+    // Out along the line from the rim, never behind it.
+    let mut dir = if d.len() < 1e-3 { v(1.0, 0.3) } else { d.norm() };
+    if dir.y < 0.3 {
+        dir = v(if dir.x < 0.0 { -0.95 } else { 0.95 }, 0.3).norm();
+    }
+    HOOP + dir * STAY_OUT
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tactics::OffenseSet;
+
+    /// No drawn spot ends up under the basket, and the stock sets are
+    /// untouched.
+    #[test]
+    fn spots_stay_out_of_the_restricted_area() {
+        for set in OffenseSet::ALL {
+            for p in template(set) {
+                assert_eq!(keep_out(p), p, "{set:?} has a stock spot under the basket");
+            }
+        }
+        for p in [v(1.1, 1.7), v(0.0, 1.2), v(-0.5, 1.6), v(0.2, 2.5), HOOP] {
+            let q = keep_out(p);
+            assert!(q.dist(HOOP) >= STAY_OUT - 1e-3 && q.y >= HOOP.y, "{p:?} -> {q:?}");
+        }
+    }
 }

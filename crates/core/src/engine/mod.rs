@@ -12,11 +12,16 @@
 // arrays; indexing them by court index reads better than zipped iterators.
 #![allow(clippy::needless_range_loop)]
 
+mod ball;
 pub mod contact;
 mod defense;
 mod flight;
 mod floor;
 mod offense;
+mod shot;
+pub use shot::make_rate;
+#[cfg(test)]
+mod relations_tests;
 #[cfg(test)]
 mod replay_tests;
 pub(crate) use offense::{places, template};
@@ -481,13 +486,6 @@ impl Side {
         {
             self.on[k] = i;
         }
-    }
-
-    /// Slot `s` shoots `shots` free throws; returns how many went in and
-    /// whether the last one did.
-    /// Chance of a free throw going in.
-    fn ft_pct(&self, s: usize) -> f32 {
-        (0.45 + self.slots[s].p.attrs[Attr::FreeThrow] * 0.03).clamp(0.3, 0.95)
     }
 
     /// Book one free throw.

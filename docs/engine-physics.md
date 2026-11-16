@@ -65,6 +65,14 @@ Each stage ends with the lab numbers inside their bands, the determinism tests p
 3. **Bodies with momentum.** Acceleration, turning, balance and jumping as physics. Dribble moves and footwork act on the defender's balance. Signature moves become particular executions (a hook released above the defender's reach, a step back that creates distance).
 4. **Controllers.** Each player's intentions come from a controller: the built-in brain, a human, or an agent. Directing players with the mouse and, later, direct control.
 
+## Stage 1 as built (shots, blocks, rebounds)
+
+- `engine/ball.rs`: the ball in 3D with gravity, the ring as a torus (radius 0.2286 m, iron 0.0095 m), the glass as a slab with edges, the floor. Contacts are found by bisecting the step (3 ms near the basket), so nothing passes through iron or glass. The result is a chain of exact parabolas (`flight::Path`), recorded in `Recording::ball_arcs` and drawn by the viewer as it was.
+- `engine/shot.rs`: a shot is the ideal launch (through the middle of the ring, off the glass from the side) plus an error in direction, speed and elevation. `floor.rs::shot_errors` sizes it from skill, distance, speed at release, the contest (distance, reach, whether his hand is up), pressure, rhythm and contact. A score is the ball going down through the ring.
+- Blocks: a defender's arm (shoulder, arm length, the jump he is in, timed by his Block rating) meets the ball while it is still rising.
+- Rebounds: everyone reads the loose ball (error in where, delay and timing by rebounding rating), moves, jumps; the first hand in reach takes it, or tips it and it stays live. Out of bounds ends the play (a ball last touched by a defender goes back to the attackers).
+- Known gaps: the whole match still steps at 0.1 s (only the ball is finer); the net only slows the ball once; spin is not modelled; passes, dribbles and steals are unchanged.
+
 ## What it replaces and what it risks
 
 - The dice in `engine/floor.rs` for shots, passes, steals, blocks and rebounds go. The tactical decision code that leads up to them stays.

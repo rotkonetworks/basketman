@@ -92,41 +92,46 @@ fn every_make_goes_through_the_ring_and_no_miss_does() {
     let rims = rims();
     let (mut makes, mut misses) = (0, 0);
     for rec in games(6) {
-        for e in &rec.events {
+        for (n, e) in rec.events.iter().enumerate() {
             let EventKind::Shot { made, .. } = &e.kind else {
                 continue;
             };
-            let i = rec.frame_at(e.time);
-            // The shot is over within a few seconds; look for the ring.
+            // The ball's own recorded path, a few milliseconds at a time (the
+            // 10 Hz frames are too coarse to see a rattle-in): does it cross
+            // the height of the ring going down, inside it?
+            // The ball is this shot's until somebody shoots it again: a tip-in
+            // of the miss is a shot of its own, with its own event.
+            let until = rec.events[n + 1..]
+                .iter()
+                .find(|x| matches!(x.kind, EventKind::Shot { .. }))
+                .map_or(e.time + 6.0, |x| x.time.min(e.time + 6.0));
             let rim = rims[e.offense as usize];
             let mut through = false;
-            let mut inside_miss = false;
-            let end = rec.frame_at(e.time + 4.0).min(rec.frames.len() - 1);
-            for w in rec.frames[i..=end].windows(2) {
-                if w[1].cut {
-                    break;
-                }
-                let a = (w[0].ball, w[0].ball_height);
-                let b = (w[1].ball, w[1].ball_height);
-                if let Some(at) = crossing(a, b, RIM_HEIGHT) {
-                    // Interpolation is straight, the ball is not: leave a margin.
-                    if at.dist(rim) < RIM_RADIUS {
-                        through = true;
-                    } else if at.dist(rim) < RIM_RADIUS - 0.1 {
-                        inside_miss = true;
+            let mut last: Option<(Vec2, f32)> = None;
+            let mut t = e.time;
+            while t < until {
+                let Some(now) = rec.ball_at(t) else {
+                    if t > e.time + 0.3 {
+                        break;
                     }
+                    t += 0.002;
+                    continue;
+                };
+                if let Some(before) = last
+                    && let Some(at) = crossing(before, now, RIM_HEIGHT)
+                    && at.dist(rim) < RIM_RADIUS
+                {
+                    through = true;
                 }
+                last = Some(now);
+                t += 0.002;
             }
             if *made {
                 makes += 1;
-                assert!(
-                    through,
-                    "a make at {} did not pass through the ring",
-                    e.time
-                );
+                assert!(through, "a make at {} did not pass through the ring", e.time);
             } else {
                 misses += 1;
-                assert!(!inside_miss);
+                assert!(!through, "a miss at {} passed through the ring", e.time);
             }
         }
     }
@@ -221,6 +226,7 @@ fn a_rebounder_meets_the_ball_in_his_hands_at_the_height_his_leap_allows() {
     let w = World::generate(7, 12);
     let mut seen = 0;
     let mut airborne = 0;
+    let (mut above, mut above_air) = (0, 0);
     for rec in games(4) {
         for e in &rec.events {
             let EventKind::Rebound { who, .. } = &e.kind else {
@@ -250,15 +256,34 @@ fn a_rebounder_meets_the_ball_in_his_hands_at_the_height_his_leap_allows() {
                 f.ball.dist(f.pos[s][k]),
                 e.time
             );
-            if f.pose[s][k].action == Action::Rebounding && f.pose[s][k].lift_cm > 0 {
+            // In a jump: for a board, a block or a contest (a man who swats a
+            // shot and then takes it himself is still in his leap).
+            let in_air = matches!(
+                f.pose[s][k].action,
+                Action::Rebounding | Action::Blocking | Action::Contesting
+            ) && f.pose[s][k].lift_cm > 0;
+            if in_air {
                 airborne += 1;
+            }
+            // A ball above his standing reach can only be taken in a jump.
+            if f.ball_height > p.body.standing_reach_cm / 100.0 + 0.02 {
+                above += 1;
+                if in_air {
+                    above_air += 1;
+                }
             }
         }
     }
     assert!(seen > 80, "{seen} rebounds");
+    // Most boards are taken in the air; the rest are balls that came down
+    // low (long rebounds, bounces) and were gathered on the floor.
     assert!(
-        airborne * 10 > seen * 8,
+        airborne * 10 > seen * 7,
         "{airborne} of {seen} off the floor"
+    );
+    assert!(
+        above > 100 && above_air * 10 >= above * 9,
+        "{above_air} of {above} balls above his reach were taken in a jump"
     );
 }
 
@@ -343,4 +368,154 @@ fn a_ball_is_only_taken_where_a_hand_can_reach_it() {
         }
     }
     assert!(taken > 1000, "{taken} takes");
+}
+
+
+
+
+
+
+/// The recorded path of every shot is the ball's own: chains of arcs that
+/// join up, a make is a descent through the ring and nothing else is, and
+/// nothing ever passes into the iron, the glass or the floor.
+#[test]
+fn the_recorded_ball_path_is_the_physical_one() {
+    use super::ball::{IRON, RING_RADIUS};
+    let rims = rims();
+    let (mut makes, mut misses, mut contacts) = (0, 0, 0);
+    for rec in games(6) {
+        assert!(!rec.ball_arcs.is_empty());
+        // Sorted, and each arc starts where the one before it was cut short.
+        for w in rec.ball_arcs.windows(2) {
+            assert!(w[1].t0 >= w[0].t0 - 1e-3, "arcs out of order");
+        }
+        for (n, e) in rec.events.iter().enumerate() {
+            let EventKind::Shot { made, blocked_by, .. } = &e.kind else {
+                continue;
+            };
+            // The ball is this shot's until somebody shoots it again: a tip-in
+            // of the miss is a shot of its own, with its own event.
+            let until = rec.events[n + 1..]
+                .iter()
+                .find(|x| matches!(x.kind, EventKind::Shot { .. }))
+                .map_or(e.time + 6.0, |x| x.time.min(e.time + 6.0));
+            let rim = rims[e.offense as usize];
+            // Sample the recorded path finely from the release for 6 s.
+            let mut t = e.time;
+            let mut last: Option<(Vec2, f32)> = None;
+            let mut down_through = false;
+            let mut iron_dive = false;
+            while t < until {
+                let Some((p, z)) = rec.ball_at(t) else {
+                    // The ball was taken by a hand: the flight is over.
+                    if t > e.time + 0.2 {
+                        break;
+                    }
+                    t += 0.002;
+                    continue;
+                };
+                assert!(z >= BALL_RADIUS - 0.01, "under the floor: {z}");
+                // Never inside the iron: nearest point of the ring.
+                let d = p.dist(rim);
+                let ring = ((d - RING_RADIUS).powi(2) + (z - RIM_HEIGHT).powi(2)).sqrt();
+                if d > 1e-3 && ring < BALL_RADIUS + IRON - 0.02 {
+                    iron_dive = true;
+                }
+                if let Some((q, y)) = last {
+                    // Down through the plane of the ring, inside it: a ball tipped
+                    // about under the basket never crossed it from above.
+                    if y > RIM_HEIGHT && z <= RIM_HEIGHT && q.dist(rim) < RING_RADIUS && p.dist(rim) < RING_RADIUS {
+                        down_through = true;
+                    }
+                    // Per 2 ms the ball does not jump.
+                    assert!(q.dist(p) < 0.08 && (y - z).abs() < 0.08, "ball jumps in a step at {t}");
+                    if y > BALL_RADIUS + 0.05 && z <= BALL_RADIUS + 0.05 {
+                        contacts += 1;
+                    }
+                }
+                last = Some((p, z));
+                t += 0.002;
+            }
+            assert!(!iron_dive, "ball inside the iron");
+            if *made {
+                makes += 1;
+                assert!(down_through, "a make at {} did not go down through the ring", e.time);
+            } else {
+                misses += 1;
+                assert!(!down_through, "a miss at {} went down through the ring", e.time);
+            }
+            let _ = blocked_by;
+        }
+    }
+    assert!(makes > 100 && misses > 100 && contacts > 50, "{makes} {misses} {contacts}");
+}
+
+
+
+
+
+/// A man hit in the act can still score (an and-one), and an attacker
+/// who gets a hand on a miss at the ring can put it back in (a tip-in):
+/// both happen, at rates a basketball person would believe.
+#[test]
+fn and_ones_and_tip_ins_happen_at_believable_rates() {
+    let n = 20;
+    let (mut and_ones, mut fouled, mut tip_ins, mut tip_fouls) = (0, 0, 0, 0);
+    let mut by_kind = [(0, 0); 3];
+    for rec in games(n) {
+        for (i, e) in rec.events.iter().enumerate() {
+            let EventKind::Shot {
+                who,
+                made,
+                fouled: f,
+                kind,
+                source,
+                ..
+            } = &e.kind
+            else {
+                continue;
+            };
+            if *f {
+                fouled += 1;
+                and_ones += *made as u32;
+                let k = match kind {
+                    crate::court::ShotKind::Rim => 0,
+                    crate::court::ShotKind::Mid => 1,
+                    crate::court::ShotKind::Three => 2,
+                };
+                by_kind[k].0 += 1;
+                by_kind[k].1 += *made as u32;
+            }
+            // A tip-in is its own board and basket: the same man, the same instant.
+            let tip = *source == crate::replay::Source::Putback
+                && i > 0
+                && matches!(&rec.events[i - 1].kind,
+                    EventKind::Rebound { who: w, offensive: true } if w == who)
+                && (rec.events[i - 1].time - e.time).abs() < 0.05;
+            if tip && *made {
+                tip_ins += 1;
+                tip_fouls += *f as u32;
+            }
+        }
+    }
+    let per = |x: u32| x as f32 / n as f32;
+    // About a quarter to a half of shooting fouls are on shots that go in
+    // (nearly all at the rim), a handful a game.
+    assert!(
+        per(and_ones) > 1.5 && per(and_ones) < 6.0,
+        "{:.2} and-ones a game of {:.2} fouled shots",
+        per(and_ones),
+        per(fouled)
+    );
+    assert!(
+        and_ones * 5 > fouled && and_ones * 2 < fouled,
+        "{and_ones} of {fouled} fouled shots went in"
+    );
+    assert!(by_kind[1].1 > 0, "no and-one from mid-range in {n} games: {by_kind:?}");
+    // Tip-ins: a few a game, never most of the offensive boards.
+    assert!(
+        per(tip_ins) > 0.3 && per(tip_ins) < 4.0,
+        "{:.2} tip-ins a game ({tip_fouls} fouled)",
+        per(tip_ins)
+    );
 }

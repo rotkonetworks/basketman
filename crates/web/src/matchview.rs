@@ -498,7 +498,11 @@ fn blend(rec: &Recording, time: f32) -> Blend<'_> {
     }
     // A ball in the air follows a parabola: the curve through four frames
     // draws it rounder than straight pieces. In a hand it is the hand's.
-    let (ball, height) = if a.holder.is_some() || b.holder.is_some() {
+    let (ball, height) = if let Some((p, z)) = rec.ball_at(time) {
+        // The ball's own recorded path: a shot, a block, a tip. Drawn as it
+        // was, not glided between frames.
+        (p, z)
+    } else if a.holder.is_some() || b.holder.is_some() {
         (
             a.ball.lerp(b.ball, u),
             a.ball_height + (b.ball_height - a.ball_height) * u,

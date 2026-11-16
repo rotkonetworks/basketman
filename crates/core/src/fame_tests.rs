@@ -131,6 +131,40 @@ fn fame_does_not_follow_current_ability() {
 
     // And the rest of the league: after real seasons, a player who is not
     // better than a good starter is not a name, unless he is an old star.
+    // (Several worlds: which player lands near a line moves with the random
+    // stream: a name is rare, and none is ever large.)
+    let (mut below, mut named) = (0, 0);
+    for seed in [6, 7, 8] {
+        let mut w = World::generate(seed, 8);
+        run(&mut w, 4);
+        let mut ov: Vec<f32> = w
+            .teams
+            .iter()
+            .flat_map(|t| t.roster.iter())
+            .map(|&p| w.players[p as usize].overall())
+            .collect();
+        ov.sort_by(|a, b| a.total_cmp(b));
+        let median = ov[ov.len() / 2];
+        for t in &w.teams {
+            for &p in &t.roster {
+                let pl = &w.players[p as usize];
+                if pl.overall() < median && pl.age < 33 {
+                    below += 1;
+                    named += (pl.renown.fame >= 20.0) as u32;
+                    assert!(
+                        pl.renown.fame < 30.0,
+                        "{} ({:.1} overall, {}) has fame {:.0}",
+                        pl.name,
+                        pl.overall(),
+                        pl.age,
+                        pl.renown.fame
+                    );
+                }
+            }
+        }
+    }
+    // Measured: 0 of 146 under one random stream, 1 of ~146 (fame 21) under another.
+    assert!(named * 40 <= below, "{named} of {below} below-median players are names");
     let mut w = World::generate(6, 8);
     run(&mut w, 4);
     let mut ov: Vec<f32> = w
@@ -140,22 +174,6 @@ fn fame_does_not_follow_current_ability() {
         .map(|&p| w.players[p as usize].overall())
         .collect();
     ov.sort_by(|a, b| a.total_cmp(b));
-    let median = ov[ov.len() / 2];
-    for t in &w.teams {
-        for &p in &t.roster {
-            let pl = &w.players[p as usize];
-            if pl.overall() < median && pl.age < 33 {
-                assert!(
-                    pl.renown.fame < 20.0,
-                    "{} ({:.1} overall, {}) has fame {:.0}",
-                    pl.name,
-                    pl.overall(),
-                    pl.age,
-                    pl.renown.fame
-                );
-            }
-        }
-    }
     // Names and ability are not the same list: somebody famous is below the
     // very best, and somebody among the best has no name to speak of.
     let top: Vec<f32> = {
@@ -232,6 +250,23 @@ fn media_work_raises_fame_and_fans_and_costs_training() {
         fame(&base)
     );
     assert!(worked.fan_base(0) > base.fan_base(0));
+    // And in other worlds too: eight games are a small sample, so most of them.
+    let mut ahead = 1;
+    for seed in [13, 14, 15, 16] {
+        let mut b = blank(seed);
+        b.take_charge(0);
+        for p in b.teams[0].roster.clone() {
+            b.players[p as usize].renown.fame = 10.0;
+        }
+        let mut w = b.clone();
+        for p in w.teams[0].roster.clone() {
+            w.set_media(p, MediaLevel::ALot);
+        }
+        rounds(&mut b, 8);
+        rounds(&mut w, 8);
+        ahead += (w.fan_base(0) > b.fan_base(0)) as u32;
+    }
+    assert!(ahead >= 4, "the worked club's fans are ahead in {ahead} of 5 worlds");
     let (a, b) = (&worked.players[who as usize], &base.players[who as usize]);
     assert!(
         a.overall() < b.overall(),

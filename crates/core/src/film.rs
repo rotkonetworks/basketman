@@ -390,6 +390,7 @@ impl TurnoverKind {
             TurnoverKind::OffensiveFoul => "offensive fouls",
             TurnoverKind::ShotClock => "shot clock violations",
             TurnoverKind::Pressed => "lost to the press",
+            TurnoverKind::ThreeSeconds => "three-second violations",
         }
     }
 }
