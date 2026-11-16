@@ -184,6 +184,9 @@ pub enum EventKind {
         assist: Option<PlayerId>,
         blocked_by: Option<PlayerId>,
         fouled: bool,
+        /// How the body was when it left his hand.
+        #[serde(default)]
+        how: ShotHow,
     },
     Rebound {
         who: PlayerId,
@@ -569,6 +572,47 @@ impl Action {
             self,
             Action::Shooting | Action::Rebounding | Action::Contesting | Action::Blocking
         )
+    }
+}
+
+/// How the shooter's body was as he released: what the error of the shot
+/// was made of.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ShotHow {
+    /// Feet set, square to the rim.
+    #[default]
+    Set,
+    /// Off the dribble, on the way from one.
+    OffDribble,
+    /// Started with his back to the rim and turned into it.
+    Turnaround,
+    /// Moving or leaning away from the rim.
+    Fadeaway,
+    /// Moving sideways across the line to the rim.
+    Sideways,
+    /// A desperate heave at the end of the clock.
+    Heave,
+}
+
+impl ShotHow {
+    pub const ALL: [ShotHow; 6] = [
+        ShotHow::Set,
+        ShotHow::OffDribble,
+        ShotHow::Turnaround,
+        ShotHow::Fadeaway,
+        ShotHow::Sideways,
+        ShotHow::Heave,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ShotHow::Set => "set",
+            ShotHow::OffDribble => "off the dribble",
+            ShotHow::Turnaround => "turnaround",
+            ShotHow::Fadeaway => "fadeaway",
+            ShotHow::Sideways => "moving sideways",
+            ShotHow::Heave => "heave",
+        }
     }
 }
 

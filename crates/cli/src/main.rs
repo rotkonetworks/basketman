@@ -106,6 +106,7 @@ fn main() {
             Some("roles") => lab::roles(games.unwrap_or(60)),
             Some("shots") => lab::shots(games.unwrap_or(60)),
             Some("stats") => lab::stats(games.unwrap_or(400)),
+            Some("stance") => lab::stance(games.unwrap_or(120)),
             Some("league") => lab::league(games.unwrap_or(300)),
             Some("launch") => lab::launch(),
             Some("exploit") => lab::exploit(games.unwrap_or(200)),

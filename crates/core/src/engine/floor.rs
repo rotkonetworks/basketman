@@ -10,7 +10,7 @@ use super::defense::{self, View, is_zone};
 use super::flight::{self, Path};
 use super::offense;
 use super::shot::{self, Errors};
-use super::stance::{Handler, Skill, Stance};
+use super::stance::{self, Handler, Skill, Stance};
 use super::{BoxLine, DT, GameResult, Lineup, Pause, Rules, Shout, Side};
 use crate::court::{
     KEY_DEPTH, KEY_HALF_WIDTH, BALL_RADIUS, BOARD_HALF, BOARD_LOW, BOARD_Y, GRAVITY, HOOP, LENGTH, NO_CHARGE_RADIUS, RIM_HEIGHT, ShotKind,
@@ -106,6 +106,14 @@ const HOLD_SPEED: f32 = 0.03;
 /// Metres within which an opponent makes a ball a contested one.
 const CONTEST_ZONE: f32 = 3.0;
 
+/// A pull-up shooter with a defender this close may fade away; the chance for
+/// an average handler, and per point of Handling above 10.
+const FADE_RANGE: f32 = 1.2;
+const FADE_BASE: f32 = 0.3;
+const FADE_SLOPE: f32 = 0.03;
+/// A man this close to the glass is as good as behind it (his hands cannot
+/// come round it to a ball in front).
+const GLASS_MARGIN: f32 = 0.12;
 const ACCEL: f32 = 7.0;
 /// A shooter stopping for a jump shot brakes this many times as hard as he
 /// speeds up: a jump stop is a plant of both feet.
@@ -548,6 +556,8 @@ struct ShotPlan {
     peak: f32,
     /// Where the ball leaves his hand.
     hand_z: f32,
+    /// How far round he had to turn to square to the rim, in radians.
+    turned: f32,
 }
 
 /// How the next possession begins.
@@ -1859,6 +1869,9 @@ impl Game {
                         if matches!(style, Style::Layup | Style::Dunk) {
                             // He keeps going to the basket, a step past it.
                             (HOOP + (HOOP - pos).norm() * 0.45, 0.8)
+                        } else if style == Style::Fadeaway {
+                            // Leaning away from his man as he goes up.
+                            (pos + (pos - HOOP).norm() * 1.0, 0.45)
                         } else {
                             // A jump stop: both feet planted, squared up.
                             brake = true;
@@ -2346,6 +2359,7 @@ impl Game {
             if (q - p).dot(to_hoop) < -0.25 && p.dist(HOOP) > 1.0 {
                 w *= 0.45;
             }
+            
             out[dk] = w;
         }
         out
@@ -2464,6 +2478,13 @@ impl Game {
             }
             let off_lane = q.dist(on_lane);
             if off_lane < 1.5 {
+                // A defender watching the ball reads the pass sooner than one
+                // whose head is turned away.
+                let watch = {
+                    let g = self.st[1 - self.play.o][dk].gaze;
+                    let to_a = (a - q).norm();
+                    1.0 + 0.45 * g.dot(to_a).clamp(-0.5, 0.5) * 2.0 * 0.5
+                };
                 // Hands around the catch (a crowded paint) are worse than a
                 // defender shading the lane.
                 let crowd = if on_lane.dist(b) < 1.2 && b.dist(HOOP) < 4.0 {
@@ -2475,12 +2496,15 @@ impl Game {
                 };
                 risk += (1.5 - off_lane) / 1.5
                     * 0.021
+                    * watch
+                    * self.facing_factor(1 - self.play.o, dk, a).max(0.2)
                     * crowd
                     * (self.de(dk, Attr::Steal) / 10.0)
                     * (1.0 + 0.5 * aggression);
             }
         }
         risk *= 1.55 - self.oe(h, Attr::Passing) / 20.0 * 1.1;
+        risk *= self.pass_stance(h, j);
         risk *= 1.0 + 0.5 * self.off().unfamiliar;
         if self.nearest_defender(a).1 < 1.0 {
             risk *= 1.15;
@@ -2832,8 +2856,9 @@ impl Game {
             from: a,
             to: b,
             t: 0.0,
-            // Long passes have to be lobbed over the defense.
-            dur: Self::pass_time(a.dist(b)),
+            // Long passes have to be lobbed over the defense; one thrown
+            // behind or across the body leaves his hand late.
+            dur: Self::pass_time(a.dist(b)) + self.pass_stance_delay(h, j),
             kind: FlightKind::Pass { from: h, to: j },
             path: None,
         });
@@ -3499,6 +3524,16 @@ impl Game {
         } else {
             Style::Jumper
         };
+        // A pull-up with a hand in his face: the better handlers step back or
+        // fade away to make room, at a price in balance.
+        if style == Style::Jumper
+            && !free_throw
+            && self.play.source == Source::PullUp
+            && self.nearest_defender(p).1 < FADE_RANGE
+            && self.rng.chance((FADE_BASE + FADE_SLOPE * (self.oe(h, Attr::Handling) - 10.0)).clamp(0.05, 0.8))
+        {
+            style = Style::Fadeaway;
+        }
         if style == Style::Layup && reach + max_lift >= RIM_HEIGHT + DUNK_CLEAR {
             let (_, c, _) = self.look(h);
             if c < DUNK_TRAFFIC {
@@ -3528,6 +3563,25 @@ impl Game {
                 (speed / (ACCEL * BRAKE)).min(0.4) + DIP + if free_throw { FT_ROUTINE } else { 0.0 }
             }
         };
+        // He squares his shoulders to the rim before he goes up: the time it
+        // takes is real. A hook is side-on, a heave at the buzzer is not squared.
+        let (turned, lead) = {
+            let sk = self.cache.skill[o * 5 + h];
+            let st = &self.st[o][h];
+            let top = self.cache.top[o * 5 + h].max(1.0);
+            let ang = stance::angle(st.body, (HOOP - p).norm());
+            let need = match style {
+                Style::Hook => (ang - 1.5708).abs(),
+                // A finish from a driver already faces the rim; a post player
+                // with his back to it has to turn first.
+                Style::Layup | Style::Dunk if p.dist(HOOP) < 1.3 || ang < 0.6 => 0.0,
+                Style::Layup | Style::Dunk => ang - 0.3,
+                _ if self.play.source == Source::Forced => 0.0,
+                _ => (ang - 0.25).max(0.0),
+            };
+            let t = stance::turn_time(&sk, need, 0.4 * speed / top, st.balance);
+            (need, if need > 0.0 { lead.max(t + DIP) } else { lead })
+        };
         let release = (t0 + lead + rise).max(t0 + delay);
         let jump_at = release - rise;
         let land = jump_at + 2.0 * rise;
@@ -3547,6 +3601,7 @@ impl Game {
             follow_end: land + watch,
             peak,
             hand_z,
+            turned,
         });
         if !free_throw {
             // Hands go up with the shot, each timed to top out near the
@@ -3631,6 +3686,7 @@ impl Game {
         off_dribble: bool,
         verdict: &Verdict,
         reach_edge: f32,
+        stance_mult: f32,
     ) -> Errors {
         let rim = matches!(style, Style::Layup | Style::Dunk) || kind == ShotKind::Rim;
         let (lat, depth) = shot::base(style, rim, d);
@@ -3686,6 +3742,7 @@ impl Game {
         } else if verdict.contact {
             m *= CONTACT_ERR;
         }
+        m *= stance_mult;
         Errors::at_rim(d, lat * m * GAME, depth * m * GAME)
     }
 
@@ -3712,6 +3769,10 @@ impl Game {
             }
             // A man planted for a charge has his arms folded.
             if self.play.hunt.is_some_and(|(hk, _, _)| hk == dk) {
+                continue;
+            }
+            // With his back to the shooter he cannot block.
+            if self.facing_factor(d, dk, shooter) <= 0.0 {
                 continue;
             }
             let reach = self.sides[d].slots[self.sides[d].on[dk]].p.body.standing_reach_cm / 100.0;
@@ -3761,6 +3822,7 @@ impl Game {
                 follow_end: self.play.t + 1.0,
                 peak: 0.3,
                 hand_z: 2.6,
+                turned: 0.0,
             });
         let to_rim = p.dist(HOOP);
         if plan.style == Style::Dunk && to_rim > DUNK_RANGE {
@@ -3786,6 +3848,9 @@ impl Game {
         let mut w = self.contest_each(p, h, rim_kind);
         for (dk, w) in w.iter_mut().enumerate() {
             if *w > 0.0 {
+                // A hand up needs a body turned to the shooter: with his back
+                // to the play he cannot contest, and off balance he is late.
+                *w *= self.facing_factor(1 - self.play.o, dk, p);
                 let up = self.lift_at(1 - self.play.o, dk, 0.0);
                 let max = {
                     let d = self.def();
@@ -3802,6 +3867,7 @@ impl Game {
             let pl = &self.off().slots[self.off().on[h]].p;
             pl.body.standing_reach_cm / 100.0 + plan.peak - (RIM_HEIGHT + DUNK_CLEAR)
         };
+        let (how, stance_mult) = self.shot_stance(h, style, off_dribble, plan.turned);
         let errors = self.shot_errors(
             h,
             style,
@@ -3812,6 +3878,7 @@ impl Game {
             off_dribble,
             &verdict,
             reach_edge,
+            stance_mult,
         );
         let start = ball::clear_start(v3(from.x, from.y, z0));
         let (ideal, _) = shot::ideal(start, style);
@@ -3843,6 +3910,7 @@ impl Game {
             assist: assist.filter(|_| made).map(|k| self.oid(k)),
             blocked_by: blocker.map(|dk| self.did(dk)),
             fouled,
+            how,
         };
         if self.play.source == Source::Drive
             && let Some(rec) = &mut self.rec
@@ -4369,7 +4437,7 @@ impl Game {
     fn reach_of(&self, i: usize, ball: (Vec2, f32), pos: Vec2, ahead: f32) -> Option<f32> {
         let (t, k) = self.side_of(i);
         // The glass is in the way of a man behind it.
-        if (pos.y < BOARD_Y) != (ball.0.y < BOARD_Y)
+        if (pos.y < BOARD_Y + GLASS_MARGIN) != (ball.0.y < BOARD_Y + GLASS_MARGIN)
             && ball.1 > BOARD_LOW - 0.3
             && ball.0.x.abs() < 1.2
             && pos.x.abs() < 1.2
@@ -4615,6 +4683,7 @@ impl Game {
             assist: None,
             blocked_by: None,
             fouled,
+            how: crate::replay::ShotHow::Set,
         });
         if fouled && let Some(dk) = near {
             self.defensive_foul(dk, who, if made { 1 } else { 2 }, FoulKind::Shooting);
@@ -5225,6 +5294,7 @@ impl Game {
             follow_end: self.play.t + 1.0,
             peak: 0.1,
             hand_z: 2.4,
+            turned: 0.0,
         });
         let from = p + (HOOP - p).norm() * 0.2;
         let d = from.dist(HOOP);

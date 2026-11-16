@@ -73,6 +73,17 @@ Each stage ends with the lab numbers inside their bands, the determinism tests p
 - Rebounds: everyone reads the loose ball (error in where, delay and timing by rebounding rating), moves, jumps; the first hand in reach takes it, or tips it and it stays live. Out of bounds ends the play (a ball last touched by a defender goes back to the attackers).
 - Known gaps: the whole match still steps at 0.1 s (only the ball is finer); the net only slows the ball once; spin is not modelled; passes, dribbles and steals are unchanged.
 
+## Stage 3, first part: stance (body, eyes, legwork, balance, dribble)
+
+- `engine/stance.rs` is the pure model; `engine/floor/stance_hooks.rs` is the game's side (it reads the private state of `floor.rs`). Per player and per tick there are three directions: the **body** (hips and chest, turns at a limited rate by agility and footwork, slower at speed and off balance), the **eyes** (fast, never more than 80 degrees from the body) and the **movement** (the velocity). No trigonometry from the standard library: angles come from a polynomial arctangent, turns are fixed small rotations by polynomial sine and cosine.
+- What the body wants to face is decided by role in `stance_wants` (shooter to the rim, hook side-on, post player back to the basket, on-ball defender square to the handler, help defender open to ball and man, boxing out toward the rim, closing out at the handler, receiver square to the passer, screener to the defender).
+- The legwork is the angle between movement and body: run, slide, backpedal, crossover, pivot, drop step, closeout and chop, jump stop. The top speed in a direction is a share of the man's top speed (`move_cap`): all of it forward, less sideways, least backward; footwork and agility raise the limits. A defender whose hips must turn to chase a drive loses the time the turn takes.
+- Balance (0 to 1) falls with hard acceleration, fast turns at speed, contact and unsteady footing, and comes back with Footwork and Strength.
+- Shots: the shooter squares his shoulders before going up (the turn is time, `plan_shot`), and the launch error is multiplied by `shot_multiplier` (angle off the rim, sideways and backward movement, balance), less the matching skill. A hook is side-on, a turnaround starts with the back to the rim, a pull-up with a hand in the face may become a fadeaway, a shot at the buzzer is a flagged heave. `EventKind::Shot::how` says which, for `lab stats`.
+- Passes thrown across or behind the body leave late and are riskier, a receiver not looking or running away from the ball is harder to catch for, defenders whose head is turned read a pass later. A defender with his back to a shooter cannot contest or block.
+- The ball handler has a real dribble state (`Dribble`: not yet, live with a hand, picked up). Once picked up he may only pivot (his position is held to a radius), pass or shoot. The picture draws one hand or two from this state, never from speed (the old viewer drew two hands whenever he slowed down).
+- Known gaps: no five-second or travelling turnovers, no closely-guarded rule; signature moves are not yet wired to the shot penalties; a finish starts earlier than the two steps of a real gather.
+
 ## What it replaces and what it risks
 
 - The dice in `engine/floor.rs` for shots, passes, steals, blocks and rebounds go. The tactical decision code that leads up to them stays.

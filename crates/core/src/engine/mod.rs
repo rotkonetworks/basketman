@@ -1052,4 +1052,4 @@ pub fn simulate_recorded(
 }
 
 #[cfg(test)]
-mod stance_diag;
+mod stance_tests;

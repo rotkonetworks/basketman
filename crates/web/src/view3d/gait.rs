@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 
 use basketman_core::court::Vec2;
 use basketman_core::player::{Attr, Body, Hand, Player};
-use basketman_core::replay::Recording;
+use basketman_core::replay::{Dribble, Footwork, Recording};
 
 use super::{BALL_RADIUS, Vec3, v3};
 
@@ -155,6 +155,40 @@ pub(crate) fn stride_len(v: f32, s: f32, leg: f32, factor: f32) -> f32 {
     sigma(v, s) * leg / duty(v, s) * factor
 }
 
+/// What the recording says about the legs and the head, beyond how he moves:
+/// all neutral for an old recording.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct Legs {
+    /// How far the head is turned from the body, radians, left positive.
+    pub yaw: f32,
+    pub foot: Footwork,
+    /// Pivoting on a planted foot: 0 none, 1 left, 2 right.
+    pub planted: u8,
+    /// How much of a pivot to show, 0 to 1 (smoothed over frames).
+    pub pivot: f32,
+    /// One hand on the ball, 0 to 1 (two hands when 0); negative when the
+    /// recording does not say and speed decides.
+    pub one_hand: f32,
+    /// +1 right hand dribbling, -1 left, 0 not said.
+    pub hand: i8,
+    /// Stride length relative to a run: short chop steps, a shuffle.
+    pub stride_k: f32,
+}
+
+impl Default for Legs {
+    fn default() -> Legs {
+        Legs {
+            yaw: 0.0,
+            foot: Footwork::Stand,
+            planted: 0,
+            pivot: 0.0,
+            one_hand: -1.0,
+            hand: 0,
+            stride_k: 1.0,
+        }
+    }
+}
+
 /// What drives a pose.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct Gait {
@@ -168,6 +202,7 @@ pub(crate) struct Gait {
     pub phase: f32,
     /// Dribble phase in radians.
     pub dribble: f32,
+    pub legs: Legs,
 }
 
 impl Gait {
@@ -178,6 +213,7 @@ impl Gait {
             stance: 0.0,
             phase: 0.0,
             dribble: 0.0,
+            legs: Legs::default(),
         }
     }
 }
@@ -211,6 +247,21 @@ pub(crate) const JOINTS: usize = 31;
 pub(crate) struct Pose {
     pub j: [Vec3; JOINTS],
     pub ball: Option<Vec3>,
+    /// Head turn about the vertical, radians.
+    pub yaw: f32,
+}
+
+impl Pose {
+    /// Turn the head about the vertical through the top of the neck.
+    pub fn turn_head(&mut self, yaw: f32) {
+        self.yaw = yaw;
+        let (sy, cy) = yaw.sin_cos();
+        let c = self.j[NECK_TOP];
+        for i in [HEAD_TOP, HAIR_LOW, HAIR_HIGH] {
+            let r = self.j[i] - c;
+            self.j[i] = v3(c.x + r.x * cy - r.y * sy, c.y + r.x * sy + r.y * cy, self.j[i].z);
+        }
+    }
 }
 
 /// Two-bone IK: the middle joint (elbow or knee) of a limb from `s` towards
@@ -257,7 +308,7 @@ pub(crate) fn pose(d: &Dims, g: &Gait, ball: bool) -> Pose {
     let ra = smoothstep(1.6, 4.4, v);
     let gm = smoothstep(0.12, 0.65, v);
     let duty = duty(v, s);
-    let sweep = sigma(v, s) * lr * gm * d.stride_factor;
+    let sweep = sigma(v, s) * lr * gm * d.stride_factor * g.legs.stride_k;
     let vf = 0.7 + 0.03 * d.vertical;
     let lift_h = (lr * (0.07 + 0.15 * ra) * (1.0 - s) + lr * 0.05 * s) * gm * vf;
     // Hip height: low enough that the planted foot at the end of its sweep is
@@ -310,7 +361,19 @@ pub(crate) fn pose(d: &Dims, g: &Gait, ball: bool) -> Pose {
             }
             + lift;
         let hip = v3(pel_f, sg * d.hip_half, pz);
-        let target = v3(mf * pp, sg * lat_base + ml * pp, az);
+        let mut target = v3(mf * pp, sg * lat_base + ml * pp, az);
+        // A pivot: the planted foot stays where it is, the other steps round it.
+        if g.legs.pivot > 0.0 {
+            let planted_left = g.legs.planted == 1;
+            let mine = (sd == 0) == planted_left;
+            let step = if mine {
+                v3(0.0, sg * d.hip_half, hv)
+            } else {
+                let q = (phi * 1.0).sin();
+                v3(0.16 * q, sg * lat_base, hv + 0.04 * (phi * 1.0).cos().max(0.0))
+            };
+            target = target + (step - target) * g.legs.pivot;
+        }
         let (knee, ankle) = ik2(hip, target, d.thigh, d.shin, v3(1.0, sg * 0.35 * s, 0.0));
         j[HIP + sd] = hip;
         j[KNEE + sd] = knee;
@@ -352,14 +415,20 @@ pub(crate) fn pose(d: &Dims, g: &Gait, ball: bool) -> Pose {
 
     // The ball: held at the chest when he stands, dribbled at the hand on
     // his shooting side in step with his strides when he moves.
-    let sb = d.hand_side;
+    // +y is his left: a recorded right hand puts the ball on -y.
+    let sb = if g.legs.hand != 0 { -(g.legs.hand as f32) } else { d.hand_side };
     let br = BALL_RADIUS;
     let mut bc = Vec3::default();
     let mut hb = 0.0;
     let mut sdb = 0;
     if ball {
         sdb = if sb > 0.0 { 0 } else { 1 };
-        hb = smoothstep(0.25, 0.9, v);
+        // The recording says whether he is dribbling; an old one is guessed from speed.
+        hb = if g.legs.one_hand >= 0.0 {
+            g.legs.one_hand
+        } else {
+            smoothstep(0.25, 0.9, v)
+        };
         let hold = v3(0.17 * h, sb * 0.09, pz + 0.30 * d.torso);
         let dr_f = (0.17 + 0.05 * ra) * h;
         let dr_l = sb * (d.shoulder_half + 0.04);
@@ -435,6 +504,7 @@ pub(crate) fn pose(d: &Dims, g: &Gait, ball: bool) -> Pose {
         j[FINGERS + sd] = wrist + hd * d.hand;
     }
     Pose {
+        yaw: 0.0,
         j,
         ball: ball.then_some(bc),
     }
@@ -451,6 +521,7 @@ pub(crate) struct Slot {
     pub stance: f32,
     pub phase: f32,
     pub dribble: f32,
+    pub legs: Legs,
 }
 
 impl Slot {
@@ -460,6 +531,15 @@ impl Slot {
         stance: 0.0,
         phase: 0.0,
         dribble: 0.0,
+        legs: Legs {
+            yaw: 0.0,
+            foot: Footwork::Stand,
+            planted: 0,
+            pivot: 0.0,
+            one_hand: -1.0,
+            hand: 0,
+            stride_k: 1.0,
+        },
     };
 
     pub fn gait(&self) -> Gait {
@@ -469,6 +549,7 @@ impl Slot {
             stance: self.stance,
             phase: self.phase,
             dribble: self.dribble,
+            legs: self.legs,
         }
     }
 }
@@ -602,6 +683,16 @@ fn compute_row(rec: &Recording, i: usize, prev: Option<&Row>, stride: StrideOf) 
                 tgt = 1.0;
             }
         }
+        let rp = &f.pose[side][n];
+        let body = rp.body_dir();
+        // The legwork the engine recorded decides the stance.
+        if body.is_some() {
+            if matches!(rp.foot, Footwork::Slide | Footwork::Backpedal | Footwork::Chop) {
+                tgt = 1.0;
+            } else if matches!(rp.foot, Footwork::Run | Footwork::Closeout) {
+                tgt = 0.0;
+            }
+        }
         let sp = if linked {
             before.map_or(tgt, |b| b.stance)
         } else {
@@ -635,7 +726,7 @@ fn compute_row(rec: &Recording, i: usize, prev: Option<&Row>, stride: StrideOf) 
             t = nrm;
         }
         // What the engine recorded he faces beats what the viewer would guess.
-        if let Some(fc) = f.pose[side][n].face() {
+        if let Some(fc) = body.or_else(|| rp.face()) {
             t = fc;
         }
         if t.len() < 0.001 {
@@ -643,23 +734,82 @@ fn compute_row(rec: &Recording, i: usize, prev: Option<&Row>, stride: StrideOf) 
         }
         t = t.norm();
         let mut face = t;
-        if let (true, Some(b)) = (linked, before) {
+        // A recorded body already turns at the rate the engine allows: the
+        // viewer adds nothing to it. An old recording is smoothed.
+        if let (true, Some(b), None) = (linked, before, body) {
             let kf = if spd > 0.5 || st > 0.5 { 0.33 } else { 0.16 };
             let m = b.face * (1.0 - kf) + t * kf;
             face = if m.len() < 0.05 { t } else { m.norm() };
         }
         let (leg, factor) = stride(side, f.who[side][n]);
+        // The legs the engine recorded: short chop steps, a shuffle, a
+        // backpedal. The stride is shortened by the same factor in the pose,
+        // so that the feet cover what the body covers.
+        let stride_k = if body.is_some() {
+            match rp.foot {
+                Footwork::Chop => 0.55,
+                Footwork::Slide => 0.8,
+                Footwork::Backpedal => 0.85,
+                _ => 1.0,
+            }
+        } else {
+            1.0
+        };
+        let live = rp.dribble == Dribble::Live;
         let (phase, dribble) = match (linked, before) {
             (true, Some(b)) => {
                 let dist = p.dist(pos_of(rec, i - 1, k));
-                let sl = stride_len(spd, st, leg, factor);
+                let sl = stride_len(spd, st, leg, factor) * stride_k;
                 let dph = TAU * dist / sl;
+                // Turning on a planted foot steps the free foot round.
+                let turn = match (body, rec.frames.get(i - 1).and_then(|q| q.pose[side][n].body_dir())) {
+                    (Some(a), Some(b)) if rp.foot == Footwork::Pivot => {
+                        let cr = (b.x * a.y - b.y * a.x).abs().min(1.0);
+                        cr.asin() * 3.0
+                    }
+                    _ => 0.0,
+                };
+                let spin = if live { TAU * 0.1 / 0.52 } else { 0.0 };
                 (
-                    b.phase + dph,
-                    b.dribble + dph * (2.0 - smoothstep(1.5, 3.5, spd)),
+                    b.phase + dph + turn,
+                    b.dribble + (dph * (2.0 - smoothstep(1.5, 3.5, spd))).max(spin),
                 )
             }
             _ => ((f.who[side][n] as f32 * 1.7 + k as f32 * 0.9) % TAU, 0.0),
+        };
+        // Head turn from the recording.
+        let yaw = match (body, rp.gaze_dir()) {
+            (Some(b), Some(g)) => {
+                let cr = b.x * g.y - b.y * g.x;
+                cr.atan2(b.dot(g)).clamp(-1.45, 1.45)
+            }
+            _ => 0.0,
+        };
+        // One hand or two, from the dribble the engine is in: never from speed.
+        let hand_goal = match rp.dribble {
+            Dribble::None => -1.0,
+            Dribble::Live => 1.0,
+            _ => 0.0,
+        };
+        let one_hand = match (hand_goal >= 0.0, before) {
+            (true, Some(b)) if linked && b.legs.one_hand >= 0.0 => {
+                b.legs.one_hand + (hand_goal - b.legs.one_hand) * 0.5
+            }
+            _ => hand_goal,
+        };
+        let pivot_goal = (rp.foot == Footwork::Pivot) as u8 as f32;
+        let pivot = match before {
+            Some(b) if linked => b.legs.pivot + (pivot_goal - b.legs.pivot) * 0.5,
+            _ => pivot_goal,
+        };
+        let legs = Legs {
+            yaw,
+            foot: rp.foot,
+            planted: rp.planted,
+            pivot,
+            one_hand,
+            hand: rp.hand,
+            stride_k,
         };
         out[k] = Slot {
             vel: vl,
@@ -667,6 +817,7 @@ fn compute_row(rec: &Recording, i: usize, prev: Option<&Row>, stride: StrideOf) 
             stance: st,
             phase,
             dribble,
+            legs,
         };
     }
     out
@@ -756,6 +907,16 @@ impl Motion {
                     stance: a[k].stance + (b.stance - a[k].stance) * u,
                     phase: a[k].phase + (b.phase - a[k].phase) * u,
                     dribble: a[k].dribble + (b.dribble - a[k].dribble) * u,
+                    legs: Legs {
+                        yaw: a[k].legs.yaw + (b.legs.yaw - a[k].legs.yaw) * u,
+                        pivot: a[k].legs.pivot + (b.legs.pivot - a[k].legs.pivot) * u,
+                        one_hand: if a[k].legs.one_hand >= 0.0 && b.legs.one_hand >= 0.0 {
+                            a[k].legs.one_hand + (b.legs.one_hand - a[k].legs.one_hand) * u
+                        } else {
+                            a[k].legs.one_hand
+                        },
+                        ..a[k].legs
+                    },
                 };
             }
             out[k / 5][k % 5] = g;
@@ -864,6 +1025,7 @@ mod tests {
             stance: 0.0,
             phase: TAU * v * t / sl,
             dribble: 0.0,
+            legs: Default::default(),
         };
         pose(d, &gait, false)
     }
@@ -914,6 +1076,7 @@ mod tests {
                     stance: 0.0,
                     phase: 1.0,
                     dribble: 2.0,
+                    legs: Default::default(),
                 };
                 let ball = pose(&d, &g, true).ball.unwrap();
                 assert!(ball.y * sign > 0.03, "{hand:?} at {v}: {}", ball.y);
@@ -932,6 +1095,7 @@ mod tests {
                 stance: s,
                 phase: 2.2,
                 dribble: 0.7,
+                legs: Default::default(),
             };
             let p = pose(&d, &g, true);
             for sd in 0..2 {
@@ -1036,5 +1200,56 @@ mod tests {
         assert!(g[0][0].vel.x > 3.5);
         let g2 = m.at(&r, 4.1);
         assert!(g2[0][0].phase > g[0][0].phase);
+    }
+
+    /// The hands on the ball follow the dribble the engine is in, never his
+    /// speed: one hand while he dribbles, two while he has not started or has
+    /// picked up.
+    #[test]
+    fn one_hand_or_two_follows_the_recorded_dribble_and_not_the_speed() {
+        use basketman_core::engine::simulate_recorded;
+        use basketman_core::league::{World, lineup};
+        use basketman_core::replay::Dribble;
+        use basketman_core::rng::Rng;
+        let w = World::generate(5, 12);
+        let hl = lineup(&w.teams[0], &w.players);
+        let al = lineup(&w.teams[1], &w.players);
+        let (_, r) = simulate_recorded(&hl, &al, &w.rules, &mut Rng::new(7));
+        let mut cache = MotionCache::default();
+        let m = cache.get(&r, LEG);
+        let (mut live, mut two, mut slow_live, mut fast_two) = (0, 0, 0, 0);
+        for i in 6..r.frames.len() {
+            let f = &r.frames[i];
+            let Some((s, k)) = f.holder else { continue };
+            let (s, k) = (s as usize, k as usize);
+            let state = f.pose[s][k].dribble;
+            // Steady: the same state for the last six frames, no cut.
+            let steady = (i - 6..i).all(|j| {
+                r.frames[j].pose[s][k].dribble == state
+                    && r.frames[j].holder == f.holder
+                    && !r.frames[j + 1].cut
+            });
+            if !steady {
+                continue;
+            }
+            let g = m.at(&r, f.time)[s][k];
+            let speed = g.vel.len();
+            match state {
+                Dribble::Live => {
+                    live += 1;
+                    slow_live += (speed < 0.3) as u32;
+                    assert!(g.legs.one_hand > 0.98, "dribbling with {} of one hand", g.legs.one_hand);
+                }
+                Dribble::NotYet | Dribble::PickedUp => {
+                    two += 1;
+                    fast_two += (speed > 1.5) as u32;
+                    assert!(g.legs.one_hand < 0.02, "two hands expected, got {}", g.legs.one_hand);
+                }
+                Dribble::None => {}
+            }
+        }
+        assert!(live > 100 && two > 100, "{live} dribbling, {two} holding");
+        assert!(slow_live > 0, "a dribble in place is drawn as a dribble");
+        let _ = fast_two;
     }
 }

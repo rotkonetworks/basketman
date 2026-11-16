@@ -1098,6 +1098,7 @@ mod tests {
                             stance: if i > 5 { 1.0 } else { 0.0 },
                             phase: i as f32 + t * 6.0,
                             dribble: t * 6.0,
+                            legs: Default::default(),
                         },
                         team: PAINT,
                         holds_ball: i == 3,

@@ -198,6 +198,7 @@ pub(crate) fn emit_figure(s: &mut Scene, f: &FigureSpec) -> Option<Vec3> {
                 stance: f.gait.stance,
                 phase: f.gait.phase,
                 dribble: f.gait.dribble,
+                legs: f.gait.legs,
             };
             let mut p = gait::pose(&d, &g, false);
             action::apply(&mut p, &d, a);
@@ -205,8 +206,21 @@ pub(crate) fn emit_figure(s: &mut Scene, f: &FigureSpec) -> Option<Vec3> {
         }
         _ => gait::pose(&d, &f.gait, f.holds_ball),
     };
+    // The eyes look where the recording says, within their range of the body.
+    pose.turn_head(f.gait.legs.yaw);
     let looks = Looks::of(f.id);
-    let fr = Frame { pos: f.pos, face };
+    // A pivot turns about the planted foot, which stays where he is recorded:
+    // the hips swing round it.
+    let mut at = f.pos;
+    if f.gait.legs.pivot > 0.0 && f.gait.legs.planted != 0 {
+        let sg = if f.gait.legs.planted == 1 { 1.0 } else { -1.0 };
+        let off = d.hip_half * sg * f.gait.legs.pivot;
+        at = Vec2 {
+            x: at.x + face.y * off,
+            y: at.y - face.x * off,
+        };
+    }
+    let fr = Frame { pos: at, face };
     figure_segments(s, &fr, &pose, &d, &looks, f.team);
     pose.ball.take().map(|b| fr.world(b))
 }
@@ -227,6 +241,8 @@ fn figure_segments(s: &mut Scene, fr: &Frame, body: &Pose, d: &Dims, looks: &Loo
     let shorts = darker(team, 0.68);
     let skin = looks.skin;
     let across = v3(0.0, 1.0, 0.0);
+    let (sy, cy) = body.yaw.sin_cos();
+    let head_side = v3(-sy, cy, 0.0);
     let along = v3(1.0, 0.0, 0.0);
     let mut seg = |a, b, w: (f32, f32), dp: (f32, f32), ext, side, bias, color| {
         emit_seg(
@@ -283,7 +299,7 @@ fn figure_segments(s: &mut Scene, fr: &Frame, body: &Pose, d: &Dims, looks: &Loo
         (0.046 * h, 0.043 * h),
         (0.054 * h, 0.050 * h),
         0.0,
-        across,
+        head_side,
         0.0,
         skin,
     );
@@ -293,7 +309,7 @@ fn figure_segments(s: &mut Scene, fr: &Frame, body: &Pose, d: &Dims, looks: &Loo
         (0.049 * h, 0.047 * h),
         (0.056 * h, 0.053 * h),
         0.0,
-        across,
+        head_side,
         -0.02,
         looks.hair,
     );
@@ -402,6 +418,7 @@ mod tests {
                 stance: 0.0,
                 phase: 1.3,
                 dribble: 0.0,
+                legs: Default::default(),
             },
             team: Color32::from_rgb(98, 67, 217),
             holds_ball: false,

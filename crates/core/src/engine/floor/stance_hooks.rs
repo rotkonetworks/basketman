@@ -8,11 +8,14 @@ use super::*;
 use crate::engine::stance::{
     self, CATCH_STEPS, Handler, Want, accel_cap, angle, clamp_gaze, move_cap, turn,
 };
-use crate::replay::{Dribble, Footwork};
+use crate::replay::{Dribble, Footwork, ShotHow};
 
 /// Seconds of the free throw routine and so on do not matter here; these do:
 /// how far from a loose ball a pass receiver still counts as turned to it.
 const HELP_MID: f32 = 0.5;
+/// How much of the off-balance error is charged to a shot: the honest
+/// calibration knob of this model.
+const SHOT_STANCE: f32 = 1.0;
 
 impl Game {
     /// Where each body wants to face this tick, by role and situation.
@@ -42,7 +45,7 @@ impl Game {
                         let to_rim = (HOOP - me).norm();
                         w.gaze = Some(HOOP);
                         match s.style {
-                            Style::Hook if self.play.t < s.jump_at => {
+                            Style::Hook => {
                                 // Side-on to the rim, the near shoulder to it.
                                 let perp = if me.x >= 0.0 {
                                     v(-to_rim.y, to_rim.x)
@@ -323,8 +326,10 @@ impl Game {
                     .play
                     .shot
                     .is_some_and(|s| matches!(s.style, Style::Layup | Style::Dunk));
+                // A finish may carry him all the way to the rim (the engine
+                // starts it earlier than the two steps of a real gather).
                 self.handler.radius = if layup {
-                    2.7
+                    (pos.dist(HOOP) + 1.0).max(2.7)
                 } else {
                     0.6 + speed * speed / (2.0 * ACCEL * BRAKE) * 1.3
                 };
@@ -388,5 +393,95 @@ impl Game {
                 pose.hand = self.handler.hand;
             }
         }
+    }
+
+    /// How the shooter's body is as the ball leaves his hand, what to call
+    /// the shot, and the multiplier its error takes from it: the angle of the
+    /// shoulders to the rim, moving sideways or away, and balance, less what
+    /// the matching skill takes off.
+    pub(super) fn shot_stance(
+        &self,
+        h: usize,
+        style: Style,
+        off_dribble: bool,
+        turned: f32,
+    ) -> (ShotHow, f32) {
+        let o = self.play.o;
+        let st = &self.st[o][h];
+        let m = &self.m[o][h];
+        let to = (HOOP - m.pos).norm();
+        let finish = matches!(style, Style::Layup | Style::Dunk);
+        // At the rim the line to it means nothing (he is under it): a finish
+        // was squared when he left the floor.
+        let at_rim = finish && m.pos.dist(HOOP) < 1.3;
+        let ang = if at_rim { 0.0 } else { angle(st.body, to) };
+        let eff = if style == Style::Hook { (ang - 1.5708).abs() } else { ang };
+        let fwd = if at_rim { 0.0 } else { m.vel.dot(to) };
+        let side = if at_rim { 0.0 } else { (m.vel.x * to.y - m.vel.y * to.x).abs() };
+        let heave = self.play.source == Source::Forced;
+        let fwd_pen = if finish { fwd.max(0.0) } else { fwd };
+        let how = if heave {
+            ShotHow::Heave
+        } else if style == Style::Hook && turned > 1.2 {
+            ShotHow::Turnaround
+        } else if fwd_pen < -1.0 {
+            ShotHow::Fadeaway
+        } else if side > 0.8 && !finish {
+            ShotHow::Sideways
+        } else if off_dribble {
+            ShotHow::OffDribble
+        } else {
+            ShotHow::Set
+        };
+        let key = match style {
+            Style::Hook => self.oe(h, Attr::PostMoves),
+            Style::Layup | Style::Dunk => self.oe(h, Attr::CloseShot),
+            _ if how == ShotHow::Fadeaway || how == ShotHow::Sideways => {
+                0.5 * (self.oe(h, Attr::Handling) + self.oe(h, Attr::MidRange))
+            }
+            _ => self.oe(h, Attr::Handling),
+        };
+        let skill = ((0.5 * (key + self.oe(h, Attr::Footwork)) - 8.0) / 12.0).clamp(0.0, 1.0);
+        let scale = if matches!(style, Style::Layup | Style::Dunk) { 0.6 } else { 1.0 };
+        (how, stance::shot_multiplier(eff, fwd_pen, side, st.balance, skill, scale * SHOT_STANCE))
+    }
+
+    /// 0 to 1: how well defender `dk` of side `t`, as his body points, can
+    /// get a hand on something at `at`. Zero with his back to it, full when
+    /// squared up and set.
+    pub(super) fn facing_factor(&self, t: usize, dk: usize, at: Vec2) -> f32 {
+        let st = &self.st[t][dk];
+        let to = (at - self.m[t][dk].pos).norm();
+        let c = st.body.dot(to);
+        ((c + 0.2) / 0.4).clamp(0.0, 1.0) * (0.8 + 0.2 * st.balance)
+    }
+
+    /// Multiplier on the risk of a pass from `h` to `j`: thrown best in
+    /// front of the body, to a man looking at the passer, to hands that are
+    /// ready; behind the body or at a man running away is worse.
+    pub(super) fn pass_stance(&self, h: usize, j: usize) -> f32 {
+        let o = self.play.o;
+        let (a, b) = (self.m[o][h].pos, self.m[o][j].pos);
+        let to = (b - a).norm();
+        let skill = ((self.oe(h, Attr::Passing) + self.oe(h, Attr::Iq)) / 2.0 - 8.0) / 12.0;
+        let (_, loose) = stance::pass_cost(self.st[o][h].body.dot(to), skill);
+        // He has to be looking at the passer for it to be a good one.
+        let back = (a - b).norm();
+        let looking = self.st[o][j].gaze.dot(back);
+        let unseen = ((0.3 - looking) / 1.3).clamp(0.0, 1.0) * (1.0 - 0.5 * skill.clamp(0.0, 1.0));
+        // A ball that arrives behind a running man is hard to catch.
+        let rst = &self.st[o][j];
+        let run = self.m[o][j].vel.len();
+        let behind = ((-rst.body.dot(back) - 0.2) / 1.2).clamp(0.0, 1.0) * (run / 4.0).min(1.0);
+        1.0 + loose + 0.35 * unseen + 0.5 * behind
+    }
+
+    /// Seconds a pass takes longer to leave his hand when it is thrown
+    /// away from where he faces.
+    pub(super) fn pass_stance_delay(&self, h: usize, j: usize) -> f32 {
+        let o = self.play.o;
+        let to = (self.m[o][j].pos - self.m[o][h].pos).norm();
+        let skill = ((self.oe(h, Attr::Passing) + self.oe(h, Attr::Iq)) / 2.0 - 8.0) / 12.0;
+        stance::pass_cost(self.st[o][h].body.dot(to), skill).0
     }
 }

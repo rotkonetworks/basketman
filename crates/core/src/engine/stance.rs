@@ -276,27 +276,16 @@ pub fn balance(
 // ---- shots, passes and contests ------------------------------------------
 
 /// The extra error of a shot from the angle between his shoulders and the
-/// line to the rim (`cos_rim`, 1 square), the way he moves (`fwd`, `side`
+/// line to the rim (`ang` radians, 0 square), the way he moves (`fwd`, `side`
 /// in m/s along and across the line to the rim, backward negative) and his
 /// balance. `skill` (0 to 1) is how much the matching skill and signature
 /// move take off. A multiplier of the launch error, 1 for a set shot.
-pub fn shot_multiplier(cos_rim: f32, fwd: f32, side: f32, balance: f32, skill: f32) -> f32 {
-    let ang = angle_from_cos(cos_rim);
+pub fn shot_multiplier(ang: f32, fwd: f32, side: f32, balance: f32, skill: f32, scale: f32) -> f32 {
     let turned = (ang - 0.2).max(0.0);
     let back = (-fwd).max(0.0);
-    let raw = 1.4 * turned * turned
-        + 0.14 * side.abs()
-        + 0.17 * back
-        + 1.2 * (1.0 - balance.clamp(0.0, 1.0)) * (1.0 - balance.clamp(0.0, 1.0));
-    1.0 + raw * (1.0 - 0.6 * skill.clamp(0.0, 1.0))
-}
-
-/// Angle for a cosine, without trigonometry: the shape is all that matters
-/// for the penalty, and it is exact to about a hundredth of a radian.
-pub fn angle_from_cos(c: f32) -> f32 {
-    let c = c.clamp(-1.0, 1.0);
-    // acos(c) = sqrt(1 - c) * (1.5707288 - 0.2121144 c + 0.0742610 c^2 - 0.0187293 c^3)
-    (1.0 - c).sqrt() * (1.570_728_8 + c * (-0.212_114_4 + c * (0.074_261 + c * -0.018_729_3)))
+    let off = 1.0 - balance.clamp(0.0, 1.0);
+    let raw = 1.4 * turned * turned + 0.14 * side.abs() + 0.08 * back + 1.2 * off * off;
+    1.0 + raw * scale * (1.0 - 0.6 * skill.clamp(0.0, 1.0))
 }
 
 /// Seconds a pass takes to be released, and how much its aim is off, for a

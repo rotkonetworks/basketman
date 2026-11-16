@@ -99,6 +99,7 @@ pub fn shots(rec: &Recording, ids: &[Vec<PlayerId>; 2]) -> Vec<Shot> {
             assist,
             blocked_by,
             fouled,
+            ..
         } = &e.kind
         else {
             continue;

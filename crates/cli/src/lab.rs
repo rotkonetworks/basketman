@@ -8,7 +8,7 @@ use basketman_core::court::ShotKind;
 use basketman_core::engine::{BoxLine, Lineup, simulate_recorded};
 use basketman_core::league::World;
 use basketman_core::player::{Attr, Player, Position};
-use basketman_core::replay::{EventKind, Source};
+use basketman_core::replay::{EventKind, ShotHow, Source};
 use basketman_core::rng::Rng;
 use basketman_core::tactics::{DefenseScheme, OffenseSet, Press, Role, Tactics};
 
@@ -701,6 +701,8 @@ struct Totals {
     foul_shots: [u32; 8],
     /// Tip-ins made and missed attempts counted by their own board.
     tip_ins: (u32, u32),
+    /// Attempts and makes by how the shooter's body was, per kind of shot.
+    hows: [[(u32, u32); 6]; 3],
 }
 
 /// `basketman lab stats [games]`: league-wide numbers over many games of
@@ -806,6 +808,7 @@ pub fn stats(games: usize) {
                     source,
                     made,
                     fouled,
+                    how,
                     ..
                 } => {
                     let ki = match kind {
@@ -813,6 +816,11 @@ pub fn stats(games: usize) {
                         ShotKind::Mid => 1,
                         ShotKind::Three => 2,
                     };
+                    if !(*fouled && !*made) {
+                        let h = &mut t.hows[ki][*how as usize];
+                        h.0 += 1;
+                        h.1 += *made as u32;
+                    }
                     t.foul_src[*source as usize].0 += 1;
                     t.foul_src[*source as usize].1 += *fouled as u32;
                     if *fouled {
@@ -971,6 +979,24 @@ pub fn stats(games: usize) {
         t.tov_kinds[3] as f32 / g,
         t.tov_kinds[4] as f32 / g
     );
+    println!("make % by how the body was (attempts, rim / mid / three / all):");
+    for (i, how) in ShotHow::ALL.iter().enumerate() {
+        let (mut a, mut m) = (0, 0);
+        let mut line = String::new();
+        for ki in 0..3 {
+            let (n, k) = t.hows[ki][i];
+            a += n;
+            m += k;
+            line += &format!(" {:>5.1}% of {:>6} |", 100.0 * k as f32 / n.max(1) as f32, n);
+        }
+        println!(
+            "  {:<16}{}  all {:.1}% of {}",
+            how.label(),
+            line,
+            100.0 * m as f32 / a.max(1) as f32,
+            a
+        );
+    }
     let stotal: u32 = t.sources.iter().map(|s| s.0).sum();
     print!("sources (share, pts/shot):");
     for (s, c) in Source::ALL.iter().zip(t.sources) {
@@ -2480,5 +2506,67 @@ pub fn exploit(games: usize) {
         }
         println!();
         println!("   turnovers by kind (bad pass, stripped, off foul, clock, press, 3s): {:?}", c.tov_kinds);
+    }
+}
+
+/// `basketman lab stance [games]`: what the stance model costs and buys, on
+/// otherwise identical squads over several worlds. Defenders with quick
+/// feet against slow ones, and drivers with quick feet against slow ones;
+/// the make rate by how the body was comes from `lab stats`.
+pub fn stance(games: usize) {
+    use basketman_core::league::lineup;
+    let worlds = [61u64, 62, 63, 64];
+    // (points per 100 possessions conceded by the altered side, attempts at the rim by the other,
+    // rim make, blocks) over all worlds.
+    let run = |change: &dyn Fn(&mut Player)| {
+        let (mut pts, mut poss, mut fouls, mut rim, mut rim_made) = (0.0f32, 0.0f32, 0.0f32, 0u32, 0u32);
+        for &seed in &worlds {
+            let w = World::generate(seed, 12);
+            for g in 0..games {
+                let a = g % 12;
+                let b = (g * 5 + 1 + g / 12) % 12;
+                if a == b {
+                    continue;
+                }
+                let mut players = w.players.clone();
+                for &p in &w.teams[a].roster {
+                    change(&mut players[p as usize]);
+                    for at in Attr::ALL {
+                        players[p as usize].attrs[at] = players[p as usize].attrs[at].clamp(1.0, 20.0);
+                    }
+                }
+                let hl = lineup(&w.teams[a], &players);
+                let al = lineup(&w.teams[b], &w.players);
+                let (r, rec) = simulate_recorded(&hl, &al, &w.rules, &mut Rng::new(seed * 1000 + g as u64));
+                pts += r.score[1] as f32;
+                poss += r.possessions[1] as f32;
+                for e in &rec.events {
+                    if let EventKind::Shot { kind, made, fouled, who, .. } = &e.kind {
+                        let theirs = r.boxes[1].iter().any(|(id, _)| id == who);
+                        if theirs && *kind == ShotKind::Rim && !(*fouled && !*made) {
+                            rim += 1;
+                            rim_made += *made as u32;
+                        }
+                    }
+                    if let EventKind::Foul { .. } = &e.kind {
+                        fouls += 1.0;
+                    }
+                }
+            }
+        }
+        (100.0 * pts / poss, 100.0 * rim_made as f32 / rim.max(1) as f32, fouls)
+    };
+    println!("defenders' Footwork and Speed, the other side's points per 100 possessions / rim make % / fouls");
+    for (label, delta) in [("slow feet (-5)", -5.0f32), ("as they are", 0.0), ("quick feet (+5)", 5.0)] {
+        let (ppp, rim, fouls) = run(&|p: &mut Player| {
+            p.attrs[Attr::Footwork] += delta;
+            p.attrs[Attr::Speed] += delta;
+        });
+        println!("  {label:<18} {ppp:>7.2}  rim {rim:>5.1}%  fouls {fouls:>6.0}");
+    }
+    println!("Footwork only:");
+    for (label, delta) in [("slow feet (-5)", -5.0f32), ("quick feet (+5)", 5.0)] {
+        let (ppp, rim, fouls) = run(&|p: &mut Player| p.attrs[Attr::Footwork] += delta);
+        println!("  {label:<18} {ppp:>7.2}  rim {rim:>5.1}%  fouls {fouls:>6.0}");
     }
 }

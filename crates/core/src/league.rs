@@ -1795,22 +1795,28 @@ mod tests {
 
     #[test]
     fn unfamiliar_tactic_hurts() {
-        let w = World::generate(5, 2);
+        // Over several worlds: one world's 400 games are too few to hold a
+        // threshold of a tenth of a percent of luck.
         let wins = |familiarity: f32| {
-            let mut home = lineup(&w.teams[0], &w.players);
-            home.familiarity = familiarity;
-            let away = lineup(&w.teams[1], &w.players);
-            (0..400)
-                .filter(|&seed| {
-                    let r = simulate_game(&home, &away, &w.rules, &mut Rng::new(seed));
-                    r.score[0] > r.score[1]
-                })
-                .count()
+            let mut n = 0;
+            for world in [5u64, 6, 7] {
+                let w = World::generate(world, 2);
+                let mut home = lineup(&w.teams[0], &w.players);
+                home.familiarity = familiarity;
+                let away = lineup(&w.teams[1], &w.players);
+                n += (0..400)
+                    .filter(|&seed| {
+                        let r = simulate_game(&home, &away, &w.rules, &mut Rng::new(seed));
+                        r.score[0] > r.score[1]
+                    })
+                    .count();
+            }
+            n
         };
         let (fluent, raw) = (wins(1.0), wins(0.0));
         assert!(
-            fluent > raw + 40,
-            "fluent {fluent} vs untrained {raw} wins of 400"
+            fluent > raw + 120,
+            "fluent {fluent} vs untrained {raw} wins of 1200"
         );
     }
 

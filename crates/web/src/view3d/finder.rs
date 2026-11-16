@@ -3,7 +3,7 @@
 //! throw. Returns the replay time the moment starts at.
 
 use basketman_core::court::ShotKind;
-use basketman_core::replay::{Action, EventKind, Recording, ShotStage, Style};
+use basketman_core::replay::{Action, Dribble, EventKind, Footwork, Recording, ShotStage, Style};
 
 /// Times of every moment of kind `what`, in order.
 pub(crate) fn moments(rec: &Recording, what: &str) -> Vec<f32> {
@@ -50,7 +50,69 @@ pub(crate) fn moments(rec: &Recording, what: &str) -> Vec<f32> {
         }
         out
     };
+    // The start of every run of `min` frames in which somebody does `pred`.
+    let streak = |pred: &dyn Fn(&basketman_core::replay::Frame, usize, usize) -> bool,
+                  min: usize|
+     -> Vec<f32> {
+        let mut out = Vec::new();
+        let mut run = [[0usize; 5]; 2];
+        for f in &rec.frames {
+            for s in 0..2 {
+                for k in 0..5 {
+                    if pred(f, s, k) {
+                        run[s][k] += 1;
+                        if run[s][k] == min {
+                            out.push(f.time - 0.1 * min as f32);
+                        }
+                    } else {
+                        run[s][k] = 0;
+                    }
+                }
+            }
+        }
+        out
+    };
     match what {
+        // A defender sliding with the ball handler, who is dribbling.
+        "slide" => streak(
+            &|f, s, k| {
+                let Some((hs, hk)) = f.holder else { return false };
+                s != hs as usize
+                    && f.pose[s][k].foot == Footwork::Slide
+                    && f.pose[s][k].speed() > 1.5
+                    && f.pose[hs as usize][hk as usize].dribble == Dribble::Live
+                    && f.pos[s][k].dist(f.pos[hs as usize][hk as usize]) < 2.5
+            },
+            8,
+        ),
+        "closeout" => streak(&|f, s, k| f.pose[s][k].foot == Footwork::Closeout, 5),
+        "backpedal" => streak(
+            &|f, s, k| f.pose[s][k].foot == Footwork::Backpedal && f.pose[s][k].speed() > 2.0,
+            6,
+        ),
+        "post" => streak(&|f, s, k| f.pose[s][k].action == Action::PostingUp, 12),
+        "pivot" => streak(&|f, s, k| f.pose[s][k].foot == Footwork::Pivot, 4),
+        // A catch and a shot with no dribble in between.
+        "catchshoot" => {
+            let mut out = Vec::new();
+            for (i, f) in rec.frames.iter().enumerate().skip(1) {
+                let o = f.offense as usize;
+                for k in 0..5 {
+                    let (p, q) = (&rec.frames[i - 1].pose[o][k], &f.pose[o][k]);
+                    if q.action == Action::Shooting
+                        && q.stage == ShotStage::Release
+                        && p.stage != ShotStage::Release
+                        && q.style == Style::Jumper
+                        && i >= 12
+                        && rec.frames[i - 12..i].iter().all(|g| g.pose[o][k].dribble != Dribble::Live)
+                        && rec.frames[i - 12..i].iter().any(|g| g.holder.is_none())
+                    {
+                        out.push(f.time - 1.0);
+                    }
+                }
+            }
+            out
+        }
         "made3" => shots(&|m, k, _| m && k == ShotKind::Three),
         "made_jumper" => shots(&|m, k, _| m && k != ShotKind::Rim),
         "miss_jumper" => shots(&|m, k, b| !m && k != ShotKind::Rim && !b),
@@ -103,7 +165,9 @@ pub(crate) fn viewpoint(
         for side in 0..2 {
             for k in 0..5 {
                 let a = g.pose[side][k].action;
-                if matches!(a, Action::Shooting | Action::Rebounding | Action::Blocking)
+                let legs = g.pose[side][k].foot;
+                if (matches!(a, Action::Shooting | Action::Rebounding | Action::Blocking | Action::PostingUp)
+                    || matches!(legs, Footwork::Slide | Footwork::Closeout | Footwork::Backpedal | Footwork::Pivot))
                     && who.is_none()
                 {
                     who = Some(g.pos[side][k]);
@@ -123,6 +187,11 @@ pub(crate) fn viewpoint(
         "hoop" => (
             v3(hoop.0 - ux * 5.5, hoop.1 - 4.5, 3.6),
             v3(hoop.0, hoop.1, 3.0),
+        ),
+        // Further out and square to the line to the basket: sliding, closeouts, backpedals.
+        "side" => (
+            v3(bx - uy * 8.0, by + ux * 8.0, 2.8),
+            v3(bx, by, 1.0),
         ),
         "close" => (
             v3(bx - uy * 4.5 - ux * 1.0, by + ux * 4.5 - uy * 1.0, 2.4),
