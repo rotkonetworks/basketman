@@ -236,6 +236,12 @@ pub enum EventKind {
         side: u8,
         shout: Shout,
     },
+    /// The bench of `side` challenged a call, and the film decided.
+    Review {
+        side: u8,
+        overturned: bool,
+        what: crate::officials::What,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -288,7 +294,7 @@ impl Event {
             Switch { onto, .. } => Some(*onto),
             Help { helper, .. } => Some(*helper),
             Substitution { on, .. } => Some(*on),
-            PeriodStart | PeriodEnd | Timeout { .. } | Shout { .. } | Adjust { .. } => None,
+            PeriodStart | PeriodEnd | Timeout { .. } | Shout { .. } | Adjust { .. } | Review { .. } => None,
         }
     }
 
@@ -463,6 +469,23 @@ impl Event {
                     format!("{} by {} on {}.", what, name(*who), name(*on))
                 }
             }
+            Review {
+                side,
+                overturned,
+                what,
+            } => {
+                let bench = if *side == 0 { "home" } else { "away" };
+                let call = match what {
+                    crate::officials::What::Foul => "the foul",
+                    crate::officials::What::OutOfBounds => "the ball",
+                    crate::officials::What::Count => "the count",
+                };
+                if *overturned {
+                    format!("The {bench} bench challenges {call}: overturned.")
+                } else {
+                    format!("The {bench} bench challenges {call}: the call stands.")
+                }
+            }
             FreeThrows { who, made, of } => {
                 format!("{} makes {} of {} at the line.", name(*who), made, of)
             }
@@ -630,6 +653,9 @@ pub enum Style {
     Hook,
     /// Leaning away from a hand in his face.
     Fadeaway,
+    /// A short shot in the lane thrown high over a protected rim: off one foot
+    /// or two, soft, from where a layup would be blocked.
+    Floater,
 }
 
 /// How far a shot has got for the man taking it.
@@ -847,6 +873,24 @@ pub struct Frame {
     /// The ball is going down through the net in this frame.
     #[serde(default)]
     pub swish: bool,
+    /// Where the three officials stand, full-court coordinates.
+    #[serde(default)]
+    pub officials: [Vec2; 3],
+    /// The official (1-3, in the crew's order) with his arm up, or 0.
+    #[serde(default)]
+    pub whistler: u8,
+}
+
+/// One pass: when, which side, who threw it and who it was meant for (court
+/// slots), where it left the thrower's hands, and whether it was a throw-in.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PassRec {
+    pub time: f32,
+    pub side: u8,
+    pub from: u8,
+    pub to: u8,
+    pub at: Vec2,
+    pub inbound: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -904,6 +948,14 @@ pub struct Recording {
     pub ball_arcs: Vec<BallArc>,
     #[serde(default)]
     pub leaned_ticks: [Vec<u32>; 2],
+    /// Every pass thrown, in court coordinates. A diagnostic and a check:
+    /// nobody passes to himself, and a throw-in starts out of bounds.
+    #[serde(default)]
+    pub passes: Vec<PassRec>,
+    /// Every whistle and every foul that should have been one, with what
+    /// really happened; see `officials.rs`. Review results are filled in.
+    #[serde(default)]
+    pub calls: Vec<crate::officials::CallRecord>,
 }
 
 /// One stretch of the ball's flight, in full-court coordinates.

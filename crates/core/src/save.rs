@@ -91,6 +91,8 @@ pub fn decode(bytes: &[u8]) -> Result<World, SaveError> {
     // Saves from before the calendar get their game days.
     world.ensure_calendar();
     world.ensure_clubs();
+    // Saves from before referees get a pool.
+    world.ensure_officials();
     Ok(world)
 }
 

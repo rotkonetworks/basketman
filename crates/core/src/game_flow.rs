@@ -583,11 +583,21 @@ mod tests {
         };
         let m = read.matchups();
         assert_eq!(m.len(), 5);
-        assert!(m.iter().filter(|m| m.guards.is_some()).count() >= 3);
         for x in &m {
             assert!(ids[0].contains(&x.mine));
             assert!(x.guards.is_none_or(|g| ids[1].contains(&g)));
         }
+        // Whose man is whose is read from the last forty seconds, so a unit
+        // that has only just come on (the start of a period) has no one yet:
+        // look at several moments in the middle of the game, most must do.
+        let known = [0.5f32, 0.55, 0.6, 0.65, 0.7]
+            .iter()
+            .filter(|&&at| {
+                let r = Read { time: rec.duration() * at, ..read };
+                r.matchups().iter().filter(|m| m.guards.is_some()).count() >= 3
+            })
+            .count();
+        assert!(known >= 4, "matchups known at {known} of 5 moments");
         let forms = read.forms();
         assert_eq!(forms.len(), ids[0].len() + ids[1].len());
     }

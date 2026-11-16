@@ -221,8 +221,41 @@ pub(crate) fn emit_figure(s: &mut Scene, f: &FigureSpec) -> Option<Vec3> {
         };
     }
     let fr = Frame { pos: at, face };
-    figure_segments(s, &fr, &pose, &d, &looks, f.team);
+    figure_segments(s, &fr, &pose, &d, &looks, f.team, None);
     pose.ball.take().map(|b| fr.world(b))
+}
+
+/// A referee: the player figure with an average build, in a light grey shirt and
+/// black shorts, no number. With `whistle` his right arm is raised.
+pub(crate) fn emit_official(s: &mut Scene, id: u8, pos: Vec2, gait: Gait, whistle: bool) {
+    let body = Body {
+        height_cm: 182.0,
+        weight_kg: 82.0,
+        wingspan_cm: 186.0,
+        standing_reach_cm: 238.0,
+        shoulder_width_cm: 45.0,
+        hand_length_cm: 19.0,
+        hand: basketman_core::player::Hand::Right,
+    };
+    let d = Dims::new(&body, &Stats::AVERAGE);
+    let face = if gait.face.len() > 0.1 {
+        gait.face.norm()
+    } else {
+        Vec2 { x: 1.0, y: 0.0 }
+    };
+    let mut pose = gait::pose(&d, &gait, false);
+    if whistle {
+        let sd = 1;
+        let shoulder = pose.j[gait::SHOULDER + sd];
+        let up = shoulder + v3(0.04, -0.05, (d.upper_arm + d.forearm) * 0.98);
+        let (elbow, wrist) = gait::ik2(shoulder, up, d.upper_arm, d.forearm, v3(-0.2, -0.8, 0.0));
+        pose.j[gait::ELBOW + sd] = elbow;
+        pose.j[gait::WRIST + sd] = wrist;
+        pose.j[gait::FINGERS + sd] = wrist + (wrist - elbow).norm() * d.hand;
+    }
+    let looks = Looks::of(9000 + id as PlayerId);
+    let fr = Frame { pos, face };
+    figure_segments(s, &fr, &pose, &d, &looks, Color32::from_rgb(176, 178, 184), Some(Color32::from_rgb(24, 24, 28)));
 }
 
 /// A court point in the frame of a player at `pos` facing `face`.
@@ -231,14 +264,22 @@ pub(crate) fn to_body(pos: Vec2, face: Vec2, p: Vec3) -> Vec3 {
     v3(dx * face.x + dy * face.y, -dx * face.y + dy * face.x, p.z)
 }
 
-fn figure_segments(s: &mut Scene, fr: &Frame, body: &Pose, d: &Dims, looks: &Looks, team: Color32) {
+fn figure_segments(
+    s: &mut Scene,
+    fr: &Frame,
+    body: &Pose,
+    d: &Dims,
+    looks: &Looks,
+    team: Color32,
+    shorts: Option<Color32>,
+) {
     use gait::*;
     let h = d.height;
     let (sw, tm, hl) = (d.shoulder_width, d.build, d.hand);
     let ta = tm.sqrt();
     let bw = 0.92 + 0.12 * (tm - 1.0);
     let hv = 0.034 * h;
-    let shorts = darker(team, 0.68);
+    let shorts = shorts.unwrap_or_else(|| darker(team, 0.68));
     let skin = looks.skin;
     let across = v3(0.0, 1.0, 0.0);
     let (sy, cy) = body.yaw.sin_cos();
@@ -506,6 +547,21 @@ mod tests {
         let each = start.elapsed().as_secs_f64() * 1000.0 / n as f64;
         println!("ten figures: {each:.3} ms, {last} triangles kept");
         assert!(each < 5.0, "{each} ms");
+    }
+
+    #[test]
+    fn a_referee_with_the_whistle_has_an_arm_over_his_head() {
+        let top = |whistle: bool| {
+            let mut s = Scene::new(v3(10.0, 5.0, 100.0));
+            let gait = Gait::standing(Vec2 { x: 0.0, y: 1.0 });
+            emit_official(&mut s, 0, Vec2 { x: 10.0, y: 5.0 }, gait, whistle);
+            extent(&s)
+        };
+        let (low, down, _) = top(false);
+        let (_, up, _) = top(true);
+        assert!(low >= -0.02, "{low}");
+        assert!(down < 1.9, "{down}");
+        assert!(up > down + 0.15, "{up} vs {down}");
     }
 
     #[test]

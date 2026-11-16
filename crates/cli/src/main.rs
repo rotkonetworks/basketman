@@ -10,8 +10,10 @@ mod balance;
 mod export;
 mod feeds;
 mod lab;
+mod lab_officials;
 mod mcp;
 mod play;
+mod realism;
 
 use basketman_core::engine::{BoxLine, GameResult};
 use basketman_core::league::World;
@@ -82,6 +84,10 @@ fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("play") => return play::run(),
         Some("mcp") => return mcp::run(),
+        Some("realism") => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            return realism::run(&rest);
+        }
         Some("balance") => {
             let rest: Vec<String> = std::env::args().skip(2).collect();
             return balance::run(&rest);
@@ -106,7 +112,13 @@ fn main() {
             Some("roles") => lab::roles(games.unwrap_or(60)),
             Some("shots") => lab::shots(games.unwrap_or(60)),
             Some("stats") => lab::stats(games.unwrap_or(400)),
+            Some("finish") => lab::finish(games.unwrap_or(300)),
             Some("stance") => lab::stance(games.unwrap_or(120)),
+            Some("transition") if std::env::args().nth(3).as_deref() == Some("watch") => {
+                let arg = |i: usize| std::env::args().nth(i).and_then(|s| s.parse::<usize>().ok());
+                lab::transition_watch(arg(4).unwrap_or(0), arg(5).unwrap_or(0), 8.0)
+            }
+            Some("transition") => lab::transition(games.unwrap_or(300)),
             Some("league") => lab::league(games.unwrap_or(300)),
             Some("launch") => lab::launch(),
             Some("exploit") => lab::exploit(games.unwrap_or(200)),
@@ -124,6 +136,12 @@ fn main() {
                 lab::frames(games.unwrap_or(0), a, b)
             }
             Some("fouls") => lab::fouls(games.unwrap_or(200)),
+            Some("officials") => lab_officials::run(games.unwrap_or(600)),
+            Some("survival") => {
+                let first = std::env::args().nth(4).and_then(|s| s.parse().ok()).unwrap_or(100);
+                let with = std::env::args().nth(5).as_deref() != Some("without");
+                lab_officials::survival(games.unwrap_or(96), first, with)
+            }
             Some("physics") => {
                 lab::physics(games.unwrap_or(300));
                 lab::physics_post(games.unwrap_or(300));

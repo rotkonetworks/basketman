@@ -673,6 +673,7 @@ struct Totals {
     by_kind: [[u32; 3]; 9],
     margins: Vec<u32>,
     pair_frames: u64,
+    deep_out: u64,
     overlaps: u64,
     deep: u64,
     worst: f32,
@@ -934,6 +935,10 @@ pub fn stats(games: usize) {
                     }
                     if pen > 0.02 {
                         t.deep += 1;
+                        let outb = |p: basketman_core::court::Vec2| p.x < 0.0 || p.x > 28.0 || p.y < 0.0 || p.y > 15.0;
+                        if outb(all[i].0) || outb(all[j].0) {
+                            t.deep_out += 1;
+                        }
                     }
                     t.worst = t.worst.max(pen);
                 }
@@ -1024,11 +1029,12 @@ pub fn stats(games: usize) {
     let at = |q: f32| t.margins[((t.margins.len() - 1) as f32 * q) as usize];
     println!("winning margin median {} p90 {}", at(0.5), at(0.9));
     println!(
-        "overlap: {} of {} pair-frames ({:.4}%), deeper than 2 cm {}, worst {:.3} m, in {} frames",
+        "overlap: {} of {} pair-frames ({:.4}%), deeper than 2 cm {} ({} with a man out of bounds), worst {:.3} m, in {} frames",
         t.overlaps,
         t.pair_frames,
         100.0 * t.overlaps as f64 / t.pair_frames.max(1) as f64,
         t.deep,
+        t.deep_out,
         t.worst,
         t.frames
     );
@@ -2269,7 +2275,7 @@ pub fn diag(games: usize) {
     let mut away = [0u32; 3];
     let mut total_mates = 0;
     let mut frames_total = 0;
-    let mut styles = [0u32; 5];
+    let mut styles = [0u32; 6];
     let mut layup_dist = Vec::new();
     let mut hang = Vec::new();
     for g in 0..games {
@@ -2300,6 +2306,7 @@ pub fn diag(games: usize) {
                 Style::Dunk => 2,
                 Style::Hook => 3,
                 Style::Fadeaway => 4,
+                Style::Floater => 5,
             }] += 1;
             let prev = &rec.frames[i.saturating_sub(1)];
             if f.pose[o][k].style == Style::Jumper || f.pose[o][k].style == Style::Hook {
@@ -2338,7 +2345,7 @@ pub fn diag(games: usize) {
     }
     let avg = |v: &[f32]| v.iter().sum::<f32>() / v.len().max(1) as f32;
     println!(
-        "games {games}: {frames_total} frames, shots seen {shots}; jumper/layup/dunk/hook/fade {styles:?}"
+        "games {games}: {frames_total} frames, shots seen {shots}; jumper/layup/dunk/hook/fade/floater {styles:?}"
     );
     println!(
         "jump shooter speed at release: mean {:.2} m/s, above 2 m/s: {:.0}%",
@@ -2568,5 +2575,705 @@ pub fn stance(games: usize) {
     for (label, delta) in [("slow feet (-5)", -5.0f32), ("quick feet (+5)", 5.0)] {
         let (ppp, rim, fouls) = run(&|p: &mut Player| p.attrs[Attr::Footwork] += delta);
         println!("  {label:<18} {ppp:>7.2}  rim {rim:>5.1}%  fouls {fouls:>6.0}");
+    }
+}
+
+// ---- lab transition ------------------------------------------------------
+
+/// How a possession began, as read from the recording.
+const STARTS: [&str; 9] = [
+    "steal: pass picked off",
+    "steal: ball stripped",
+    "steal: pressed",
+    "block recovered",
+    "def rebound short",
+    "def rebound long",
+    "made basket",
+    "dead ball (foul, out, ...)",
+    "period start",
+];
+
+#[derive(Default, Clone)]
+pub struct TransRow {
+    n: u32,
+    /// Possession had a shot tagged Transition (or a fast-break event).
+    tagged: u32,
+    /// First shot of the possession came within eight seconds of the start.
+    quick: u32,
+    /// Quick shot at the rim.
+    quick_rim: u32,
+    crossed: u32,
+    t_cross: f64,
+    att_ahead: f64,
+    def_back: f64,
+    shots: u32,
+    t_shot: f64,
+    kinds: [u32; 3],
+    made: u32,
+    pts: u32,
+    tov: u32,
+    fouls: u32,
+    secs: f64,
+    /// The same, for possessions tagged transition only.
+    tag_pts: u32,
+    tag_shots: u32,
+    tag_made: u32,
+    tag_fouled: u32,
+    tag_kinds: [u32; 3],
+    tag_tov: u32,
+    /// Seconds from the start to the first shot of tagged possessions.
+    tag_t_shot: f64,
+    /// Tagged chance with the stealer's team ahead at the crossing.
+    tag_att: f64,
+    tag_def: f64,
+    tag_crossed: u32,
+    /// Turnovers of tagged possessions that were offensive fouls.
+    tag_off_foul: u32,
+    /// Tagged possessions by why: a fast break was called, a shot came off
+    /// the early offense, or it was only a live ball that was over in eight
+    /// seconds; and the points of each.
+    why: [(u32, u32); 3],
+    /// Contest summed over tagged shots, blocked shots, dunks are not known.
+    tag_contest: f64,
+    tag_blocked: u32,
+}
+
+impl TransRow {
+    fn add(&mut self, o: &TransRow) {
+        self.n += o.n;
+        self.tagged += o.tagged;
+        self.quick += o.quick;
+        self.quick_rim += o.quick_rim;
+        self.crossed += o.crossed;
+        self.t_cross += o.t_cross;
+        self.att_ahead += o.att_ahead;
+        self.def_back += o.def_back;
+        self.shots += o.shots;
+        self.t_shot += o.t_shot;
+        for i in 0..3 {
+            self.kinds[i] += o.kinds[i];
+            self.tag_kinds[i] += o.tag_kinds[i];
+        }
+        self.made += o.made;
+        self.pts += o.pts;
+        self.tov += o.tov;
+        self.fouls += o.fouls;
+        self.secs += o.secs;
+        self.tag_pts += o.tag_pts;
+        self.tag_shots += o.tag_shots;
+        self.tag_made += o.tag_made;
+        self.tag_fouled += o.tag_fouled;
+        self.tag_tov += o.tag_tov;
+        self.tag_t_shot += o.tag_t_shot;
+        self.tag_att += o.tag_att;
+        self.tag_def += o.tag_def;
+        self.tag_crossed += o.tag_crossed;
+        self.tag_off_foul += o.tag_off_foul;
+        self.tag_contest += o.tag_contest;
+        self.tag_blocked += o.tag_blocked;
+        for i in 0..3 {
+            self.why[i].0 += o.why[i].0;
+            self.why[i].1 += o.why[i].1;
+        }
+    }
+}
+
+/// What a recorded game says about how each possession began and what became of it.
+pub fn transition_rows(rec: &basketman_core::replay::Recording) -> [TransRow; 9] {
+    use basketman_core::court::LENGTH;
+    use basketman_core::replay::{FoulKind, TurnoverKind};
+    let mut rows: [TransRow; 9] = Default::default();
+    let frames = &rec.frames;
+    if frames.is_empty() {
+        return rows;
+    }
+    // Possessions: runs of frames with the same side on offense.
+    let mut bounds = vec![0usize];
+    for i in 1..frames.len() {
+        if frames[i].offense != frames[i - 1].offense {
+            bounds.push(i);
+        }
+    }
+    bounds.push(frames.len());
+    let attack_y = |o: u8, p: basketman_core::court::Vec2| if o == 0 { LENGTH - p.x } else { p.x };
+    let mut ev = 0usize;
+    for w in bounds.windows(2) {
+        let (i0, i1) = (w[0], w[1]);
+        let f0 = &frames[i0];
+        let o = f0.offense;
+        let t0 = f0.time;
+        let t1 = frames.get(i1).map_or(frames[i1 - 1].time, |f| f.time);
+        // Events before this possession's first frame decide how it began.
+        while ev < rec.events.len() && rec.events[ev].time <= t0 {
+            ev += 1;
+        }
+        let before = &rec.events[..ev];
+        let mut start = if i0 == 0 { 8 } else { 7 };
+        for (j, e) in before.iter().enumerate().rev() {
+            match &e.kind {
+                EventKind::Turnover {
+                    stolen_by: Some(_),
+                    kind,
+                    ..
+                } => {
+                    start = match kind {
+                        TurnoverKind::BadPass => 0,
+                        TurnoverKind::Pressed => 2,
+                        _ => 1,
+                    };
+                    break;
+                }
+                EventKind::Turnover { .. } | EventKind::Foul { .. } | EventKind::FreeThrows { .. } => break,
+                EventKind::Rebound {
+                    offensive: false, ..
+                } => {
+                    let blocked = before[..j]
+                        .iter()
+                        .rev()
+                        .take(3)
+                        .find_map(|e| match &e.kind {
+                            EventKind::Shot { blocked_by, .. } => Some(blocked_by.is_some()),
+                            _ => None,
+                        })
+                        .unwrap_or(false);
+                    let hoop = attack_y(f0.offense ^ 1, f0.ball);
+                    // Distance of the rebound from the basket it came off.
+                    let _ = hoop;
+                    let d = {
+                        let h = basketman_core::replay::to_court(basketman_core::court::HOOP, (f0.offense ^ 1) as usize);
+                        f0.ball.dist(h)
+                    };
+                    start = if blocked {
+                        3
+                    } else if d < 4.5 {
+                        4
+                    } else {
+                        5
+                    };
+                    break;
+                }
+                EventKind::Shot { made: true, .. } => {
+                    start = 6;
+                    break;
+                }
+                EventKind::Shot { .. } => break,
+                _ => {}
+            }
+        }
+        let r = &mut rows[start];
+        r.n += 1;
+        r.secs += (t1 - t0) as f64;
+        // Score change over the possession.
+        let s0 = f0.score[o as usize];
+        let s1 = frames.get(i1).map_or(frames[i1 - 1].score[o as usize], |f| f.score[o as usize]);
+        let pts = s1.saturating_sub(s0) as u32;
+        r.pts += pts;
+        // Crossing half court.
+        let mut crossed_at = None;
+        for f in &frames[i0..i1] {
+            if attack_y(o, f.ball) <= 14.0 {
+                let by = attack_y(o, f.ball);
+                let att = (0..5)
+                    .filter(|&k| attack_y(o, f.pos[o as usize][k]) < by)
+                    .count();
+                let def = (0..5)
+                    .filter(|&k| attack_y(o, f.pos[1 - o as usize][k]) < by)
+                    .count();
+                crossed_at = Some((f.time - t0, att, def));
+                break;
+            }
+        }
+        if let Some((t, a, d)) = crossed_at {
+            r.crossed += 1;
+            r.t_cross += t as f64;
+            r.att_ahead += a as f64;
+            r.def_back += d as f64;
+        }
+        // The events of the possession.
+        let mut first_shot = true;
+        let mut tagged = false;
+        let mut my_shots = 0u32;
+        let mut tag_made = 0;
+        let mut tag_fouled = 0;
+        let mut tag_kinds = [0u32; 3];
+        let mut tag_first: Option<f32> = None;
+        let mut tag_contest = 0.0f64;
+        let mut tag_blocked = 0u32;
+        let mut tov = 0;
+        let mut off_fouls = 0u32;
+        for e in rec
+            .events
+            .iter()
+            .filter(|e| e.offense == o && e.time >= t0 - 0.001 && e.time <= t1 + 0.05)
+        {
+            match &e.kind {
+                EventKind::FastBreak { .. } => tagged = true,
+                EventKind::Shot {
+                    kind,
+                    source,
+                    made,
+                    fouled,
+                    contest,
+                    blocked_by,
+                    ..
+                } => {
+                    let ki = match kind {
+                        ShotKind::Rim => 0,
+                        ShotKind::Mid => 1,
+                        ShotKind::Three => 2,
+                    };
+                    r.shots += 1;
+                    my_shots += 1;
+                    r.kinds[ki] += 1;
+                    if *made {
+                        r.made += 1;
+                    }
+                    if first_shot {
+                        first_shot = false;
+                        r.t_shot += (e.time - t0) as f64;
+                        if e.time - t0 <= 8.0 {
+                            r.quick += 1;
+                        }
+                        if e.time - t0 <= 6.0 && ki == 0 {
+                            r.quick_rim += 1;
+                        }
+                    }
+                    if *source == Source::Transition {
+                        tagged = true;
+                        tag_contest += *contest as f64;
+                        tag_blocked += blocked_by.is_some() as u32;
+                        tag_kinds[ki] += 1;
+                        if *made {
+                            tag_made += 1;
+                        }
+                        if *fouled {
+                            tag_fouled += 1;
+                        }
+                        tag_first.get_or_insert(e.time - t0);
+                    }
+                }
+                EventKind::Turnover { kind, .. } => {
+                    tov += 1;
+                    if *kind == TurnoverKind::OffensiveFoul {
+                        off_fouls += 1;
+                    }
+                }
+                EventKind::Foul { kind, .. } => {
+                    if !matches!(
+                        kind,
+                        FoulKind::Charging | FoulKind::IllegalScreen | FoulKind::PostPushOff
+                    ) {
+                        r.fouls += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let _ = my_shots;
+        r.tov += tov;
+        // A live ball that is over within eight seconds, shot or no shot, is a
+        // transition possession: turnovers and fouls on the break count.
+        let called = rec.events.iter().any(|e| {
+            e.offense == o
+                && e.time >= t0 - 0.001
+                && e.time <= t1 + 0.05
+                && matches!(e.kind, EventKind::FastBreak { .. })
+        });
+        let shot_tag = tag_kinds.iter().sum::<u32>() > 0;
+        let quick_end = start <= 5 && (t1 - t0) <= 8.0;
+        if quick_end {
+            tagged = true;
+        }
+        if tagged {
+            let w = if called {
+                0
+            } else if shot_tag {
+                1
+            } else {
+                2
+            };
+            r.why[w].0 += 1;
+            r.why[w].1 += pts;
+            r.tagged += 1;
+            r.tag_pts += pts;
+            r.tag_tov += tov;
+            r.tag_off_foul += off_fouls;
+            r.tag_contest += tag_contest;
+            r.tag_blocked += tag_blocked;
+            r.tag_shots += tag_kinds.iter().sum::<u32>();
+            r.tag_made += tag_made;
+            r.tag_fouled += tag_fouled;
+            for i in 0..3 {
+                r.tag_kinds[i] += tag_kinds[i];
+            }
+            r.tag_t_shot += tag_first.unwrap_or(0.0) as f64;
+            if let Some((_, a, d)) = crossed_at {
+                r.tag_att += a as f64;
+                r.tag_def += d as f64;
+                r.tag_crossed += 1;
+            }
+        }
+    }
+    rows
+}
+
+fn print_trans(rows: &[TransRow; 9], games: u32) {
+    let pc = |a: f64, b: f64| if b > 0.0 { 100.0 * a / b } else { 0.0 };
+    let avg = |a: f64, b: f64| if b > 0.0 { a / b } else { 0.0 };
+    let total: u32 = rows.iter().map(|r| r.n).sum();
+    println!(
+        "{:<27} {:>6} {:>5} | {:>6} {:>6} {:>6} | {:>5} {:>5} {:>5} | {:>6} {:>6} | {:>5} {:>5} {:>5} {:>5} | {:>4} {:>4}",
+        "how it began", "poss", "/gm", "chance", "quick8", "rim<=6s", "tCross", "att>", "def<", "tShot", "shots", "rim%", "FG%", "PPP", "TOV%", "PF/c", "secs"
+    );
+    let mut all = TransRow::default();
+    for (i, r) in rows.iter().enumerate() {
+        all.add(r);
+        print_row(STARTS[i], r, games);
+    }
+    print_row("ALL", &all, games);
+    println!("  chance = a live-ball possession (steal, block, defensive rebound) over within 8 s whatever the outcome, or one with a fast-break event or a shot tagged Transition; quick = first shot within 8 s;");
+    println!("  att> / def< = attackers ahead of the ball / defenders goal side of it when the ball crosses half court.");
+    println!(
+        "  transition share of possessions {:.1}%  (of {} possessions)",
+        pc(all.tagged as f64, total as f64),
+        total
+    );
+    println!("transition chances (tagged) only:");
+    println!(
+        "{:<27} {:>6} {:>7} {:>7} {:>11} {:>6} {:>5} {:>5} {:>5} {:>7} {:>7} {:>6}",
+        "how it began", "chances", "share%", "PPP", "rim/mid/3 %", "FG%", "att>", "def<", "tShot", "TOV/100", "offfoul", "sh/ch"
+    );
+    let mut tags = (0u32, 0u32, 0u32, 0u32);
+    for (i, r) in rows.iter().enumerate() {
+        let k = r.tag_kinds;
+        let ks = (k[0] + k[1] + k[2]).max(1) as f64;
+        println!(
+            "{:<27} {:>6} {:>7.1} {:>7.2} {:>3.0}/{:>2.0}/{:>2.0} {:>6.1} {:>5.2} {:>5.2} {:>5.2} {:>7.1} {:>7} {:>6.2}",
+            STARTS[i],
+            r.tagged,
+            pc(r.tagged as f64, r.n as f64),
+            avg(r.tag_pts as f64, r.tagged as f64),
+            100.0 * k[0] as f64 / ks,
+            100.0 * k[1] as f64 / ks,
+            100.0 * k[2] as f64 / ks,
+            pc(r.tag_made as f64, r.tag_shots as f64),
+            avg(r.tag_att, r.tag_crossed as f64),
+            avg(r.tag_def, r.tag_crossed as f64),
+            avg(r.tag_t_shot, r.tagged as f64),
+            pc(r.tag_tov as f64, r.tagged as f64),
+            r.tag_off_foul,
+            avg(r.tag_shots as f64, r.tagged as f64),
+        );
+        tags.0 += r.tagged;
+        tags.1 += r.tag_pts;
+        tags.2 += r.tag_shots;
+        tags.3 += r.tag_made;
+    }
+    let why = rows.iter().fold([(0u32, 0u32); 3], |mut a, r| {
+        for i in 0..3 {
+            a[i].0 += r.why[i].0;
+            a[i].1 += r.why[i].1;
+        }
+        a
+    });
+    println!(
+        "  by why: fast break called {} ({:.2} PPP), early shot tagged {} ({:.2}), live ball over within 8 s without either {} ({:.2})",
+        why[0].0,
+        avg(why[0].1 as f64, why[0].0 as f64),
+        why[1].0,
+        avg(why[1].1 as f64, why[1].0 as f64),
+        why[2].0,
+        avg(why[2].1 as f64, why[2].0 as f64)
+    );
+    println!(
+        "  transition shots: mean contest {:.2}, {:.1}% blocked, {:.1}% fouled",
+        avg(all.tag_contest, all.tag_shots as f64),
+        pc(all.tag_blocked as f64, all.tag_shots as f64),
+        pc(all.tag_fouled as f64, all.tag_shots as f64)
+    );
+    println!(
+        "  transition possessions with a shot (fast break called or early shot): {} at {:.2} points each",
+        why[0].0 + why[1].0,
+        avg((why[0].1 + why[1].1) as f64, (why[0].0 + why[1].0) as f64)
+    );
+    let half = all.n - all.tagged;
+    println!(
+        "transition: {} chances ({:.2}/game), {:.2} points each, {} shots, {:.1}% made;  everything else: {:.2} points per possession",
+        tags.0,
+        tags.0 as f64 / games.max(1) as f64,
+        avg(tags.1 as f64, tags.0 as f64),
+        tags.2,
+        pc(tags.3 as f64, tags.2 as f64),
+        avg((all.pts - all.tag_pts) as f64, half as f64),
+    );
+}
+
+fn print_row(label: &str, r: &TransRow, games: u32) {
+    let pc = |a: f64, b: f64| if b > 0.0 { 100.0 * a / b } else { 0.0 };
+    let avg = |a: f64, b: f64| if b > 0.0 { a / b } else { 0.0 };
+    let ks = r.shots.max(1) as f64;
+    println!(
+        "{:<27} {:>6} {:>5.1} | {:>5.1}% {:>5.1}% {:>5.1}% | {:>5.1} {:>5.2} {:>5.2} | {:>6.1} {:>6} | {:>5.1} {:>5.1} {:>5.2} {:>5.1} | {:>4.2} {:>4.1}",
+        label,
+        r.n,
+        r.n as f64 / games.max(1) as f64,
+        pc(r.tagged as f64, r.n as f64),
+        pc(r.quick as f64, r.n as f64),
+        pc(r.quick_rim as f64, r.n as f64),
+        avg(r.t_cross, r.crossed as f64),
+        avg(r.att_ahead, r.crossed as f64),
+        avg(r.def_back, r.crossed as f64),
+        avg(r.t_shot, r.shots.min(r.n) as f64),
+        r.shots,
+        100.0 * r.kinds[0] as f64 / ks,
+        pc(r.made as f64, r.shots as f64),
+        avg(r.pts as f64, r.n as f64),
+        pc(r.tov as f64, r.n as f64),
+        avg(r.fouls as f64, r.n as f64),
+        avg(r.secs, r.n as f64),
+    );
+}
+
+/// `basketman lab transition [games]`: how possessions begin and how often a
+/// live ball becomes a break, from the recordings of mixed-club games.
+pub fn transition(games: usize) {
+    let w = World::generate(7, 12);
+    let n = w.teams.len();
+    let mut rows: [TransRow; 9] = Default::default();
+    let mut played = 0u32;
+    for g in 0..games {
+        let (a, b) = (g % n, (g * 5 + 1 + g / n) % n);
+        if a == b {
+            continue;
+        }
+        let (mut ta, mut tb) = (w.teams[a].tactics().clone(), w.teams[b].tactics().clone());
+        if g % 3 != 0 {
+            ta.offense = OffenseSet::ALL[(g / 3) % OffenseSet::ALL.len()];
+            tb.offense = OffenseSet::ALL[(g / 3 + 2) % OffenseSet::ALL.len()];
+            ta.defense = DefenseScheme::ALL[(g / 2) % DefenseScheme::ALL.len()];
+            tb.defense = DefenseScheme::ALL[(g / 2 + 1) % DefenseScheme::ALL.len()];
+        }
+        if g % 7 == 0 {
+            tb.press = Press::FullCourt;
+        }
+        let la = Lineup {
+            tactics: &ta,
+            players: line(&w, &ta),
+            familiarity: 1.0,
+            belief: 0.55,
+            coach: 0,
+        };
+        let lb = Lineup {
+            tactics: &tb,
+            players: line(&w, &tb),
+            familiarity: 1.0,
+            belief: 0.55,
+            coach: 0,
+        };
+        let mut rng = Rng::new(900 + g as u64 * 7919);
+        let (_, rec) = simulate_recorded(&la, &lb, &w.rules, &mut rng);
+        played += 1;
+        let got = transition_rows(&rec);
+        for (r, o) in rows.iter_mut().zip(got.iter()) {
+            r.add(o);
+        }
+    }
+    println!("games {played}");
+    print_trans(&rows, played);
+}
+
+/// `basketman lab transition watch [game] [nth] [secs]`: the nth possession
+/// that began with a steal in game `game`, every half second in the
+/// attacking team's frame (x across, y toward its own basket 0..28, the
+/// basket they go to is at y 1.6): who has the ball, where the five
+/// attackers and the five defenders are, and how fast they run.
+pub fn transition_watch(g: usize, nth: usize, secs: f32) {
+    use basketman_core::court::LENGTH;
+    let w = World::generate(7, 12);
+    let n = w.teams.len();
+    let (a, b) = (g % n, (g * 5 + 1 + g / n) % n);
+    let b = if a == b { (b + 1) % n } else { b };
+    let (ta, tb) = (w.teams[a].tactics().clone(), w.teams[b].tactics().clone());
+    let la = Lineup {
+        tactics: &ta,
+        players: line(&w, &ta),
+        familiarity: 1.0,
+        belief: 0.55,
+        coach: 0,
+    };
+    let lb = Lineup {
+        tactics: &tb,
+        players: line(&w, &tb),
+        familiarity: 1.0,
+        belief: 0.55,
+        coach: 0,
+    };
+    let mut rng = Rng::new(900 + g as u64 * 7919);
+    let (_, rec) = simulate_recorded(&la, &lb, &w.rules, &mut rng);
+    let name = |id: u32| w.players.get(id as usize).map_or("?".to_string(), |p| p.name.clone());
+    let steals: Vec<&basketman_core::replay::Event> = rec
+        .events
+        .iter()
+        .filter(|e| matches!(e.kind, EventKind::Turnover { stolen_by: Some(_), .. }))
+        .collect();
+    let Some(e) = steals.get(nth) else {
+        println!("only {} steals in game {g}", steals.len());
+        return;
+    };
+    println!("EVENT {:.1} {}", e.time, e.text(|p| Box::leak(name(p).into_boxed_str())));
+    let t0 = e.time;
+    let mut last_t = -1.0f32;
+    let mut prev: Option<&basketman_core::replay::Frame> = None;
+    for f in rec.frames.iter().filter(|f| f.time >= t0 - 0.3 && f.time <= t0 + secs) {
+        if f.time - last_t < 0.49 {
+            prev = Some(f);
+            continue;
+        }
+        last_t = f.time;
+        let o = f.offense as usize;
+        let ay = |p: basketman_core::court::Vec2| if o == 0 { (LENGTH - p.x, p.y - 7.5) } else { (p.x, 7.5 - p.y) };
+        let (bx, by) = ay(f.ball);
+        print!(
+            "t{:+5.1} off{} ball({:5.1},{:4.1}) h{:.1} hold {:?} |",
+            f.time - t0,
+            o,
+            by,
+            bx,
+            f.ball_height,
+            f.holder
+        );
+        for (label, s) in [("A", o), ("D", 1 - o)] {
+            print!(" {label}:");
+            for k in 0..5 {
+                let (x, y) = ay(f.pos[s][k]);
+                let sp = prev.map_or(0.0, |p| {
+                    let (px, py) = ay(p.pos[s][k]);
+                    ((x - px).powi(2) + (y - py).powi(2)).sqrt() / (f.time - p.time).max(0.1)
+                });
+                print!("({:4.1},{:5.1})v{:3.1} ", y, x, sp);
+            }
+        }
+        println!();
+        prev = Some(f);
+    }
+}
+
+/// `basketman lab finish [games]`: shots near the rim by distance band, style
+/// and source, with the speed they were taken at and the contest. The band
+/// edges are the ones the realism report uses (3 and 10 feet).
+pub fn finish(games: usize) {
+    use basketman_core::court::HOOP;
+    use basketman_core::league::lineup;
+    use basketman_core::replay::{Action, ShotStage, Style, to_court};
+    let w = World::generate(7, 12);
+    let n = w.teams.len();
+    const BANDS: [&str; 4] = ["<3 ft", "3-10 ft", "10-16 ft", "16 ft+ 2pt"];
+    const STYLES: [&str; 6] = ["jumper", "layup", "dunk", "hook", "fade", "floater"];
+    // [band][style] -> (att, made, fouled, speed sum, contest sum)
+    let mut t = [[(0u32, 0u32, 0u32, 0f32, 0f32); 6]; 4];
+    let mut by_src = [[0u32; 3]; 9];
+    let (mut fga, mut fta_shots, mut pts_tot) = (0u32, 0u32, 0u32);
+    for g in 0..games {
+        let (a, b) = (g % n, (g * 5 + 1 + g / n) % n);
+        if a == b {
+            continue;
+        }
+        let home = lineup(&w.teams[a], &w.players);
+        let away = lineup(&w.teams[b], &w.players);
+        let (_, rec) = simulate_recorded(&home, &away, &w.rules, &mut Rng::new(2300 + g as u64 * 7919));
+        for e in &rec.events {
+            let EventKind::Shot { kind, made, contest, fouled, source, .. } = &e.kind else {
+                continue;
+            };
+            let i = rec.frame_at(e.time);
+            let f = &rec.frames[i];
+            let o = f.offense as usize;
+            let Some(k) = (0..5).find(|&k| {
+                f.pose[o][k].action == Action::Shooting && matches!(f.pose[o][k].stage, ShotStage::Release)
+            }) else {
+                continue;
+            };
+            if *fouled && !*made {
+                fta_shots += 1;
+                if *kind == ShotKind::Three {
+                    continue;
+                }
+            } else {
+                fga += 1;
+            }
+            if *fouled && !*made && *kind != ShotKind::Three {
+                // Not a field goal attempt, but a finish that drew the whistle.
+            }
+            if *kind == ShotKind::Three {
+                continue;
+            }
+            let ft = f.pos[o][k].dist(to_court(HOOP, o)) / 0.3048;
+            let band = if ft < 3.0 { 0 } else if ft < 10.0 { 1 } else if ft < 16.0 { 2 } else { 3 };
+            let st = match f.pose[o][k].style {
+                Style::Jumper => 0,
+                Style::Layup => 1,
+                Style::Dunk => 2,
+                Style::Hook => 3,
+                Style::Fadeaway => 4,
+                Style::Floater => 5,
+            };
+            let prev = &rec.frames[i.saturating_sub(1)];
+            let sp = f.pos[o][k].dist(prev.pos[o][k]) / 0.1;
+            let c = &mut t[band][st];
+            if *fouled && !*made {
+                c.2 += 1;
+                continue;
+            }
+            c.0 += 1;
+            c.1 += *made as u32;
+            c.2 += *fouled as u32;
+            c.3 += sp;
+            c.4 += *contest;
+            if band < 2 {
+                let s = Source::ALL.iter().position(|x| x == source).unwrap_or(0);
+                by_src[s][0] += 1;
+                by_src[s][1] += *made as u32;
+                by_src[s][2] += *fouled as u32;
+            }
+        }
+        pts_tot += 0;
+    }
+    let _ = (fta_shots, pts_tot);
+    println!("games {games}, two-point and inside shots by band and style (att, FG%, fouled%, speed m/s, contest)");
+    for (bi, name) in BANDS.iter().enumerate() {
+        let all: u32 = t[bi].iter().map(|c| c.0).sum();
+        let made: u32 = t[bi].iter().map(|c| c.1).sum();
+        println!(
+            "{name:<11} {all:>6} shots ({:.1}% of FGA) FG {:.1}%",
+            100.0 * all as f32 / fga.max(1) as f32,
+            100.0 * made as f32 / all.max(1) as f32
+        );
+        for (si, sn) in STYLES.iter().enumerate() {
+            let c = t[bi][si];
+            if c.0 == 0 {
+                continue;
+            }
+            println!(
+                "    {sn:<8} {:>6}  {:>5.1}%  fouled {:>4.1}%  speed {:>4.1}  contest {:.2}",
+                c.0,
+                100.0 * c.1 as f32 / c.0 as f32,
+                100.0 * c.2 as f32 / c.0 as f32,
+                c.3 / c.0 as f32,
+                c.4 / c.0 as f32
+            );
+        }
+    }
+    println!("inside 10 ft by source (att, FG%, fouled%):");
+    for (s, src) in Source::ALL.iter().enumerate() {
+        let c = by_src[s];
+        if c[0] > 0 {
+            println!(
+                "    {:<16} {:>6}  {:>5.1}%  {:>4.1}%",
+                src.label(),
+                c[0],
+                100.0 * c[1] as f32 / c[0] as f32,
+                100.0 * c[2] as f32 / c[0] as f32
+            );
+        }
     }
 }

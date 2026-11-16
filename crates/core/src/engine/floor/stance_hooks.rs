@@ -58,6 +58,12 @@ impl Game {
                         }
                         w.planting = matches!(s.style, Style::Jumper | Style::Fadeaway)
                             && self.play.t < s.jump_at;
+                    } else if let Some(ib) = self.play.inb.filter(|ib| ib.who == k && holder) {
+                        // Taking it out: faces the court, eyes on his receiver,
+                        // feet on the line (no dribble, no pivot about the hoop).
+                        let r = self.m[o][ib.to].pos;
+                        w.body = Some(r);
+                        w.gaze = Some(r);
                     } else if holder && !shot_up {
                         w.handler = true;
                         match self.play.phase {
@@ -191,6 +197,28 @@ impl Game {
             }
         }
         out
+    }
+
+    /// The ten were put on the floor by hand (a throw-in after a timeout or at
+    /// the start of a period): they are standing, balanced and looking at the
+    /// ball, the thrower at his receiver, not caught mid-turn from wherever
+    /// the bodies were last.
+    pub(super) fn settle_stance(&mut self, ball: Vec2, thrower: usize, receiver: usize) {
+        let o = self.play.o;
+        for t in 0..2 {
+            for k in 0..5 {
+                let me = self.m[t][k].pos;
+                let at = if t == o && k == thrower {
+                    self.m[o][receiver].pos
+                } else {
+                    ball
+                };
+                let dir = if at.dist(me) > 0.05 { (at - me).norm() } else { self.st[t][k].body };
+                let st = &mut self.st[t][k];
+                *st = Stance::new(dir);
+            }
+        }
+        self.handler = Handler::NONE;
     }
 
     /// Turn every body and head toward what they want, limited by the rate

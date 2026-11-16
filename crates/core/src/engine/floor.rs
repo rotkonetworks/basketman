@@ -12,8 +12,11 @@ use super::offense;
 use super::shot::{self, Errors};
 use super::stance::{self, Handler, Skill, Stance};
 use super::{BoxLine, DT, GameResult, Lineup, Pause, Rules, Shout, Side};
+#[path = "officiating.rs"]
+mod officiating;
+use officiating::{Gate, Ofc};
 use crate::court::{
-    KEY_DEPTH, KEY_HALF_WIDTH, BALL_RADIUS, BOARD_HALF, BOARD_LOW, BOARD_Y, GRAVITY, HOOP, LENGTH, NO_CHARGE_RADIUS, RIM_HEIGHT, ShotKind,
+    KEY_DEPTH, KEY_HALF_WIDTH, HALF_WIDTH, BALL_RADIUS, BOARD_HALF, BOARD_LOW, BOARD_Y, GRAVITY, HOOP, LENGTH, NO_CHARGE_RADIUS, RIM_HEIGHT, ShotKind,
     Vec2, v,
 };
 use crate::player::{Attr, PlayerId};
@@ -70,6 +73,34 @@ const FOULED_JUMPER: f32 = 1.5;
 /// The lane rule, and how soon the attackers clear it of their own accord.
 const LANE_SECONDS: f32 = 3.0;
 const LANE_WARN: f32 = 2.2;
+/// A shot this soon after the ball changed hands live came off the break.
+const BREAK_SECONDS: f32 = 8.0;
+/// How far from the baseline the man with the ball goes at the first defender,
+/// and how far he runs on before he gives up a break he is outnumbered in.
+const ATTACK_Y: f32 = 9.0;
+const PULL_Y: f32 = 11.5;
+/// A teammate this much further up the floor can be thrown the ball.
+const LEAD_PASS: f32 = 3.0;
+/// The most risk of a deflection a throw ahead is worth.
+const LEAD_RISK: f32 = 0.08;
+/// Chance per look that a defender who has been beaten on the break and has
+/// a clear path to the rim in front of the ball pulls him down.
+const STOP_FOUL: f32 = 0.05;
+
+/// Seconds the team that lost the ball takes to turn round: a base, so much
+/// more for each point of IQ under 20, and more for the man who lost it.
+const BEAT_BASE: f32 = 0.0;
+const BEAT_IQ: f32 = 0.006;
+const BEAT_LOST: f32 = 0.15;
+/// Chance, at neutral tempo, that the receiver of a throw-in pushes the ball.
+const PUSH_OFF_INBOUND: f32 = 0.35;
+/// Extra error on a rim finish for each m/s above a stride on the break.
+const SPRINT_ERR: f32 = 0.7;
+const SPRINT_FROM: f32 = 1.0;
+/// How much more of a contest a defender running a shooter down gives.
+const CHASE: f32 = 0.55;
+/// Fatigue above which a man does not run the floor.
+const RUN_LIMIT: f32 = 0.6;
 /// Added to the crowding of a pass into a man at the rim, on top of 2.6.
 const CROWD_RIM: f32 = 3.0;
 const TIP_SCALE: f32 = 1.0;
@@ -334,6 +365,8 @@ struct Mover {
     pace: f32,
     /// Planting for a shot: he can slow down much faster than he speeds up.
     hard: bool,
+    /// Taking the ball out: he may stand behind the line until he is back in.
+    out: bool,
 }
 
 impl Mover {
@@ -358,7 +391,18 @@ impl Mover {
         } else {
             want
         };
-        self.pos = contact::keep_in(self.pos + self.vel * DT, r);
+        let next = self.pos + self.vel * DT;
+        if self.out {
+            self.pos = v(
+                next.x.clamp(-HALF_WIDTH - 2.0, HALF_WIDTH + 2.0),
+                next.y.clamp(-2.0, LENGTH + 2.0),
+            );
+            if contact::keep_in(self.pos, r) == self.pos {
+                self.out = false;
+            }
+        } else {
+            self.pos = contact::keep_in(next, r);
+        }
     }
 }
 
@@ -431,6 +475,8 @@ enum Task {
     Pop(Vec2),
     Crash,
     GetBack,
+    /// Running to a place on the break, at the pace he is willing to run.
+    Fill(Vec2),
     /// Stays where he is, watching the ball, until this play time, then
     /// gets back.
     Watch(f32),
@@ -455,6 +501,8 @@ enum FlightKind {
         /// Free throws to shoot once this missed shot has settled (he was
         /// fouled in the act and missed).
         foul_shots: u16,
+        /// What the officials counted the basket for, if it goes in.
+        ruled: u16,
         /// This is a free throw.
         line: bool,
     },
@@ -682,6 +730,28 @@ struct Play {
     /// A defender who has stepped into the driver's path to take a charge,
     /// where he stands, and whether the driver has not seen him.
     hunt: Option<(usize, Vec2, bool)>,
+    /// The ball changed hands live and the team is running: the break is on
+    /// until the man with the ball attacks or pulls out into the set.
+    brk: bool,
+    /// The possession began live, whatever became of the break.
+    live_origin: bool,
+    /// The fast break has been called in the event log.
+    brk_logged: bool,
+    /// The pace each attacker is willing to run at on the break.
+    go: [f32; 5],
+    /// A throw-in under way.
+    inb: Option<Inb>,
+}
+
+/// A throw-in: who takes the ball out, who is to get it, where from, where
+/// the receiver comes to, and when the thrower got to his spot.
+#[derive(Copy, Clone)]
+struct Inb {
+    who: usize,
+    to: usize,
+    spot: Vec2,
+    rx: Vec2,
+    since: Option<f32>,
 }
 
 pub(super) struct Game {
@@ -753,6 +823,18 @@ pub(super) struct Game {
     st: [[Stance; 5]; 2],
     /// The ball handler's dribble.
     handler: Handler,
+    /// Whoever lost the ball to a steal, in the old attack frame, until the
+    /// next possession has been set up.
+    lost_by: Option<usize>,
+    /// The dead-ball clock at the last tick.
+    dead_was: f32,
+    /// Seconds a picked-off ball spent in the air.
+    steal_flew: f32,
+    /// The picture was cut (timeout, end of a period) and the next restart
+    /// places the ten for the throw-in. Kept whether or not it is recorded.
+    restart_cut: bool,
+    /// The officials, if a crew was assigned: what they see and call.
+    ofc: Option<Ofc>,
 }
 
 impl Game {
@@ -825,6 +907,11 @@ impl Game {
             prev_pos: [[Vec2::ZERO; 5]; 2],
             st: [[Stance::new(v(0.0, 1.0)); 5]; 2],
             handler: Handler::NONE,
+            lost_by: None,
+            dead_was: 0.0,
+            steal_flew: 0.0,
+            restart_cut: false,
+            ofc: None,
             m,
             frame: 0,
             play: Play::idle(),
@@ -915,7 +1002,11 @@ impl Game {
                 None
             }
             Stage::Play => {
-                let end = self.tick().or_else(|| {
+                // A review asked for or decided at this stoppage.
+                if let Gate::Pause(p) = self.review_gate() {
+                    return Some(p);
+                }
+                let end = self.forced_end().or_else(|| self.tick()).or_else(|| {
                     // A possession that will not end is ended; not with a shot in the air.
                     let idle = self.play.flight.is_none()
                         && self.play.after.is_none()
@@ -972,6 +1063,7 @@ impl Game {
                 self.event(EventKind::PeriodEnd);
                 self.wall += 4.0;
                 self.cut = true;
+                self.restart_cut = true;
                 let score = [self.sides[0].score, self.sides[1].score];
                 self.periods
                     .push([score[0] - self.before[0], score[1] - self.before[1]]);
@@ -1011,6 +1103,7 @@ impl Game {
             periods,
             boxes: [boxes(&self.sides[0]), boxes(&self.sides[1])],
             possessions: self.possessions,
+            officiating: self.officiating(),
         }
     }
 
@@ -1041,6 +1134,7 @@ impl Game {
         self.adapt(t);
         self.wall += 6.0;
         self.cut = true;
+        self.restart_cut = true;
         Some(t)
     }
 
@@ -1362,6 +1456,13 @@ impl Game {
             big,
             ..Play::idle()
         };
+        if live_start {
+            self.start_break(holder);
+        } else {
+            self.start_inbound(loose.map(|l| l.0), credit > 0.0, None);
+        }
+        self.lost_by = None;
+        self.steal_flew = 0.0;
     }
 
     fn tick(&mut self) -> Option<End> {
@@ -1386,6 +1487,7 @@ impl Game {
             }
         }
         self.ticks += 1;
+        self.officials_tick();
         for side in &mut self.m {
             for m in side {
                 m.hard = false;
@@ -1446,7 +1548,42 @@ impl Game {
         if let Some(h) = self.play.holder {
             self.hold_off_glass(self.play.o, h);
         }
+        // A man taking the ball out stands where the court is not: the bodies
+        // pushing everybody back inside do not move him.
+        let outside: Vec<(usize, usize, Vec2)> = (0..2)
+            .flat_map(|t| (0..5).map(move |k| (t, k)))
+            .filter(|&(t, k)| self.m[t][k].out)
+            .map(|(t, k)| (t, k, self.m[t][k].pos))
+            .collect();
         self.collide(&bulk);
+        // A sprinting pack gets a second pass: bodies at full speed go deeper
+        // into each other in a tick than the first pass takes out.
+        if self.play.brk || self.play.live_start {
+            self.collide(&bulk);
+        }
+        for (t, k, pos) in outside {
+            self.m[t][k].pos = pos;
+            // Whoever is leaning on him is moved off him in full.
+            for j in 0..10 {
+                if j / 5 == t && j % 5 == k {
+                    continue;
+                }
+                let q = self.m[j / 5][j % 5].pos;
+                let gap = bulk[j].r + bulk[t * 5 + k].r - q.dist(pos);
+                if gap > 0.0 {
+                    let away = (q - pos).norm();
+                    let away = if away.len() < 0.5 { v(0.0, 1.0) } else { away };
+                    self.m[j / 5][j % 5].pos = contact::keep_in(q + away * gap, bulk[j].r);
+                }
+            }
+            self.touch[t * 5 + k] = Touch::CLEAR;
+            for i in 0..10 {
+                if self.touch[i].is_some() && self.touch[i].with as usize == t * 5 + k {
+                    self.touch[i] = Touch::CLEAR;
+                }
+            }
+        }
+        self.dead_ball_ends();
         if !stopped {
             self.tire_from_contact(&bulk);
         }
@@ -1820,17 +1957,37 @@ impl Game {
         for k in 0..5 {
             let pos = self.m[o][k].pos;
             let mut brake = false;
-            let (target, pace) = if self.play.holder.is_none()
+            let reacting = match self.play.flight {
+                Some(Flight {
+                    kind: FlightKind::Steal { .. },
+                    t,
+                    ..
+                }) => t > self.reaction(k),
+                _ => false,
+            };
+            let (target, pace) = if reacting {
+                // The ball is going the other way: he turns and runs back.
+                (v(pos.x * 0.7, (pos.y + 9.0).min(LENGTH - 2.0)), 1.0)
+            } else if self.play.holder.is_none()
                 && self.play.flight.is_none()
                 && self.play.fetcher == Some(k)
             {
                 // Going after the loose ball.
                 (self.play.ball, 0.9)
+            } else if let Some(ib) = self.play.inb.filter(|ib| ib.who == k && self.play.holder == Some(k)) {
+                // Out to the spot he takes it from, and stands there.
+                self.m[o][k].out = true;
+                (ib.spot, 0.9)
             } else if self.play.holder == Some(k) && (self.play.wait > 0.0 || self.play.dead > 0.0)
             {
                 (pos, 0.0)
             } else if self.play.holder == Some(k) {
                 match self.play.phase {
+                    Phase::Advance if self.play.brk => {
+                        // Straight at the basket, at the speed he can dribble.
+                        let aim = HOOP.toward(pos, 2.4_f32.min(pos.dist(HOOP)));
+                        (aim, self.dribble_pace(k).min(self.play.go[k].max(0.6)))
+                    }
                     Phase::Advance => {
                         if k == self.play.handler || self.play.live_start {
                             let spot = self.play.spots[k];
@@ -1919,6 +2076,7 @@ impl Game {
                     Task::Pop(p) => (p, 0.85),
                     Task::Crash => (HOOP.toward(pos, 1.4), 1.0),
                     Task::GetBack => (v(pos.x * 0.6, 16.0), 0.9),
+                    Task::Fill(to) => (to, self.play.go[k]),
                     Task::Watch(until) => {
                         if self.play.t >= until {
                             self.play.task[k] = Task::GetBack;
@@ -1987,7 +2145,32 @@ impl Game {
         // The aims are worked out twice a second and held between: where a
         // defender wants to stand does not change in a tenth of one.
         let fresh = self.ticks.wrapping_sub(self.cache.aims_tick) >= 2 || self.ticks <= 1;
-        if fresh {
+        let rushed = self.play.brk
+            && matches!(self.play.phase, Phase::Advance | Phase::Drive { .. })
+            && !matches!(
+                self.play.flight,
+                Some(Flight {
+                    kind: FlightKind::Shot { .. },
+                    ..
+                })
+            );
+        if fresh && rushed {
+            // The ball is coming at them: nearest man stops it, the rest get
+            // goal side of the men nearest the basket.
+            let back = defense::get_back(&defense::Rush {
+                o: std::array::from_fn(|k| self.op(k)),
+                d: std::array::from_fn(|k| self.dp(k)),
+                ball,
+                handler: owner.unwrap_or(self.play.handler),
+            });
+            self.play.guard = back.man;
+            self.cache.aims = defense::Aims {
+                at: back.at,
+                on_ball: Some(back.stopper),
+                helper: None,
+            };
+            self.cache.aims_tick = self.ticks;
+        } else if fresh {
             let view = View {
                 scheme,
                 o: std::array::from_fn(|k| self.op(k)),
@@ -2041,6 +2224,23 @@ impl Game {
             } else {
                 0.88
             };
+        }
+        // A ball picked off is already on its way to the thief's hand: his
+        // team is running before it gets there, with whatever speed they have.
+        if let Some(Flight {
+            kind: FlightKind::Steal { .. },
+            ..
+        }) = self.play.flight
+        {
+            for dk in 0..5 {
+                if self.sides[d].slots[self.sides[d].on[dk]].fatigue > RUN_LIMIT {
+                    continue;
+                }
+                let pace = self.run_pace(d, dk);
+                let m = &mut self.m[d][dk];
+                m.target = v(m.pos.x * 0.7, (m.pos.y + 9.0).min(LENGTH - 2.0));
+                m.pace = pace;
+            }
         }
         // A man sent round a screen goes where he was told.
         if let Some((rk, spot, until)) = self.play.route {
@@ -2167,6 +2367,7 @@ impl Game {
         match self.play.phase {
             Phase::Advance => self.advance(h),
             Phase::Set => {
+                self.play.brk = false;
                 if self.play.think <= 0.0 {
                     self.decide(h)
                 } else {
@@ -2213,6 +2414,9 @@ impl Game {
     // ---- bringing it up --------------------------------------------------
 
     fn advance(&mut self, h: usize) -> Option<End> {
+        if let Some(ib) = self.play.inb {
+            return self.throw_in(h, ib);
+        }
         let p = self.op(h);
         let press = self.def().tactics.press;
 
@@ -2232,6 +2436,9 @@ impl Game {
                     return self.turnover(h, TurnoverKind::Pressed, Some(dk), 0.75);
                 }
             }
+        }
+        if self.play.brk {
+            return self.push(h);
         }
         let run = |game: &mut Self| {
             game.play.source = Source::Transition;
@@ -2290,6 +2497,425 @@ impl Game {
             self.play.phase = Phase::Set;
             self.play.think = 0.3;
         }
+        None
+    }
+
+    // ---- throwing it in -------------------------------------------------------
+
+    /// A dead ball: one man takes it out where the rules say, a different
+    /// man comes to get it. `at` is where the ball died (none at the start of
+    /// a period), `made` that it went through the net, and `carrier` the man
+    /// who already has it in his hands.
+    fn start_inbound(&mut self, at: Option<Vec2>, made: bool, carrier: Option<usize>) {
+        let o = self.play.o;
+        let spot = match at {
+            None => v(HALF_WIDTH + 1.0, 14.0),
+            // Behind the baseline of the basket just scored on.
+            Some(_) if made => v(0.0, LENGTH + 1.0),
+            Some(a) => {
+                let side = HALF_WIDTH - a.x.abs();
+                let end = a.y.min(LENGTH - a.y);
+                if end < side {
+                    v(a.x.clamp(-5.0, 5.0), if a.y > 14.0 { LENGTH + 1.0 } else { -1.0 })
+                } else {
+                    let s = if a.x >= 0.0 { 1.0 } else { -1.0 };
+                    v(s * (HALF_WIDTH + 1.0), a.y.clamp(2.0, LENGTH - 2.0))
+                }
+            }
+        };
+        let handler = self.play.handler;
+        let from = at.unwrap_or(spot);
+        let who = carrier.unwrap_or_else(|| {
+            (0..5)
+                .filter(|&k| k != handler)
+                .min_by(|&a, &b| self.op(a).dist(from).total_cmp(&self.op(b).dist(from)))
+                .unwrap_or(0)
+        });
+        // The receiver is somebody else: the ball handler, unless it is he.
+        let to = if who != handler {
+            handler
+        } else {
+            (0..5)
+                .filter(|&k| k != who)
+                .max_by(|&a, &b| {
+                    let f = |k: usize| self.oe(k, Attr::Handling) + self.oe(k, Attr::Passing);
+                    f(a).total_cmp(&f(b))
+                })
+                .unwrap_or(0)
+        };
+        let mut rx = spot.toward(v(0.0, 14.0), 5.5);
+        rx.x = rx.x.clamp(-5.5, 5.5);
+        if rx.x.abs() < 2.0 {
+            rx.x = if spot.x >= 0.0 { 3.0 } else { -3.0 };
+        }
+        rx.y = rx.y.clamp(2.0, LENGTH - 2.0);
+        self.play.inb = Some(Inb {
+            who,
+            to,
+            spot,
+            rx,
+            since: None,
+        });
+        self.play.handler = to;
+        self.play.phase = Phase::Advance;
+        self.play.live_start = false;
+        self.play.brk = false;
+        self.play.inbound = true;
+        self.play.task = [Task::Spot; 5];
+        self.play.task[to] = Task::Fill(rx);
+        self.play.go[to] = 0.9;
+        // After a timeout or between periods the picture is cut: the ten are
+        // put where a throw-in finds them, the five on the floor now (those who
+        // just came on too), and the ball is in the thrower's hands.
+        if std::mem::take(&mut self.restart_cut) && carrier.is_none() {
+            let d = 1 - o;
+            for k in 0..5 {
+                let p = self.play.spots[k];
+                self.m[o][k].pos = p;
+                self.m[o][k].vel = Vec2::ZERO;
+                self.m[o][k].target = p;
+            }
+            self.m[o][who].pos = spot;
+            self.m[o][who].out = true;
+            self.m[o][to].pos = rx;
+            self.m[o][to].target = rx;
+            for dk in 0..5 {
+                let a = self.m[o][dk].pos;
+                let p = a.toward(HOOP, 1.5_f32.min(a.dist(HOOP)));
+                self.m[d][dk].pos = contact::keep_in(p, 0.3);
+                self.m[d][dk].vel = Vec2::ZERO;
+                self.m[d][dk].target = self.m[d][dk].pos;
+            }
+            self.bulk_dirty = true;
+            self.play.holder = Some(who);
+            self.play.fetcher = None;
+            self.play.ball = spot;
+            self.loose = None;
+            self.settle_stance(spot, who, to);
+            return;
+        }
+        match (carrier, at) {
+            (Some(c), _) => self.play.holder = Some(c),
+            (None, None) => {
+                // The start of a period: he is already at the spot with it.
+                self.m[o][who].pos = spot;
+                self.m[o][who].out = true;
+                self.m[o][who].vel = Vec2::ZERO;
+                self.play.holder = Some(who);
+                self.play.fetcher = None;
+                self.play.ball = spot;
+                self.settle_stance(spot, who, to);
+            }
+            (None, Some(_)) => {
+                self.play.holder = None;
+                self.play.fetcher = Some(who);
+                self.play.fetch_t = self.play.t;
+            }
+        }
+    }
+
+    /// The man with the ball at the line looks for somebody open: the man
+    /// who came for it if his lane is clear, otherwise another, and he has
+    /// to throw within five seconds.
+    fn throw_in(&mut self, h: usize, ib: Inb) -> Option<End> {
+        if h != ib.who {
+            self.play.inb = None;
+            return None;
+        }
+        if self.op(h).dist(ib.spot) > 0.7 {
+            return None;
+        }
+        let since = ib.since.unwrap_or(self.play.t);
+        if let Some(i) = self.play.inb.as_mut() {
+            i.since = Some(since);
+        }
+        let waited = self.play.t - since;
+        if waited < 0.6 {
+            return None;
+        }
+        let ready = self.op(ib.to).dist(ib.rx) < 3.0 || waited > 1.5;
+        if !ready {
+            return None;
+        }
+        let mut best = (ib.to, self.pass_risk(h, ib.to));
+        if best.1 > 0.10 {
+            for j in 0..5 {
+                if j == h || j == ib.to {
+                    continue;
+                }
+                let r = self.pass_risk(h, j);
+                if r < best.1 {
+                    best = (j, r);
+                }
+            }
+        }
+        if best.1 > 0.10 && waited < 4.0 {
+            return None;
+        }
+        self.play.inb = None;
+        self.play.handler = best.0;
+        self.play.task = [Task::Spot; 5];
+        self.play.inbound = true;
+        // A team that likes to run pushes it up the floor off the throw-in.
+        let tempo = self.off().tactics.pace as f32;
+        self.play.live_start = self.rng.chance(PUSH_OFF_INBOUND * (0.4 + 0.06 * tempo));
+        self.pass(h, best.0, false)
+    }
+
+    /// After a whistle for a foul that is not a shooting foul, the floor
+    /// stands still a moment and the ball is taken out at the spot.
+    fn dead_ball_ends(&mut self) {
+        if self.dead_was > 0.0
+            && self.play.dead <= 0.0
+            && self.play.inb.is_none()
+            && matches!(self.play.phase, Phase::Set)
+            && self.play.flight.is_none()
+            && self.play.after.is_none()
+            && let Some(h) = self.play.holder
+        {
+            let at = self.op(h);
+            self.start_inbound(Some(at), false, Some(h));
+        }
+        self.dead_was = self.play.dead;
+    }
+
+    // ---- the break ---------------------------------------------------------
+
+    /// How fast `k` of the side with the ball dribbles: handling decides how
+    /// much speed he can carry the ball at, and tired legs take it away.
+    /// Seconds before man `k` of the side with the ball turns round when the
+    /// ball is picked off: his IQ, and more for the man who threw it.
+    fn reaction(&self, k: usize) -> f32 {
+        let mut beat = BEAT_BASE + (20.0 - self.oe(k, Attr::Iq)).max(0.0) * BEAT_IQ;
+        if Some(k) == self.lost_by {
+            beat += BEAT_LOST;
+        }
+        beat
+    }
+
+    fn dribble_pace(&self, k: usize) -> f32 {
+        let f = self.off().slots[self.off().on[k]].fatigue;
+        (0.80 + 0.0085 * self.oe(k, Attr::Handling)).min(0.97) * (1.0 - 0.5 * (f - 0.2).max(0.0))
+    }
+
+    /// The share of his top speed that man `k` of side `t` is willing to
+    /// run at on the floor: the tempo asked for pushes it up, tiredness
+    /// takes it away.
+    fn run_pace(&self, t: usize, k: usize) -> f32 {
+        let side = &self.sides[t];
+        let f = side.slots[side.on[k]].fatigue;
+        let tempo = side.tactics.pace as f32 - 10.0;
+        (1.0 - 0.8 * (f - 0.15).max(0.0) + 0.012 * tempo).clamp(0.5, 1.0)
+    }
+
+    /// The ball has changed hands live: who runs, and where to. The nearest
+    /// men to the far basket fill the wings and trail; whoever is tired or
+    /// has been told to get back stays at half court. The team that lost it
+    /// loses a beat, longest the man who gave it away.
+    fn start_break(&mut self, h: usize) {
+        let o = self.play.o;
+        self.play.brk = true;
+        self.play.live_origin = true;
+        self.play.source = Source::Transition;
+        let tempo = self.off().tactics.pace;
+        let wanted = 2 + (tempo >= 13) as usize + (tempo >= 17) as usize;
+        let mut order: Vec<usize> = (0..5).filter(|&k| k != h).collect();
+        order.sort_by(|&a, &b| self.op(a).y.total_cmp(&self.op(b).y));
+        let side = if self.op(order[0]).x >= 0.0 { 1.0 } else { -1.0 };
+        let lanes = [
+            v(side * 4.3, 2.8),
+            v(-side * 4.3, 2.8),
+            v(side * 1.4, 7.8),
+            v(-side * 2.6, 10.0),
+        ];
+        for (i, &k) in order.iter().enumerate() {
+            let pos = self.op(k);
+            let tired = self.off().slots[self.off().on[k]].fatigue > RUN_LIMIT;
+            let pace = self.run_pace(o, k);
+            // Two fill the wings, two trail the ball to the top of the floor;
+            // a team told to slow it down keeps one at half court, and a
+            // tired man does not sprint.
+            let safety = i == order.len() - 1 && tempo <= 7;
+            if tired || safety {
+                self.play.task[k] = Task::Fill(v(pos.x * 0.6, 14.5));
+                self.play.go[k] = pace * 0.85;
+            } else {
+                self.play.task[k] = Task::Fill(lanes[i]);
+                self.play.go[k] = if i < wanted { pace } else { pace * 0.85 };
+            }
+        }
+        self.play.go[h] = self.run_pace(o, h);
+        let lost = self.lost_by;
+        for dk in 0..5 {
+            let iq = self.de(dk, Attr::Iq);
+            let mut beat = BEAT_BASE + (20.0 - iq).max(0.0) * BEAT_IQ;
+            if Some(dk) == lost {
+                beat += BEAT_LOST;
+            }
+            // Whatever time the ball spent in the air he was already turning.
+            self.play.stun[dk] = (beat - self.steal_flew).max(0.0);
+        }
+        self.play.think = 0.1 + (20.0 - self.oe(h, Attr::Iq)).max(0.0) * 0.01;
+    }
+
+    /// One look up the floor by the man with the ball on the break: throw it
+    /// ahead, take it at the first defender, or give up the run.
+    fn push(&mut self, h: usize) -> Option<End> {
+        if self.play.think > 0.0 {
+            return None;
+        }
+        self.play.think = 0.2;
+        let p = self.op(h);
+        let to_rim = p.dist(HOOP);
+        let mut back = 0usize;
+        let mut first: Option<(usize, f32)> = None;
+        for dk in 0..5 {
+            let q = self.dp(dk);
+            if q.y < p.y + 0.4 {
+                back += 1;
+                let dist = q.dist(p);
+                if first.is_none_or(|f| dist < f.1) {
+                    first = Some((dk, dist));
+                }
+            }
+        }
+        let up = 1 + (0..5)
+            .filter(|&k| k != h && self.op(k).y < p.y + 1.0)
+            .count();
+
+        // A defender who has been beaten and is chasing from behind, with
+        // nobody in front of the ball, may pull him down to stop two points.
+        if to_rim < 10.0 {
+            let chaser = (0..5)
+                .filter(|&dk| {
+                    let q = self.dp(dk);
+                    q.dist(p) < 1.6 && q.dist(HOOP) > to_rim + 0.2
+                })
+                .min_by(|&a, &b| self.dp(a).dist(p).total_cmp(&self.dp(b).dist(p)));
+            let clear = (0..5).all(|dk| {
+                let q = self.dp(dk);
+                q.dist(HOOP) > to_rim || q.dist(p) > 4.5
+            });
+            if let Some(dk) = chaser
+                && clear
+            {
+                let eager = STOP_FOUL * (1.0 + 0.8 * self.def().aggression());
+                let grab = self.rng.chance(eager);
+                let o = self.play.o;
+                if self.call(grab, 1.0, FoulKind::ReachIn, (1 - o, dk), (o, h)) {
+                    return self.floor_foul(dk, h, FoulKind::ReachIn);
+                }
+            }
+        }
+
+        let edge = up as i32 - back as i32;
+        if p.y <= 14.0 && !self.play.crossed {
+            // Across half court: more of them up the floor than of us means
+            // the break is on.
+            self.play.crossed = true;
+            if edge >= 1 {
+                self.break_called(h);
+            }
+        }
+        // Ahead of the ball and open: throw it.
+        let vision = 0.35 + (self.oe(h, Attr::Passing) + self.oe(h, Attr::Iq)) / 40.0 * 0.65;
+        if p.y > 3.0
+            && self.rng.chance(vision)
+            && let Some(j) = self.lead_pass(h, first)
+        {
+            return self.pass(h, j, false);
+        }
+
+        let clear = first.is_none_or(|f| f.1 > 3.4);
+        if p.y < ATTACK_Y {
+            if edge >= 1 || (edge == 0 && clear) {
+                return self.attack(h, first, edge);
+            }
+            return self.pull_out();
+        }
+        if p.y < PULL_Y && edge < 0 {
+            return self.pull_out();
+        }
+        None
+    }
+
+    fn break_called(&mut self, h: usize) {
+        if !self.play.brk_logged {
+            self.play.brk_logged = true;
+            let who = self.oid(h);
+            self.event(EventKind::FastBreak { who });
+        }
+    }
+
+    /// The best teammate to throw it to: well up the floor and open when the
+    /// ball gets there.
+    fn lead_pass(&mut self, h: usize, first: Option<(usize, f32)>) -> Option<usize> {
+        let o = self.play.o;
+        let p = self.op(h);
+        // A defender in front of the ball makes the throw more worth it.
+        let blocked = first.is_some_and(|(dk, d)| d < 4.5 && self.dp(dk).y < p.y);
+        let mut best: Option<(usize, f32)> = None;
+        for j in 0..5 {
+            if j == h || self.play.from == Some(j) {
+                continue;
+            }
+            let m = &self.m[o][j];
+            let at = m.pos + m.vel * 0.5;
+            let ahead = p.y - at.y;
+            if ahead < LEAD_PASS || p.dist(at) > 20.0 {
+                continue;
+            }
+            let rim = ShotKind::at(at) == ShotKind::Rim;
+            let (c, _) = self.contest(at, j, rim);
+            let c = (c + 0.2).min(1.0);
+            let risk = self.pass_risk(h, j);
+            let wanted = if blocked { c < 0.7 } else { ahead >= 5.0 && c < 0.45 };
+            if !wanted || risk > LEAD_RISK {
+                continue;
+            }
+            let score = ahead * 0.1 - c - risk * 2.0;
+            if best.is_none_or(|b| score > b.1) {
+                best = Some((j, score));
+            }
+        }
+        best.map(|b| b.0)
+    }
+
+    /// Go at the first defender: through the drive's own rules if he is
+    /// close enough to be a contest, past him if he is not there.
+    fn attack(&mut self, h: usize, first: Option<(usize, f32)>, edge: i32) -> Option<End> {
+        self.break_called(h);
+        self.play.source = Source::Transition;
+        // With the numbers he goes by on the run; one on one it is a drive
+        // like any other, with its reaching, its stripping and its charges.
+        if edge <= 0
+            && let Some((_, dist)) = first
+            && dist < 2.6
+        {
+            let end = self.drive(h, 1.0 + edge.max(0) as f32);
+            if !matches!(self.play.phase, Phase::Drive { beaten: true, .. }) {
+                self.play.brk = false;
+            }
+            return end;
+        }
+        let dk = first.map_or_else(|| self.defender_of(h), |f| f.0);
+        self.play.phase = Phase::Drive {
+            dk,
+            beaten: true,
+            until: self.play.t + 4.0,
+        };
+        self.play.dribbled = true;
+        None
+    }
+
+    /// He is outnumbered: the break is off, and the team sets up.
+    fn pull_out(&mut self) -> Option<End> {
+        self.play.brk = false;
+        self.play.live_start = false;
+        self.play.phase = Phase::Set;
+        self.play.think = 0.25;
+        self.play.source = Source::PullUp;
+        self.play.task = [Task::Spot; 5];
         None
     }
 
@@ -2357,7 +2983,11 @@ impl Game {
                 (1.0 + (d_reach - reach) / 100.0).max(0.5)
             };
             if (q - p).dot(to_hoop) < -0.25 && p.dist(HOOP) > 1.0 {
-                w *= 0.45;
+                // Trailing the play. A man running him down is another matter:
+                // he is on him as he goes up, and his hand comes with him.
+                let toward = self.m[1 - self.play.o][dk].vel.dot((p - q).norm());
+                let chase = ((toward - 2.0) / 3.0).clamp(0.0, 1.0);
+                w *= 0.45 + CHASE * chase;
             }
             
             out[dk] = w;
@@ -2822,6 +3452,16 @@ impl Game {
 
     fn pass(&mut self, h: usize, j: usize, safe: bool) -> Option<End> {
         let (a, b) = (self.op(h), self.op(j));
+        if let Some(rec) = &mut self.rec {
+            rec.passes.push(crate::replay::PassRec {
+                time: self.wall,
+                side: self.play.o as u8,
+                from: h as u8,
+                to: j as u8,
+                at: crate::replay::to_court(a, self.play.o),
+                inbound: self.play.inbound,
+            });
+        }
         if !safe {
             let risk = self.pass_risk(h, j);
             if self.rng.chance(risk) {
@@ -2837,11 +3477,13 @@ impl Game {
                 let end = self.turnover(h, TurnoverKind::BadPass, Some(thief.0), 0.62);
                 if let Some(End::Live(dk)) = end {
                     // The ball goes to his hand and he takes it from there.
+                    self.steal_flew = Self::pass_time(a.dist(self.dp(dk))).min(0.5).max(a.dist(self.dp(dk)) / 20.0);
                     self.play.flight = Some(Flight {
                         from: a,
                         to: self.dp(dk),
                         t: 0.0,
-                        dur: Self::pass_time(a.dist(self.dp(dk))).min(0.5),
+                        // A quick hand, but the ball does not fly faster than a thrown pass can.
+                        dur: Self::pass_time(a.dist(self.dp(dk))).min(0.5).max(a.dist(self.dp(dk)) / 20.0),
                         kind: FlightKind::Steal { to: dk },
                         path: None,
                     });
@@ -2903,6 +3545,7 @@ impl Game {
             self.dline(dk).stl += 1;
         }
         let stolen_by = stolen.map(|dk| self.did(dk));
+        self.lost_by = stolen.map(|_| h);
         self.event(EventKind::Turnover {
             who,
             kind,
@@ -2950,7 +3593,8 @@ impl Game {
             if r < strip {
                 return self.turnover(h, TurnoverKind::Stripped, Some(dk), 0.7);
             }
-            if r < strip + foul && self.called(1.0) {
+            let o = self.play.o;
+            if self.call(r < strip + foul, 1.0, FoulKind::ReachIn, (1 - o, dk), (o, h)) {
                 return self.floor_foul(dk, h, FoulKind::ReachIn);
             }
         }
@@ -2996,7 +3640,9 @@ impl Game {
         let beaten = !contained && (!guarded || self.rng.chance(p_beat));
         if beaten && guarded {
             // Beaten defenders reach.
-            if self.rng.chance(foul.min(0.95)) && self.called(1.0) {
+            let reach = self.rng.chance(foul.min(0.95));
+            let o = self.play.o;
+            if self.call(reach, 1.0, FoulKind::ReachIn, (1 - o, dk), (o, h)) {
                 return self.floor_foul(dk, h, FoulKind::ReachIn);
             }
             self.play.stun[dk] = self.play.stun[dk].max(0.4);
@@ -3214,17 +3860,20 @@ impl Game {
                 * (1.0 + 0.25 * (d_speed - 1.0).max(0.0))
                 * self.off().foul_mult(self.off().on[s])
                 / CALL_BASE;
-            if self.rng.chance(raw.min(0.9)) && self.called(1.0) {
+            let moved = self.rng.chance(raw.min(0.9));
+            let o = self.play.o;
+            if self.call(moved, 1.0, FoulKind::IllegalScreen, (o, s), (1 - o, dk)) {
                 return self.offensive_foul(s, dk, FoulKind::IllegalScreen);
             }
             // Fighting through it, a man grabs.
-            if delay > 0.0
-                && self.rng.chance(
+            if delay > 0.0 {
+                let grab = self.rng.chance(
                     (SCREEN_HOLD * self.def().foul_mult(self.def().on[dk]) / CALL_BASE).min(0.9),
-                )
-                && self.called(1.0)
-            {
-                return self.floor_foul(dk, s, FoulKind::Holding);
+                );
+                let o = self.play.o;
+                if self.call(grab, 1.0, FoulKind::Holding, (1 - o, dk), (o, s)) {
+                    return self.floor_foul(dk, s, FoulKind::Holding);
+                }
             }
         }
         let quality = if arrived {
@@ -3407,15 +4056,17 @@ impl Game {
         // metre closer to the basket has the better of the move.
         let gained = (self.play.post_from.dist(HOOP) - p.dist(HOOP)).clamp(-0.5, 1.8);
         let mult = self.def().foul_mult(self.def().on[dk]);
-        if r < strip + 0.07 * (1.0 + 0.6 * self.def().aggression()) * mult / CALL_BASE
-            && self.called(1.0)
-        {
+        let shoved =
+            r < strip + 0.07 * (1.0 + 0.6 * self.def().aggression()) * mult / CALL_BASE;
+        let o = self.play.o;
+        if self.call(shoved, 1.0, FoulKind::Pushing, (1 - o, dk), (o, h)) {
             return self.floor_foul(dk, h, FoulKind::Pushing);
         }
         // Moving a man who had his position is a foul, the more so the
         // further he was moved.
         let shove = POST_SHOVE + POST_SHOVE_RATE * (gained - POST_PAR).clamp(0.0, 1.1);
-        if self.rng.chance(shove.min(0.9) / CALL_BASE) && self.called(1.0) {
+        let pushed = self.rng.chance(shove.min(0.9) / CALL_BASE);
+        if self.call(pushed, 1.0, FoulKind::PostPushOff, (o, h), (1 - o, dk)) {
             return self.offensive_foul(h, dk, FoulKind::PostPushOff);
         }
         // Travels and three seconds.
@@ -3545,6 +4196,7 @@ impl Game {
             Style::Dunk => 1.0,
             Style::Layup => LIFT_LAYUP,
             Style::Hook | Style::Fadeaway => 0.4,
+            Style::Floater => 0.55,
             Style::Jumper => {
                 if kind == ShotKind::Three {
                     LIFT_JUMPER - 0.05
@@ -3656,7 +4308,11 @@ impl Game {
                 / CALL_BASE;
             self.rng.chance(raw.min(0.95))
         });
-        let fouled = contact && self.called(1.0);
+        let o = self.play.o;
+        let fouled = match near {
+            Some(dk) => self.call(contact, 1.0, FoulKind::Shooting, (1 - o, dk), (o, h)),
+            None => false,
+        };
         let assist = self
             .play
             .assist
@@ -3695,10 +4351,17 @@ impl Game {
         let rim = matches!(style, Style::Layup | Style::Dunk) || kind == ShotKind::Rim;
         let (lat, depth) = shot::base(style, rim, d);
         let comp = self.oe(h, Attr::Composure) - 10.0;
+        // Taking it to the rim at a full sprint off a break: the faster he
+        // comes the less of the finish is his to place.
+        let sprint = if self.play.live_origin && self.play.t < BREAK_SECONDS {
+            SPRINT_ERR * (self.m[self.play.o][h].vel.len() - SPRINT_FROM).max(0.0)
+        } else {
+            0.0
+        };
         let mut m = if style == Style::Dunk {
             // The hand carries it through: only a body in the way, or the
             // top of his reach, spoils it.
-            1.0 + DUNK_CONTEST * c + DUNK_EDGE * (0.15 - reach_edge).max(0.0)
+            1.0 + DUNK_CONTEST * c + DUNK_EDGE * (0.15 - reach_edge).max(0.0) + sprint
         } else if rim {
             let finish = 0.6 * self.oe(h, Attr::CloseShot)
                 + 0.2 * self.oe(h, Attr::Vertical)
@@ -3708,6 +4371,7 @@ impl Game {
             });
             (1.0 - FINISH_SLOPE * (finish - 10.0)).clamp(0.4, 2.0)
                 * (1.0 + CONTEST_RIM * c * (1.0 + GUARD_SLOPE * (protect - 10.0)).max(0.3))
+                * (1.0 + sprint)
         } else {
             let touch = if kind == ShotKind::Three {
                 self.oe(h, Attr::ThreePoint)
@@ -3894,6 +4558,7 @@ impl Game {
         };
         let flown = ball::fly(Ball { p: start, v: launch }, &hands[..nh]);
         let made = flown.made;
+        let ruled = self.call_count(kind, p, h, made);
         let blocker = flown.blocked.map(|(dk, _)| dk);
 
         if made || !fouled {
@@ -3904,10 +4569,20 @@ impl Game {
             }
         }
         let who = self.oid(h);
+        // A shot in the first seconds of a possession that began on a live ball
+        // is a transition shot, whether it came off a run or an early set.
+        let source = if self.play.live_origin
+            && self.play.t < BREAK_SECONDS
+            && !matches!(self.play.source, Source::Putback | Source::Forced)
+        {
+            Source::Transition
+        } else {
+            self.play.source
+        };
         let event = EventKind::Shot {
             who,
             kind,
-            source: self.play.source,
+            source,
             made,
             contest: c_takeoff,
             defender: near_takeoff.map(|dk| self.did(dk)),
@@ -3932,6 +4607,7 @@ impl Game {
         let mut foul_shots = 0;
         if fouled && let Some(dk) = near_takeoff {
             let shots = if made { 1 } else { kind.points() };
+            self.shot_info(made, kind == ShotKind::Three);
             self.defensive_foul(dk, h, shots as u8, FoulKind::Shooting);
             if !made {
                 foul_shots = shots;
@@ -3974,6 +4650,7 @@ impl Game {
                 assist: assist.filter(|_| made),
                 and_one: fouled,
                 foul_shots,
+                ruled,
                 line: false,
             },
             path: Some(path),
@@ -4102,6 +4779,12 @@ impl Game {
                 if matches!(self.play.phase, Phase::Advance) && self.op(to).y < 10.6 {
                     self.play.phase = Phase::Set;
                 }
+                if self.play.brk {
+                    // Caught on the run: he looks up and goes on with it.
+                    self.play.phase = Phase::Advance;
+                    self.play.source = Source::Transition;
+                    self.play.think = 0.05;
+                }
                 None
             }
             FlightKind::Steal { to } => Some(End::Live(to)),
@@ -4112,6 +4795,7 @@ impl Game {
                 assist,
                 and_one,
                 foul_shots,
+                ruled,
                 line,
             } => {
                 let path = f.path.unwrap_or_else(Path::new);
@@ -4133,12 +4817,19 @@ impl Game {
                     }
                     return self.go_live(path, f.t, false);
                 }
-                let points = kind.points();
+                let points = if ruled > 0 { ruled } else { kind.points() };
                 let line = self.oline(shooter);
                 line.fgm += 1;
                 line.pts += points;
-                if kind == ShotKind::Three {
+                if points == 3 {
                     line.tpm += 1;
+                }
+                // The try was entered by where he stood; the count is the
+                // official's.
+                if points == 3 && kind != ShotKind::Three {
+                    line.tpa += 1;
+                } else if points != 3 && kind == ShotKind::Three {
+                    line.tpa = line.tpa.saturating_sub(1);
                 }
                 self.sides[self.play.o].score += points;
                 if let Some(a) = assist {
@@ -4649,7 +5340,10 @@ impl Game {
                 / CALL_BASE;
             self.rng.chance(raw.min(0.95))
         });
-        let fouled = contact && self.called(1.0);
+        let fouled = match near {
+            Some(dk) => self.call(contact, 1.0, FoulKind::Shooting, (1 - o, dk), (o, who)),
+            None => false,
+        };
         let m = if fouled {
             m * FOULED_ERR
         } else if contact {
@@ -4690,6 +5384,7 @@ impl Game {
             how: crate::replay::ShotHow::Set,
         });
         if fouled && let Some(dk) = near {
+            self.shot_info(made, false);
             self.defensive_foul(dk, who, if made { 1 } else { 2 }, FoulKind::Shooting);
         }
         self.cut_log(ts - a.t);
@@ -4735,21 +5430,25 @@ impl Game {
         self.cut_log(ts - a.t);
         self.play.after = None;
         let (bp, bz, _, _) = a.path.state(ts);
-        if self.play.def_touch {
-            // Off a defender: it is the attackers' ball still. Somebody
-            // brings it back to the nearest of them.
-            let k = (0..5)
-                .min_by(|&x, &y| self.op(x).dist(bp).total_cmp(&self.op(y).dist(bp)))
-                .unwrap_or(0);
+        let def_touch = self.call_touch(self.play.def_touch, bp, bz);
+        if def_touch {
+            // Off a defender: it is the attackers' ball still, and they take
+            // it in from the spot where it went out.
+            let at = v(bp.x.clamp(-HALF_WIDTH, HALF_WIDTH), bp.y.clamp(0.0, LENGTH));
             let mut path = Path::new();
-            path.push(flight::Arc::reach(bp, bz, self.op(k), 1.1, 1.0));
-            self.log_path(&path, 0.0, -(a.t - ts));
-            self.play.after = Some(After {
-                kind: AfterKind::Inbound { who: k },
-                path,
-                t: a.t - ts,
-                end: 1.0,
-            });
+            path.fall(
+                v(bp.x.clamp(-7.8, 7.8), bp.y.clamp(-0.3, LENGTH + 0.3)),
+                bz.max(BALL_RADIUS),
+                0.0,
+                Vec2::ZERO,
+            );
+            self.loose = Some((path, 0.0));
+            self.play.holder = None;
+            self.play.flight = None;
+            self.play.shot = None;
+            self.play.verdict = None;
+            self.play.shot_clock = self.play.shot_clock.max(14.0);
+            self.start_inbound(Some(at), false, None);
             return None;
         }
         let mut path = Path::new();
@@ -4786,7 +5485,10 @@ impl Game {
             let (side_k, other_k) = self.side_of(who);
             let mult = self.sides[side_k].foul_mult(self.sides[side_k].on[other_k]);
             let raw = REB_PUSH * held.min(2.0) * mult / CALL_BASE;
-            if self.rng.chance(raw.min(0.9)) && self.called(1.0) {
+            let pushed = self.rng.chance(raw.min(0.9));
+            let victim_idx = if who >= 5 { blocker.min(4) } else { blocker.saturating_sub(5) };
+            let (fouled_side, fouler_side) = (1 - side_k, side_k);
+            if self.call(pushed, 1.0, FoulKind::Pushing, (fouler_side, if who >= 5 { who - 5 } else { who }), (fouled_side, victim_idx)) {
                 if who >= 5 {
                     // A defender over the back: the offense keeps it, and it
                     // is the man he went through who has it.
@@ -4921,8 +5623,12 @@ impl Game {
             kind,
         });
         self.whistle_until = self.anim + WHISTLE_SHOWN;
+        let held = self.foul_booked(d, dk, h, shots, kind);
         let side = &self.sides[d];
-        if side.slots[side.on[dk]].line.pf >= self.rules.foul_limit {
+        if side.slots[side.on[dk]].line.pf >= self.rules.foul_limit && held {
+            // The call may yet be taken back; he leaves when it has stood.
+            self.hold_out(d, dk);
+        } else if side.slots[side.on[dk]].line.pf >= self.rules.foul_limit {
             let (elapsed, regulation, limit) =
                 (self.elapsed, self.regulation, self.rules.foul_limit);
             self.sides[d].replace(dk, elapsed, regulation, limit);
@@ -5072,19 +5778,23 @@ impl Game {
             } else {
                 CHARGE_SEV + CHARGE_IMPACT * impact
             };
-            if self.called(sev) {
-                if let Some(rec) = &mut self.rec {
-                    rec.charges[if planted { 0 } else { 1 }] += 1;
+            match self.call_collision(true, sev, h, dk) {
+                Some(FoulKind::Charging) => {
+                    if let Some(rec) = &mut self.rec {
+                        rec.charges[if planted { 0 } else { 1 }] += 1;
+                    }
+                    self.fall(d, dk, 1.5);
+                    return Some(self.offensive_foul(h, dk, FoulKind::Charging));
                 }
-                self.fall(d, dk, 1.5);
-                return Some(self.offensive_foul(h, dk, FoulKind::Charging));
+                // He was set, and the call went the other way.
+                Some(kind) => return Some(self.floor_foul(dk, h, kind)),
+                None => return None,
             }
-            return None;
         }
         // Not set: he may sell it.
         let urge = self.def().flop_urge(slot);
         if self.rng.chance(FLOP * urge * urge) {
-            if self.rng.chance(FOOLED * self.whistle) {
+            if self.buys_flop(h, dk) {
                 if let Some(rec) = &mut self.rec {
                     rec.charges[2] += 1;
                 }
@@ -5099,10 +5809,14 @@ impl Game {
             self.fall(d, dk, 1.5);
             return None;
         }
-        if self.called((BLOCK_SEV + BLOCK_IMPACT * impact) * mult) {
-            return Some(self.floor_foul(dk, h, FoulKind::Blocking));
+        match self.call_collision(false, (BLOCK_SEV + BLOCK_IMPACT * impact) * mult, h, dk) {
+            Some(FoulKind::Charging) => {
+                self.fall(d, dk, 1.5);
+                Some(self.offensive_foul(h, dk, FoulKind::Charging))
+            }
+            Some(kind) => Some(self.floor_foul(dk, h, kind)),
+            None => None,
         }
-        None
     }
 
     /// A foul by attacker `k` on defender `dk`: a turnover, and a personal.
@@ -5116,6 +5830,7 @@ impl Game {
             kind,
         });
         self.whistle_until = self.anim + WHISTLE_SHOWN;
+        self.offensive_booked(k, dk, kind);
         self.turnover(k, TurnoverKind::OffensiveFoul, None, 0.0)
     }
 
@@ -5146,6 +5861,7 @@ impl Game {
     /// takes them one by one. `ball` is where it is, if the shooter has not
     /// got it.
     fn free_throws(&mut self, h: usize, shots: u16, ball: Option<Vec2>) -> Option<End> {
+        self.ripen();
         self.assign_ft_spots(h);
         self.play.flight = None;
         self.play.after = None;
@@ -5333,6 +6049,7 @@ impl Game {
                 assist: None,
                 and_one: false,
                 foul_shots: 0,
+                ruled: 0,
                 line: true,
             },
             path: Some(path),
@@ -5629,6 +6346,11 @@ impl Game {
             whistle: self.anim < self.whistle_until,
             cut,
             swish,
+            officials: self.ofc.as_ref().map_or([Vec2::ZERO; 3], |o| o.pos),
+            whistler: self.ofc.as_ref().map_or(0, |o| match o.whistler {
+                Some((i, until)) if self.anim < until => i + 1,
+                _ => 0,
+            }),
         };
         if let Some(rec) = &mut self.rec {
             rec.frames.push(frame);
@@ -5697,6 +6419,11 @@ impl Play {
             hedge_until: 0.0,
             contained: false,
             hunt: None,
+            brk: false,
+            live_origin: false,
+            brk_logged: false,
+            go: [0.9; 5],
+            inb: None,
         }
     }
 }

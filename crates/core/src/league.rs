@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use crate::assistant::{self, Reason};
 use crate::command::{Command, CommandError};
 use crate::engine::{
-    BoxLine, GameResult, Lineup, LiveMatch, Orders, Pause, Reaction, Rules, Shout, simulate_game,
-    simulate_recorded,
+    BoxLine, GameResult, Lineup, LiveMatch, Orders, Pause, Reaction, Rules, Shout,
+    simulate_game_crewed, simulate_recorded_crewed,
 };
 use crate::inbox::Desk;
 use crate::player::{
@@ -252,6 +252,9 @@ pub struct World {
     /// Where each club has been lately; see `travel.rs`.
     #[serde(default)]
     pub travel: Vec<crate::travel::TeamTravel>,
+    /// The referees; see `officials.rs`.
+    #[serde(default)]
+    pub officials: crate::officials::Officials,
 }
 
 pub(crate) const CITIES: [&str; 20] = [
@@ -414,6 +417,7 @@ impl World {
             club: Default::default(),
             career: Default::default(),
             travel: Vec::new(),
+            officials: crate::officials::Officials::generate(seed, n_teams),
         };
         world.fixtures = schedule_tiers(&world.teams);
         world.date_fixtures();
@@ -548,13 +552,13 @@ impl World {
             .copied()
             .filter(|&i| i != fixture && self.fixtures[i].day == today)
             .collect();
-        let jobs: Vec<(TeamId, TeamId, u64, bool, Option<u32>)> = others
+        let jobs: Vec<SimJob> = others
             .iter()
             .map(|&i| {
                 let g = &self.fixtures[i];
                 let i_n = played.iter().position(|&j| j == i).unwrap_or(0);
                 let record = g.day == today || self.watch == Some(g.home) || self.watch == Some(g.away);
-                (g.home, g.away, seeds[i_n], record, Some(g.day))
+                (g.home, g.away, seeds[i_n], record, Some(g.day), self.crew_for(GameKey::League(i)))
             })
             .collect();
         let mut pre = Vec::new();
@@ -574,13 +578,16 @@ impl World {
                 || self.scout_wants(g.day, g.home, g.away);
             pre.push((i, result, recording.filter(|_| keep)));
         }
-        let game = LiveMatch::new(
+        let mut game = LiveMatch::new(
             &home,
             &away,
             &self.rules,
             Rng::new(seeds[n]),
             Some(side),
         );
+        if let Some(crew) = self.crew_for(GameKey::League(fixture)) {
+            game = game.crewed(&crew);
+        }
         Some(LiveRound {
             fixture,
             side,
@@ -698,19 +705,17 @@ impl World {
 
     /// Simulate a batch of games, in parallel when the feature is on.
     /// `record` says which are recorded for the viewer.
-    pub(crate) fn simulate_batch(
-        &self,
-        jobs: &[(TeamId, TeamId, u64, bool, Option<u32>)],
-    ) -> Vec<(GameResult, Option<Recording>)> {
-        let simulate = |&(home, away, seed, record, day): &(TeamId, TeamId, u64, bool, Option<u32>)| {
-            let (home, away) = self.lineups_for(home, away, day);
-            let rng = &mut Rng::new(seed);
+    pub(crate) fn simulate_batch(&self, jobs: &[SimJob]) -> Vec<(GameResult, Option<Recording>)> {
+        let simulate = |(home, away, seed, record, day, crew): &SimJob| {
+            let (home, away) = self.lineups_for(*home, *away, *day);
+            let rng = &mut Rng::new(*seed);
             // Recording does not change the result, only keeps it.
-            if record {
-                let (result, recording) = simulate_recorded(&home, &away, &self.rules, rng);
+            if *record {
+                let (result, recording) =
+                    simulate_recorded_crewed(&home, &away, &self.rules, rng, crew.as_ref());
                 (result, Some(recording))
             } else {
-                (simulate_game(&home, &away, &self.rules, rng), None)
+                (simulate_game_crewed(&home, &away, &self.rules, rng, crew.as_ref()), None)
             }
         };
         #[cfg(feature = "parallel")]
@@ -745,7 +750,7 @@ impl World {
             self.econ_round_start(&all);
         }
         self.econ_gates(&played);
-        let jobs: Vec<(TeamId, TeamId, u64, bool, Option<u32>)> = played
+        let jobs: Vec<SimJob> = played
             .iter()
             .zip(&seeds)
             .filter(|(i, _)| !pre.iter().any(|p| p.0 == **i))
@@ -754,7 +759,7 @@ impl World {
                 let record = self.watch == Some(f.home)
                     || self.watch == Some(f.away)
                     || self.scout_wants(f.day, f.home, f.away);
-                (f.home, f.away, seed, record, Some(f.day))
+                (f.home, f.away, seed, record, Some(f.day), self.crew_for(GameKey::League(i)))
             })
             .collect();
         let mut simulated = self.simulate_batch(&jobs).into_iter();
@@ -824,6 +829,7 @@ impl World {
             self.judge_coaches(i, &result);
             self.after_game(i, &result);
             self.fixtures[i].result = Some(result);
+            self.book_officials(i);
         }
         self.after_games(&played);
         self.send_off(&played);
@@ -926,6 +932,14 @@ impl World {
     }
 }
 
+/// A game to simulate: home, away, seed, whether it is recorded, the league
+/// day it is played on (for preparation) and the crew that works it.
+pub(crate) type SimJob = (TeamId, TeamId, u64, bool, Option<u32>, Option<crate::officials::Crew>);
+
+use crate::officials::GameKey;
+#[cfg(test)]
+use crate::engine::{simulate_game, simulate_recorded};
+
 /// How much of the round a played game takes with it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
@@ -982,6 +996,9 @@ pub enum Stoppage {
     /// The end of a period; `half` is half-time, `period` the one just
     /// played (1-based). After the last one, level, overtime is next.
     Break { period: u8, half: bool },
+    /// A call went against this side's bench: it may challenge, and that is
+    /// all it may do. Tactics, substitutions, timeouts and talk wait.
+    Review,
     /// The game is over.
     Final,
 }
@@ -994,7 +1011,7 @@ impl Stoppage {
             Stoppage::Timeout(_) => (1, 1),
             Stoppage::Break { half: true, .. } => (2, 4),
             Stoppage::Break { .. } => (1, 2),
-            Stoppage::Final => (0, 0),
+            Stoppage::Review | Stoppage::Final => (0, 0),
         }
     }
 
@@ -1006,7 +1023,7 @@ impl Stoppage {
             Stoppage::Timeout(_) => 60,
             Stoppage::Break { half: true, .. } => 600,
             Stoppage::Break { .. } => 120,
-            Stoppage::Final => 0,
+            Stoppage::Review | Stoppage::Final => 0,
         }
     }
 }
@@ -1026,6 +1043,11 @@ pub enum Refusal {
     WordsUsed,
     /// Not a player of this team.
     NotOnTheTeam,
+    /// A call is waiting for the bench's decision: only the challenge may
+    /// be done now.
+    ReviewOnly,
+    /// There is no call to challenge now (or the challenge is spent).
+    NothingToChallenge,
 }
 
 impl std::fmt::Display for Refusal {
@@ -1040,6 +1062,13 @@ impl std::fmt::Display for Refusal {
             Refusal::TeamTalkUsed => "You have given the team talk for this stoppage.",
             Refusal::WordsUsed => "You have used the words to players for this stoppage.",
             Refusal::NotOnTheTeam => "That player is not on your team.",
+            Refusal::ReviewOnly => {
+                "A call is under review: challenge it or let it stand. Nothing else can be done now."
+            }
+            Refusal::NothingToChallenge => {
+                "There is no call to challenge: the challenge is asked for at the stoppage after a \
+                 call against you, once per game."
+            }
         })
     }
 }
@@ -1066,6 +1095,9 @@ pub enum LiveInput {
         orders: Orders,
         familiarity: f32,
     },
+    /// Ask for a call to be reviewed. Legal only in the stoppage a
+    /// `Pause::Review` opened (see `LiveRound::try_input`).
+    Challenge,
     /// What one player is told to do with the ball.
     Brief {
         player: PlayerId,
@@ -1102,6 +1134,7 @@ impl LiveRound {
             let stop = match p {
                 Pause::Timeout(side) => Stoppage::Timeout(side),
                 Pause::Final => Stoppage::Final,
+                Pause::Review(_) => Stoppage::Review,
                 Pause::PeriodEnd => {
                     let period = self.game.result().periods.len().min(255) as u8;
                     let half = period as u32 * 2 == self.game.rules().periods as u32;
@@ -1109,10 +1142,14 @@ impl LiveRound {
                 }
             };
             self.stop = Some(stop);
-            self.talked = (0, 0);
-            self.stop_times = (self.stop_times.1, self.game.time());
-            for input in std::mem::take(&mut self.deferred) {
-                let _ = self.try_input(input);
+            // A review is a pause inside play, not a stoppage of its own: it
+            // gives no talks and leaves the waiting inputs waiting.
+            if stop != Stoppage::Review {
+                self.talked = (0, 0);
+                self.stop_times = (self.stop_times.1, self.game.time());
+                for input in std::mem::take(&mut self.deferred) {
+                    let _ = self.try_input(input);
+                }
             }
         }
         pause
@@ -1142,6 +1179,14 @@ impl LiveRound {
     pub fn check(&self, input: &LiveInput) -> Result<(), Refusal> {
         if self.stop == Some(Stoppage::Final) || self.game.is_over() {
             return Err(Refusal::GameOver);
+        }
+        if self.stop == Some(Stoppage::Review) && *input != LiveInput::Challenge {
+            return Err(Refusal::ReviewOnly);
+        }
+        if *input == LiveInput::Challenge
+            && !(self.stop == Some(Stoppage::Review) && self.game.review().is_some())
+        {
+            return Err(Refusal::NothingToChallenge);
         }
         if let LiveInput::Timeout = input
             && self.game.timeouts_left(self.side) == 0
@@ -1229,6 +1274,9 @@ impl LiveRound {
                 orders,
                 familiarity,
             } => self.game.set_orders(side, orders, familiarity),
+            LiveInput::Challenge => {
+                self.game.challenge(side);
+            }
         }
         self.inputs.push((self.steps, input));
         said
@@ -1571,8 +1619,11 @@ mod tests {
     /// Step to the next stoppage (or the end).
     fn to_stop(live: &mut LiveRound) -> Option<Pause> {
         while !live.game.is_over() {
-            if let Some(p) = live.step() {
-                return Some(p);
+            match live.step() {
+                // A call under review is not a stoppage for tactics or
+                // talk: stepping on lets it stand.
+                None | Some(Pause::Review(_)) => {}
+                Some(p) => return Some(p),
             }
         }
         None
@@ -1929,7 +1980,9 @@ mod tests {
         assert!(rec.frames.windows(2).all(|f| f[0].time <= f[1].time));
         for f in &rec.frames {
             for p in f.pos.iter().flatten() {
-                assert!((0.0..=28.0).contains(&p.x) && (0.0..=15.0).contains(&p.y));
+                // On the court, bar the man taking the ball out of bounds, who
+                // stands up to two metres behind a line.
+                assert!((-2.0..=30.0).contains(&p.x) && (-2.0..=17.0).contains(&p.y));
             }
         }
         // Every point on the scoreboard is in the event log.

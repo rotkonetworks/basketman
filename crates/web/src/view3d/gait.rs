@@ -1125,6 +1125,8 @@ mod tests {
             whistle: false,
             cut: false,
             swish: false,
+            officials: Default::default(),
+            whistler: 0,
         }
     }
 

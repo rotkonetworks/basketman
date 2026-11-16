@@ -1,6 +1,6 @@
 //! Finding the moments that matter in a recording, for the screenshot harness:
-//! the n-th made three, missed jumper, layup, dunk, block, rebound or free
-//! throw. Returns the replay time the moment starts at.
+//! the n-th made three, missed jumper, layup, dunk, block, rebound, steal or
+//! free throw. Returns the replay time the moment starts at.
 
 use basketman_core::court::ShotKind;
 use basketman_core::replay::{Action, Dribble, EventKind, Footwork, Recording, ShotStage, Style};
@@ -132,6 +132,33 @@ pub(crate) fn moments(rec: &Recording, what: &str) -> Vec<f32> {
                 _ => None,
             })
             .collect(),
+        // The ball is picked off or stripped and the other team has it.
+        "steal" => rec
+            .events
+            .iter()
+            .filter_map(|e| match e.kind {
+                EventKind::Turnover {
+                    stolen_by: Some(_), ..
+                } => Some(e.time),
+                _ => None,
+            })
+            .collect(),
+        // A whistle: the first frame of each run with an arm up.
+        "whistle" => rec
+            .frames
+            .windows(2)
+            .filter(|w| w[1].whistler > 0 && w[0].whistler == 0)
+            .map(|w| w[1].time)
+            .collect(),
+        // A challenge, as it was made.
+        "review" => rec
+            .events
+            .iter()
+            .filter_map(|e| match e.kind {
+                EventKind::Review { .. } => Some(e.time),
+                _ => None,
+            })
+            .collect(),
         "ft" => rec
             .events
             .iter()
@@ -180,6 +207,9 @@ pub(crate) fn viewpoint(
     let len = (toward.0 * toward.0 + toward.1 * toward.1).sqrt().max(0.5);
     let (ux, uy) = (toward.0 / len, toward.1 / len);
     Some(match how {
+        // The whole floor from the side, high enough to see the lanes: a
+        // break is five against five along twenty-eight metres.
+        "broadcast" => (v3(14.0, -15.0, 11.0), v3(14.0, 7.5, 0.0)),
         "behind" => (
             v3(bx - ux * 5.0, by - uy * 5.0 + 0.6, 2.6),
             v3(hoop.0, hoop.1, 2.3),
