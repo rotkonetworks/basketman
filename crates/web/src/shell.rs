@@ -336,6 +336,27 @@ pub(crate) fn tab_row(ui: &mut Ui, tabs: &[&str], current: usize, narrow: bool) 
     } else {
         30.0
     };
+    // Sideways on a phone the tabs may not all fit: they scroll instead.
+    if theme::side() && ui.available_width() / (tabs.len().max(1) as f32) < 68.0 {
+        let mut hit = None;
+        egui::ScrollArea::horizontal()
+            .id_salt(("tab_scroll", tabs.join("/")))
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    for (i, label) in tabs.iter().enumerate() {
+                        let b = egui::Button::selectable(i == current, *label)
+                            .min_size(vec2(0.0, h));
+                        if ui.add(b).clicked() {
+                            hit = Some(i);
+                        }
+                    }
+                });
+            });
+        ui.add_space(6.0);
+        return hit;
+    }
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::hover());
     let each = rect.width() / tabs.len().max(1) as f32;
     for (i, label) in tabs.iter().enumerate() {

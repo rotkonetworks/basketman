@@ -659,7 +659,7 @@ impl App {
         if prefs.score && level < 2 {
             let w = 280.0f32.min(free_right - screen.left() - 2.0 * SAFE);
             let (cx, y) = if narrow_top {
-                ((screen.left() + free_right) / 2.0, top + 44.0 + 4.0)
+                ((screen.left() + free_right) / 2.0, top + 52.0)
             } else {
                 let from = screen.left() + SAFE + CLUSTER_W + 10.0;
                 ((from + free_right) / 2.0, top)

@@ -64,7 +64,14 @@ impl App {
         let cols = columns(narrow);
         let row_h = if narrow { 44.0 } else { 34.0 };
         ui.horizontal(|ui| {
-            theme::eyebrow(ui, &format!("First team / {} players", order.len()));
+            theme::eyebrow(
+                ui,
+                &if theme::side() {
+                    format!("{} players", order.len())
+                } else {
+                    format!("First team / {} players", order.len())
+                },
+            );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .add(egui::Button::new("Full table"))
