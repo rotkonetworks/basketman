@@ -2478,7 +2478,9 @@ impl Game {
             Phase::Gather { at, off_dribble } => {
                 // The verdict is in as his feet leave the floor.
                 let up = self.play.shot.is_none_or(|s| self.play.t >= s.jump_at);
-                if up && self.play.verdict.is_none() {
+                // A foul can only be called on a shot that will be released
+                // before the horn.
+                if up && self.play.verdict.is_none() && self.clock > (at - self.play.t).max(0.0) {
                     self.play.verdict = Some(self.verdict(h, off_dribble));
                 }
                 if self.play.t >= at {
@@ -3201,7 +3203,10 @@ impl Game {
     /// passer reads it from the hands around the lane.
     fn pass_risk(&self, h: usize, j: usize) -> f32 {
         let kind = self.pass_kind(h, j);
-        self.lane_risk(h, j, kind)
+        // A man who has been in the lane for most of his three seconds is
+        // not a man to throw it to: he has to leave.
+        let camping = if self.play.lane[j] > 1.6 { 0.4 } else { 0.0 };
+        self.lane_risk(h, j, kind) + camping
     }
 
     /// The teammate with the best look, if it beats `bar` expected points.

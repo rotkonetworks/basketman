@@ -48,6 +48,8 @@ impl Game {
             || self.play.holder != Some(h)
             || self.play.dead > 0.0
             || self.play.throw.is_some()
+            || self.play.shot.is_some_and(|s| self.play.t >= s.start)
+            || matches!(self.play.phase, Phase::Gather { .. } | Phase::Air | Phase::Line { .. })
         {
             self.poke = Poke::NONE;
             return None;
