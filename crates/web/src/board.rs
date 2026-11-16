@@ -6,23 +6,23 @@ use basketman_core::court::{THREE_RADIUS, Vec2, v};
 use basketman_core::health::{SERIOUS, medical};
 use basketman_core::player::{PlayerId, Position};
 use basketman_core::staff::{Job, Staffer};
-use basketman_core::tactics::{BOARD_ROLES, Board, DefenseScheme, Press, Tactics};
-use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Ui, vec2};
+use basketman_core::tactics::{Board, DefenseScheme};
+use eframe::egui::{self, Color32, Pos2, Rect, RichText, Stroke, Ui, vec2};
 
 use crate::app::{App, GAP, header_row, money, name, rating};
 use crate::pages::dim;
 use crate::theme::{self, Backdrop};
 
 /// Metres of court shown from the baseline out.
-const DEPTH: f32 = 12.6;
-const BOARD: Color32 = Color32::from_rgb(0xF4, 0xEE, 0xDC);
-const CHALK: Color32 = Color32::from_rgb(0x8C, 0x86, 0x78);
+pub(crate) const DEPTH: f32 = 12.6;
+pub(crate) const BOARD: Color32 = Color32::from_rgb(0xF4, 0xEE, 0xDC);
+pub(crate) const CHALK: Color32 = Color32::from_rgb(0x8C, 0x86, 0x78);
 
 pub(crate) fn surname(full: &str) -> &str {
     full.rsplit(' ').next().unwrap_or(full)
 }
 
-fn arrow(painter: &egui::Painter, from: Pos2, to: Pos2, color: Color32) {
+pub(crate) fn arrow(painter: &egui::Painter, from: Pos2, to: Pos2, color: Color32) {
     let d = to - from;
     let len = d.length();
     if len < 6.0 {
@@ -61,17 +61,27 @@ impl Half {
     }
 }
 
-/// Lay out and draw the half court, `width` points wide.
-pub(crate) fn half_court(ui: &mut Ui, width: f32) -> (Half, egui::Painter) {
-    let scale = width / 15.0;
-    let (rect, _) = ui.allocate_exact_size(vec2(width, DEPTH * scale), Sense::hover());
-    let half = Half { rect, scale };
+impl Half {
+    /// The largest half court that fits `area`, centred in it.
+    pub fn fit(area: Rect) -> Half {
+        let scale = (area.width() / 15.0).min(area.height() / DEPTH).max(1.0);
+        let size = vec2(15.0 * scale, DEPTH * scale);
+        Half {
+            rect: Rect::from_center_size(area.center(), size),
+            scale,
+        }
+    }
+}
+
+/// Draw the floor of a half court: the board, the lane, the free-throw
+/// circle, the basket and the arc.
+pub(crate) fn paint_court(painter: &egui::Painter, half: &Half) {
+    let scale = half.scale;
+    let rect = half.rect;
     let at = |p: Vec2| half.at(p);
-    let painter = ui.painter_at(rect.expand(2.0));
-    let line = Stroke::new(1.5, CHALK);
+    let line = Stroke::new(if scale < 20.0 { 1.2 } else { 1.5 }, CHALK);
     painter.rect_filled(rect, 6.0, BOARD);
     painter.rect_stroke(rect, 6.0, line, egui::StrokeKind::Inside);
-    // Lane, free-throw circle, basket.
     painter.rect_stroke(
         Rect::from_min_max(
             at(v(-KEY_HALF_WIDTH, 0.0)),
@@ -84,7 +94,6 @@ pub(crate) fn half_court(ui: &mut Ui, width: f32) -> (Half, egui::Painter) {
     painter.circle_stroke(at(v(0.0, KEY_DEPTH)), FT_RADIUS * scale, line);
     painter.line_segment([at(v(-0.9, 1.2)), at(v(0.9, 1.2))], Stroke::new(3.0, CHALK));
     painter.circle_stroke(at(HOOP), 0.23 * scale, Stroke::new(2.0, theme::WARN));
-    // Three-point line: straight in the corners, then the arc.
     let top = (CORNER_X / THREE_RADIUS).asin();
     let mut arc = vec![at(v(-CORNER_X, 0.0))];
     for i in 0..=40 {
@@ -97,13 +106,12 @@ pub(crate) fn half_court(ui: &mut Ui, width: f32) -> (Half, egui::Painter) {
     arc.push(at(v(CORNER_X, 0.0)));
     let _ = CORNER_Y;
     painter.add(egui::Shape::line(arc, line));
-    (half, painter)
 }
 
 /// Where the five defenders of a scheme stand against a given offensive
 /// set. The zones are the engine's resting shapes; man to man, switching
 /// and the pack line follow the five attackers.
-fn shape(t: &Tactics, spots: &[Vec2; 5]) -> [Vec2; 5] {
+pub(crate) fn shape(scheme: DefenseScheme, spots: &[Vec2; 5]) -> [Vec2; 5] {
     let man = |on: f32, off: f32, near: f32| {
         let mut out = [Vec2::ZERO; 5];
         for (k, a) in spots.iter().enumerate() {
@@ -118,7 +126,7 @@ fn shape(t: &Tactics, spots: &[Vec2; 5]) -> [Vec2; 5] {
         }
         out
     };
-    match t.defense {
+    match scheme {
         DefenseScheme::Zone23 => [
             v(-2.3, 6.9),
             v(2.3, 6.9),
@@ -139,142 +147,10 @@ fn shape(t: &Tactics, spots: &[Vec2; 5]) -> [Vec2; 5] {
 }
 
 /// Radius of the pack line, metres from the basket.
-const PACK: f32 = 5.6;
-
-/// How a defense sets up: the five defenders drawn in the shape of the
-/// scheme. A picture of the scheme, not of anything the engine played.
-pub(crate) fn defense_diagram(ui: &mut Ui, t: &Tactics, width: f32) {
-    let board = t.layout();
-    let guards_men = !matches!(t.defense, DefenseScheme::Zone23 | DefenseScheme::Zone32);
-    let defenders = shape(t, &board.spots);
-    let (half, painter) = half_court(ui, width);
-    let r = half.token();
-    let at = |p: Vec2| half.at(p);
-    let chalk = Stroke::new(1.5, CHALK);
-
-    // The ground each defender is responsible for, in a zone.
-    if !guards_men {
-        for d in defenders {
-            painter.circle_filled(at(d), 1.9 * half.scale, theme::ACCENT.gamma_multiply(0.08));
-            painter.circle_stroke(
-                at(d),
-                1.9 * half.scale,
-                Stroke::new(1.0, theme::ACCENT.gamma_multiply(0.35)),
-            );
-        }
-    }
-    if t.defense == DefenseScheme::PackLine {
-        let pts: Vec<Pos2> = (0..=64)
-            .map(|i| {
-                let a = std::f32::consts::PI * i as f32 / 64.0;
-                at(v(PACK * a.cos(), HOOP.y + PACK * a.sin()))
-            })
-            .collect();
-        painter.extend(egui::Shape::dashed_line(
-            &pts,
-            Stroke::new(2.0, theme::ACCENT),
-            7.0,
-            5.0,
-        ));
-        painter.text(
-            at(v(PACK * 0.72, HOOP.y + PACK * 0.72)) + vec2(8.0, 0.0),
-            Align2::LEFT_CENTER,
-            "pack line",
-            FontId::proportional(12.0),
-            theme::ACCENT,
-        );
-    }
-
-    // The attackers, faint: who they are set up against.
-    for (i, a) in board.spots.iter().enumerate() {
-        let c = at(*a);
-        if guards_men {
-            painter.extend(egui::Shape::dashed_line(
-                &[at(defenders[i]), c],
-                chalk,
-                4.0,
-                4.0,
-            ));
-        }
-        painter.circle_filled(c, r * 0.85, BOARD);
-        painter.circle_stroke(c, r * 0.85, Stroke::new(1.5, theme::TEXT_MUTE));
-        painter.text(
-            c,
-            Align2::CENTER_CENTER,
-            (i + 1).to_string(),
-            FontId::new(12.0, theme::mono_semibold()),
-            theme::TEXT_MUTE,
-        );
-        if i == 0 {
-            painter.circle_filled(c + vec2(r * 0.8, -r * 0.8), 5.0, theme::WARN);
-        }
-    }
-    // Switching: the men on the screen swap.
-    if t.defense == DefenseScheme::SwitchEverything {
-        let (a, b) = (at(defenders[0]), at(defenders[4]));
-        let u = (b - a).normalized();
-        arrow(&painter, a + u * (r + 2.0), b - u * (r + 2.0), theme::WARN);
-        arrow(&painter, b - u * (r + 2.0), a + u * (r + 2.0), theme::WARN);
-    }
-    for (i, d) in defenders.iter().enumerate() {
-        let c = at(*d);
-        painter.circle_filled(c, r, theme::ACCENT);
-        painter.circle_stroke(c, r, Stroke::new(1.5, Color32::WHITE));
-        painter.text(
-            c,
-            Align2::CENTER_CENTER,
-            (i + 1).to_string(),
-            FontId::new(13.0, theme::mono_semibold()),
-            Color32::WHITE,
-        );
-    }
-    if t.press != Press::None {
-        let text = format!("{} press", t.press.label().to_lowercase());
-        painter.text(
-            half.rect.right_bottom() - vec2(10.0, 8.0),
-            Align2::RIGHT_BOTTOM,
-            text,
-            FontId::new(12.0, theme::semibold()),
-            theme::WARN,
-        );
-    }
-
-    ui.add_space(8.0);
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = 14.0;
-        ui.label(theme::eyebrow_text("How the scheme sets up"));
-        ui.label(
-            RichText::new("Purple: your defenders.")
-                .color(theme::ACCENT)
-                .strong(),
-        );
-        ui.label(dim("Grey: five attackers, ball in orange."));
-    });
-    ui.label(
-        RichText::new(format!(
-            "{}. {}",
-            t.defense.label(),
-            scheme_shape(t.defense)
-        ))
-        .color(theme::TEXT),
-    );
-    match t.press {
-        Press::None => {}
-        Press::ThreeQuarter => {
-            ui.label(dim(
-                "Press on: they pick the ball up before half court, then fall back into this shape.",
-            ));
-        }
-        Press::FullCourt => {
-            ui.label(dim(
-                "Press on: they pick the ball up from the baseline, then fall back into this shape.",
-            ));
-        }
-    }
-}
+pub(crate) const PACK: f32 = 5.6;
 
 /// What the picture of a scheme shows.
-fn scheme_shape(d: DefenseScheme) -> &'static str {
+pub(crate) fn scheme_shape(d: DefenseScheme) -> &'static str {
     match d {
         DefenseScheme::ManToMan => {
             "Each defender stays between his own man and the basket. The man with the ball is \
@@ -300,190 +176,6 @@ fn scheme_shape(d: DefenseScheme) -> &'static str {
 }
 
 impl App {
-    /// The coach's board: the half court with the five where the set puts
-    /// them, or how the defense sets up. Drag a man to move him; in draw
-    /// mode drag from a man to give him a run. Click a man to select him.
-    pub(crate) fn board_card(&mut self, ui: &mut Ui, bd: &Backdrop, slot: usize) {
-        let tactics = self.world.teams[self.team].playbook[slot].tactics.clone();
-        let cast = tactics.cast(&self.world.players);
-        let mut board = tactics.layout();
-        let before = board.clone();
-        let drawn = tactics
-            .board
-            .as_ref()
-            .is_some_and(|b| b.set == tactics.offense);
-        let mut drawing = self.room.drawing;
-        let mut with_ball = self.room.with_ball;
-
-        bd.card(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal_wrapped(|ui| {
-                ui.selectable_value(&mut with_ball, true, "With the ball");
-                ui.selectable_value(&mut with_ball, false, "Without the ball");
-                ui.add_space(8.0);
-                if with_ball {
-                    theme::eyebrow(ui, &format!("{}", tactics.offense.label()));
-                    ui.label(dim(if drawn {
-                        "your drawing"
-                    } else {
-                        "the stock set"
-                    }));
-                } else {
-                    theme::eyebrow(ui, tactics.defense.label());
-                }
-            });
-            ui.add_space(6.0);
-            if !with_ball {
-                let width = ui.available_width().min(720.0);
-                defense_diagram(ui, &tactics, width);
-                return;
-            }
-            ui.horizontal_wrapped(|ui| {
-                ui.selectable_value(&mut drawing, false, "Move players");
-                ui.selectable_value(&mut drawing, true, "Draw runs");
-                ui.add_space(10.0);
-                if ui
-                    .add_enabled(
-                        board.runs.iter().any(Option::is_some),
-                        egui::Button::new("Clear runs"),
-                    )
-                    .clicked()
-                {
-                    board.runs = [None; 5];
-                }
-                if ui
-                    .add_enabled(drawn, egui::Button::new("Back to the stock set"))
-                    .clicked()
-                {
-                    board = Board::stock(tactics.offense);
-                }
-            });
-            ui.label(dim(if drawing {
-                "Drag from a player to where he should run once the ball is over. Click a player \
-                 to rub his run out. A run into the lane is a cut: called on some possessions, \
-                 and he clears out again if the ball does not find him."
-            } else {
-                "Drag a player to where he should stand when the ball comes over half court, or \
-                 click him to pick him out. The team runs it to either side."
-            }));
-            ui.add_space(8.0);
-
-            let (half, painter) = half_court(ui, ui.available_width().min(720.0));
-            let at = |p: Vec2| half.at(p);
-            let r = half.token();
-
-            // Runs first, so the men sit on top of their arrows.
-            for i in 0..5 {
-                if let Some(to) = board.runs[i] {
-                    let (a, b) = (at(board.spots[i]), at(to));
-                    let u = (b - a).normalized();
-                    arrow(&painter, a + u * (r + 2.0), b, theme::ACCENT);
-                }
-            }
-            for i in 0..5 {
-                let c = at(board.spots[i]);
-                let id = ui.scope_id().with(("board_man", i));
-                let hit = ui.interact(
-                    Rect::from_center_size(c, vec2(r * 2.4, r * 2.4)),
-                    id,
-                    Sense::click_and_drag(),
-                );
-                let player = cast[i].map(|p| &self.world.players[p as usize]);
-                let hit = hit.on_hover_text(format!(
-                    "{}: {}",
-                    BOARD_ROLES[i],
-                    player.map_or("whoever is on the floor", |p| p.name.as_str())
-                ));
-                if hit.dragged() {
-                    if drawing {
-                        if let Some(p) = hit.interact_pointer_pos() {
-                            board.runs[i] = Some(half.back(p));
-                        }
-                    } else {
-                        board.spots[i] = half.back(c + hit.drag_delta());
-                    }
-                }
-                if hit.clicked() && drawing {
-                    board.runs[i] = None;
-                }
-                if (hit.clicked() || hit.drag_started()) && cast[i].is_some() {
-                    self.room.selected = cast[i];
-                }
-                let selected = cast[i].is_some() && cast[i] == self.room.selected;
-                if selected {
-                    painter.circle_filled(c, r + 7.0, theme::ACCENT.gamma_multiply(0.18));
-                    painter.circle_stroke(c, r + 5.0, Stroke::new(2.5, theme::ACCENT));
-                }
-                let fill = if selected || hit.hovered() || hit.dragged() {
-                    theme::ACCENT
-                } else {
-                    theme::TEXT
-                };
-                painter.circle_filled(c, r, fill);
-                // His position at the top of the token, or the number of the
-                // place when nobody stands there.
-                let slot_pos = player.and_then(|p| {
-                    let s = tactics.rotation.iter().find(|s| s.player == p.id)?;
-                    Some(s.position.unwrap_or(p.position))
-                });
-                painter.text(
-                    c,
-                    Align2::CENTER_CENTER,
-                    slot_pos.map_or((i + 1).to_string(), |p| p.label().to_string()),
-                    FontId::new(r * 0.78, theme::mono_semibold()),
-                    Color32::WHITE,
-                );
-                if let Some(p) = player {
-                    // A first initial when two of the five share a surname.
-                    let twin = cast.iter().flatten().any(|&o| {
-                        o != p.id
-                            && surname(&self.world.players[o as usize].name) == surname(&p.name)
-                    });
-                    let shown = match p.name.split_once(' ') {
-                        Some((first, _)) if twin => format!(
-                            "{}. {}",
-                            first.chars().next().unwrap_or(' '),
-                            surname(&p.name)
-                        ),
-                        _ => surname(&p.name).to_string(),
-                    };
-                    painter.text(
-                        c + vec2(0.0, r + 3.0),
-                        Align2::CENTER_TOP,
-                        shown,
-                        if selected {
-                            FontId::new(13.0, theme::semibold())
-                        } else {
-                            FontId::proportional(13.0)
-                        },
-                        if selected { theme::ACCENT } else { theme::TEXT },
-                    );
-                }
-            }
-
-            ui.add_space(8.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 16.0;
-                for i in 0..5 {
-                    let who =
-                        cast[i].map_or("-", |p| surname(&self.world.players[p as usize].name));
-                    ui.label(
-                        theme::mono(format!("{} {}", i + 1, BOARD_ROLES[i])).color(theme::TEXT_DIM),
-                    )
-                    .on_hover_text(format!("Expected at tip-off: {who}"));
-                }
-            });
-        });
-
-        self.room.drawing = drawing;
-        self.room.with_ball = with_ball;
-        if board != before {
-            let mut tactics = self.world.teams[self.team].playbook[slot].tactics.clone();
-            tactics.draw(board);
-            let _ = self.world.apply(Command::SetTactics { slot, tactics });
-        }
-    }
-
     /// Your coaches and scouts, what each is doing for you, and who is
     /// looking for work.
     pub(crate) fn staff_page(&mut self, ui: &mut Ui, bd: &Backdrop) {

@@ -1,11 +1,14 @@
 //! Headless season runner: `basketman [seed] [clubs per division] [divisions]`, or
 //! `basketman lab [games]` for the tactics matrix.
 //! Used to eyeball stat distributions while tuning the engine.
+//! `basketman balance` measures whether tactics are balanced (docs/balance.md).
 //! `basketman play` is the line-delimited JSON protocol for agents and
 //! `basketman mcp` the same as an MCP server; see docs/agents.md.
 
 mod agent;
+mod balance;
 mod export;
+mod feeds;
 mod lab;
 mod mcp;
 mod play;
@@ -79,6 +82,10 @@ fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("play") => return play::run(),
         Some("mcp") => return mcp::run(),
+        Some("balance") => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            return balance::run(&rest);
+        }
         _ => {}
     }
     let mut args = std::env::args().skip(1);

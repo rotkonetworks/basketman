@@ -22,7 +22,7 @@ pub(crate) fn home_court(seeds: std::ops::RangeInclusive<u64>) -> (f32, f32, usi
 }
 
 #[test]
-#[ignore]
+#[ignore = "a measurement that prints numbers; run with --ignored --nocapture"]
 fn measure_home_court() {
     let (win, margin, games) = home_court(1..=12);
     eprintln!("HOME COURT: {games} games, home win {:.1}%, home margin {margin:+.2}", win * 100.0);
@@ -235,7 +235,7 @@ fn prep_world(seed: u64, boost: f32) -> (f32, f32, f32, f32, usize) {
 }
 
 #[test]
-#[ignore]
+#[ignore = "a measurement that prints numbers; run with --ignored --nocapture"]
 fn measure_prep_edge() {
     let boost: f32 = std::env::var("BOOST").ok().and_then(|s| s.parse().ok()).unwrap_or(crate::prep::PREP_BELIEF);
     let seeds: Vec<u64> = (1..=16).collect();
@@ -459,7 +459,7 @@ fn career_home_court(seeds: std::ops::RangeInclusive<u64>, travel: bool) -> (usi
 }
 
 #[test]
-#[ignore]
+#[ignore = "a measurement that prints numbers; run with --ignored --nocapture"]
 fn measure_career_home_court() {
     for travel in [false, true] {
         let (g, wins, m) = career_home_court(1..=24, travel);
@@ -669,7 +669,7 @@ fn what_the_scout_sees_of_the_next_opponent_can_be_acted_on() {
 /// A digest of a managed season with the scout out every day and
 /// preparation set, to compare between the serial and parallel builds.
 #[test]
-#[ignore]
+#[ignore = "a measurement that prints numbers; run with --ignored --nocapture"]
 fn career_digest() {
     let mut w = career(21, 14);
     for slot in [6usize, 7] {
@@ -683,4 +683,66 @@ fn career_digest() {
         h = (h ^ b as u64).wrapping_mul(0x100000001b3);
     }
     eprintln!("CAREER DIGEST {h:016x} reports {}", w.scouting.opponent_reports.len());
+}
+
+#[test]
+fn a_live_day_and_an_instant_day_give_the_same_world_with_scout_prep_and_travel() {
+    use crate::league::Scope;
+    let mut w = World::new_career(11, 12);
+    w.apply(Command::TakeCharge(0)).unwrap();
+    w.teams[0].office.staff[Job::Scout as usize].as_mut().unwrap().judgement = 18;
+    // A report on a club, and preparation set.
+    let day = crate::calendar::FRIENDLY_DAYS[0];
+    let opp = w.friendlies.iter().find(|f| f.day == day && f.home != 0 && f.away != 0).unwrap().home;
+    with_report(&mut w, opp, (true, true));
+    prep_sessions(&mut w, 4);
+    // On to the first league day of ours.
+    while !w.match_today() {
+        w.apply(Command::Continue).unwrap();
+    }
+    // The scout goes to another club's game today.
+    assert!(send_scout_today(&mut w), "another game today to watch");
+    let reports = w.scouting.opponent_reports.len();
+    let mut instant = w.clone();
+    let mut live = w.clone();
+    let mut late = w.clone();
+    instant.apply(Command::PlayToday).unwrap();
+    let mine = live.user_fixture();
+    let run = |w: &mut World, clear: bool| {
+        let me = w.watch.unwrap();
+        let mut round = w.kickoff_scoped(me, Scope::Day).unwrap();
+        if clear {
+            round.pre.clear();
+            round.around.clear();
+        }
+        while !round.game.is_over() {
+            round.step();
+        }
+        w.full_time(round)
+    };
+    let played = run(&mut live, false);
+    run(&mut late, true);
+    assert!(played.len() > 1);
+    for &i in played.iter().filter(|&&i| Some(i) != mine) {
+        assert_eq!(
+            serde_json::to_string(&instant.fixtures[i].result).unwrap(),
+            serde_json::to_string(&live.fixtures[i].result).unwrap(),
+            "fixture {i}"
+        );
+    }
+    let state = |w: &World| {
+        let mut w = w.clone();
+        w.log.clear();
+        w.replay = None;
+        w.tapes.clear();
+        serde_json::to_string(&w).unwrap()
+    };
+    assert_eq!(state(&late), state(&live));
+    assert_eq!(live.scouting.opponent_reports.len(), reports + 1, "the scouted game was written up");
+    assert_eq!(instant.scouting.opponent_reports.len(), reports + 1);
+    assert_eq!(
+        serde_json::to_string(&instant.scouting.opponent_reports.last()).unwrap(),
+        serde_json::to_string(&live.scouting.opponent_reports.last()).unwrap(),
+        "the same report either way"
+    );
 }

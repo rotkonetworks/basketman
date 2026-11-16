@@ -280,8 +280,30 @@ def main():
         check(not st["over"] and len(st["players"]["yours"]) >= 8, "kickoff state")
         _, err = p.try_call("advance")
         check(err and err.kind == "live_match_open", "world is locked during a live game")
+        _, err = p.try_call("live_feeds")
+        check(err and err.kind == "refused", "no feeds before the game has started")
         st = p.call("live_step", seconds=90)
         check(st["time"] > 0 and st["steps"] > 0, "stepped")
+        check(isinstance(st["assistant_notes"], list), "live state carries the assistant's notes")
+        st = p.call("live_step", seconds=600)
+        feeds = p.call("live_feeds")
+        sc = feeds["scores"]
+        check(len(sc["games"]) >= 2 and sc["games"][0]["yours"], "other games of the day are listed, ours first")
+        check(all(g["status"] in ("live", "final") for g in sc["games"]), "games have a status")
+        rows = sc["table"]["rows"]
+        check(rows and all(r["place"] == i + 1 for i, r in enumerate(rows)), "live table is ordered")
+        check(any(r["ours"] for r in rows) and "lines" in sc["table"], "the table has our row and its lines")
+        check(feeds["flow"]["four_factors"]["yours"]["counts"]["fga"] > 0, "four factors count shots")
+        check(len(feeds["flow"]["matchups"]) == 5, "a matchup for each of the five")
+        shots = p.call("live_feeds", part="shots")
+        check(shots["count"] > 5 and len(shots["zones"]) == 4, "shot list and zones")
+        bad = [s for s in shots["shots"] if not (-8 < s["x"] < 8 and -1 < s["y"] < 15)]
+        # Only a buzzer-beating heave from past half way may sit outside it.
+        check(all(s.get("source") == "Forced" and s["clock"] < 2 for s in bad), f"shots have places on the half court: {bad}")
+        mine = p.call("live_feeds", part="shots", side="yours", period=1)
+        check(0 < mine["count"] < shots["count"] and all(s["side"] == "yours" and s["period"] == 1 for s in mine["shots"]), "shot filters")
+        _, err = p.try_call("live_feeds", part="nonsense")
+        check(err and err.kind == "bad_request", "unknown part refused")
         st = p.call("live_input", input="Timeout")
         check(st["timeout_wanted"], "timeout requested")
         on = [q for q in st["players"]["yours"] if q["on_court"]][0]["id"]

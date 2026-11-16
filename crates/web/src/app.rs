@@ -174,7 +174,7 @@ pub struct App {
     /// `--screenshot <file> [tab]`: render a few frames, save one, quit.
     /// Lets the look be reviewed without a person at the window.
     #[cfg(not(target_arch = "wasm32"))]
-    shot: Option<(std::path::PathBuf, u32)>,
+    pub(crate) shot: Option<(std::path::PathBuf, u32)>,
 }
 
 pub(crate) fn money(v: i64) -> String {
@@ -516,7 +516,13 @@ impl App {
                 for _ in 0..days.unwrap_or(0) {
                     if std::env::var("SHOT_SCOUT").is_ok() {
                         let (me, day) = (app.team, app.world.day);
-                        for t in 0..app.world.teams.len() {
+                        // Our next opponent first, then anybody.
+                        let next = app.world.user_fixture().map(|i| {
+                            let f = &app.world.fixtures[i];
+                            if f.home == me { f.away } else { f.home }
+                        });
+                        let order = next.into_iter().chain(0..app.world.teams.len());
+                        for t in order {
                             if t != me {
                                 let cmd = Command::AssignScout { team: t, day };
                                 if app.world.apply(cmd).is_ok() {
@@ -799,7 +805,12 @@ impl App {
                 {
                     use basketman_core::engine::Shout;
                     use basketman_core::league::LiveInput;
-                    while live.game.time() < 420.0 {
+                    // `SHOT_LIVE_TO=1500` plays that many seconds first.
+                    let to: f32 = std::env::var("SHOT_LIVE_TO")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(420.0);
+                    while live.game.time() < to && !live.game.is_over() {
                         live.step();
                     }
                     let side = live.side;
@@ -818,6 +829,10 @@ impl App {
                     app.touchline.off = bench.iter().filter(|p| p.on_court).nth(2).map(|p| p.id);
                     app.playback.time = live.game.time();
                     app.live = Some(live);
+                }
+                // `SHOT_DRAWER=scores|shots|flow|box|feed` opens that tab.
+                if let Ok(d) = std::env::var("SHOT_DRAWER") {
+                    app.sh.hud.pick(&d);
                 }
             }
         }

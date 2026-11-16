@@ -340,6 +340,43 @@ impl App {
         });
         ui.add_space(GAP);
 
+        // Where the shots were taken, for both teams.
+        if let (Some((_, rec)), Some(result)) = (
+            self.world.replay.as_ref(),
+            self.world.fixtures[fixture].result.as_ref(),
+        ) {
+            let f = &self.world.fixtures[fixture];
+            let teams = [
+                self.world.teams[f.home].name.clone(),
+                self.world.teams[f.away].name.clone(),
+            ];
+            let ctx = crate::matchview::FeedCtx {
+                world: &self.world,
+                rec,
+                result,
+                fixture,
+                me: side,
+                time: f32::MAX,
+                live: None,
+                colors: [theme::ACCENT, theme::TEXT],
+                teams: &teams,
+                wall: ui.input(|i| i.time),
+                film: true,
+            };
+            let feeds = &mut self.sh.hud.feeds;
+            feeds.sync(&ctx);
+            // Closed to begin with: the clips are what the room is for.
+            egui::CollapsingHeader::new(RichText::new("Shot chart and zones").strong().color(theme::TEXT))
+                .default_open(false)
+                .show(ui, |ui| feeds.shots_tab(ui, bd, &ctx));
+            // A tap on a shot sets the replay to it.
+            if let Some(t) = feeds.jump.take() {
+                self.playback.time = t;
+                self.playback.playing = false;
+            }
+        }
+        ui.add_space(GAP);
+
         // The lists and the court.
         let mut picked: Option<(List, usize)> = None;
         let current = state.clip;

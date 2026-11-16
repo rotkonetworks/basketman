@@ -72,6 +72,8 @@ struct Live {
     round: LiveRound,
     coach: Option<Coach>,
     team: TeamId,
+    /// What the assistant has noticed (see `feeds`).
+    notes: crate::feeds::Notes,
 }
 
 #[derive(Default)]
@@ -304,6 +306,13 @@ impl Session {
             "live_state" => Ok(self.live_state()?),
             "live_step" => self.live_step(a),
             "live_input" => self.live_input(a),
+            "live_feeds" => {
+                let w = self.world()?;
+                let live = self.live.as_ref().ok_or_else(|| {
+                    AgentError::new("no_live_match", "no live match: use kickoff")
+                })?;
+                crate::feeds::report(w, &live.round, live.team, &live.notes, a)
+            }
             "live_finish" => self.live_finish(),
             "ping" => Ok(json!("pong")),
             other => Err(AgentError::new(
@@ -638,6 +647,7 @@ impl Session {
             round,
             coach,
             team: me,
+            notes: Default::default(),
         });
         self.live_state()
     }
@@ -711,6 +721,7 @@ impl Session {
             "foul_bonus_after": w.rules.bonus_after,
             "standing_rules": live.coach.is_some(),
             "rules_fired": rules_fired,
+            "assistant_notes": crate::feeds::recent(w, &live.round, live.team, &live.notes, 3),
             "team": live.team,
         }))
     }
@@ -744,6 +755,7 @@ impl Session {
                 None => live.round.step(),
             };
             n += 1;
+            live.notes.watch(w, &live.round);
             if let Some(p) = p {
                 paused = pause_name(p, me);
                 break;

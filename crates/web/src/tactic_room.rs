@@ -4,8 +4,11 @@
 
 use basketman_core::command::Command;
 use basketman_core::player::{Attr, Player, PlayerId, Position};
+use basketman_core::fit::{Choice, Proposal, place_needs};
+use basketman_core::scrimmage::{Row, Scrimmage};
 use basketman_core::tactics::{
-    BOARD_ROLES, Brief, DefenseScheme, MAX_TACTICS, OffenseSet, Press, Role, RotationSlot,
+    BOARD_ROLES, Board, Brief, DefenseScheme, MAX_TACTICS, OffenseSet, Press, Role, RotationSlot,
+    Tactics,
 };
 use eframe::egui::{
     self, Align, Align2, FontId, Layout, Rect, RichText, Sense, Ui, UiBuilder, vec2,
@@ -23,16 +26,77 @@ pub(crate) enum RoomView {
     Film,
 }
 
+/// How a drag on the board is read.
+#[derive(Copy, Clone, PartialEq, Default)]
+pub(crate) enum Tool {
+    /// Drag a player to where he starts.
+    #[default]
+    Move,
+    /// Drag from a player to where he runs.
+    Cut,
+    /// Tap the screener, then the man he screens for.
+    Screen,
+}
+
+/// A scrimmage being watched, possession by possession.
+pub(crate) struct Playback {
+    pub scrim: Scrimmage,
+    /// The possession on the board and the seconds into it.
+    pub idx: usize,
+    pub t: f32,
+    pub paused: bool,
+    pub speed: f32,
+    /// Seconds the end of a possession has been held.
+    pub hold: f32,
+    /// What it was run with, so a change of tactics retires it.
+    pub with: Tactics,
+    pub rows: Vec<Row>,
+}
+
+/// Rectangles of the parts of the screen the tour points at, as last drawn.
+#[derive(Copy, Clone, Default)]
+pub(crate) struct Spots {
+    pub board: Option<Rect>,
+    pub lines: Option<Rect>,
+    pub cards: Option<Rect>,
+    pub run: Option<Rect>,
+    pub help: Option<Rect>,
+    pub question: Option<Rect>,
+}
+
 /// What the Tactics tab remembers between frames.
 pub(crate) struct Room {
     pub view: RoomView,
     /// The board shows the offense (true) or how the defense sets up.
     pub with_ball: bool,
-    /// Drawing runs on the board rather than moving players.
-    pub drawing: bool,
     /// The player picked out on the board or in the squad list.
     pub selected: Option<PlayerId>,
     pub film: crate::film::FilmState,
+    pub tool: Tool,
+    /// Boards before each edit, newest last, for Undo.
+    pub history: Vec<Board>,
+    /// The first player tapped for a screen.
+    pub tap: Option<usize>,
+    /// The card under the pointer, shown on the board before it is chosen.
+    pub hover: Option<Choice>,
+    pub hover_next: Option<Choice>,
+    /// A choice shown on the board until cleared (the harness).
+    pub pinned: Option<Choice>,
+    /// The drawing tools are open.
+    pub edit: bool,
+    /// The offense the defense is shown against, when it is not the
+    /// opponent's own.
+    pub sample: Option<OffenseSet>,
+    /// Test against a sample club rather than the next opponent.
+    pub vs_sample: bool,
+    /// Show the opponent's defense on the board.
+    pub show_them: bool,
+    pub play: Option<Playback>,
+    pub proposal: Option<Proposal>,
+    /// The tour step open, if any.
+    pub tour: Option<usize>,
+    pub tour_checked: bool,
+    pub spots: Spots,
 }
 
 impl Default for Room {
@@ -40,9 +104,23 @@ impl Default for Room {
         Room {
             view: RoomView::Board,
             with_ball: true,
-            drawing: false,
             selected: None,
             film: Default::default(),
+            tool: Tool::Move,
+            history: Vec::new(),
+            tap: None,
+            hover: None,
+            hover_next: None,
+            pinned: None,
+            edit: false,
+            sample: None,
+            vs_sample: false,
+            show_them: true,
+            play: None,
+            proposal: None,
+            tour: None,
+            tour_checked: false,
+            spots: Spots::default(),
         }
     }
 }
@@ -151,52 +229,8 @@ fn brief_note(b: Brief) -> &'static str {
     }
 }
 
-/// What each place on the board asks of the man who stands there.
 fn place_note(place: usize) -> (&'static str, &'static [Attr]) {
-    match place {
-        0 => (
-            "Brings the ball up and starts the offense. He needs to handle pressure and find the open man.",
-            &[Attr::Handling, Attr::Passing, Attr::Iq, Attr::Speed],
-        ),
-        1 => (
-            "A second ball handler and a shooter on the perimeter who can also guard quick men.",
-            &[
-                Attr::ThreePoint,
-                Attr::Handling,
-                Attr::PerimeterD,
-                Attr::Footwork,
-                Attr::Speed,
-            ],
-        ),
-        2 => (
-            "Spaces the floor, shoots off the pass and runs the break.",
-            &[
-                Attr::ThreePoint,
-                Attr::MidRange,
-                Attr::PerimeterD,
-                Attr::Speed,
-            ],
-        ),
-        3 => (
-            "Between the perimeter and the paint: scores, rebounds and switches onto either.",
-            &[
-                Attr::MidRange,
-                Attr::CloseShot,
-                Attr::DefRebound,
-                Attr::Strength,
-            ],
-        ),
-        _ => (
-            "Protects the rim, rebounds and finishes close to the basket.",
-            &[
-                Attr::InteriorD,
-                Attr::DefRebound,
-                Attr::Block,
-                Attr::CloseShot,
-                Attr::Footwork,
-            ],
-        ),
-    }
+    place_needs(place)
 }
 
 fn nominal_place(p: Position) -> usize {
@@ -427,8 +461,11 @@ impl App {
             ui.add_space(4.0);
             let width = ui.available_width();
             // Where each column starts, from the left edge of a row.
-            let (x_pos, x_ovr, x_min, x_cond, x_act) =
-                (132.0, 160.0, 188.0, 222.0, (width - 128.0).max(276.0));
+            let (x_pos, x_ovr, x_min, x_cond, x_act) = if width < 404.0 {
+                (118.0, 146.0, 172.0, 204.0, width - 88.0)
+            } else {
+                (132.0, 160.0, 188.0, 222.0, (width - 128.0).max(276.0))
+            };
             let header = |ui: &mut Ui, title: &str| {
                 let (rect, _) = ui.allocate_exact_size(vec2(width, 18.0), Sense::hover());
                 for (x, text) in [
@@ -512,18 +549,20 @@ impl App {
                 at(ui, cell(x_act, width - x_act), &mut |ui| {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
-                        if ui
-                            .add_enabled(can_remove, egui::Button::new("Drop").small())
-                            .on_hover_text("Take him out of the rotation. At least five stay.")
-                            .clicked()
-                        {
-                            remove = Some(i);
-                        }
                         let swap_with = match sel_index {
                             Some(s) if s < 5 && i >= 5 => Some((s, i, "Swap in")),
                             Some(s) if s >= 5 && i < 5 => Some((i, s, "Swap out")),
                             _ => None,
                         };
+                        // On a phone the row has room for one button.
+                        if !(width < 404.0 && swap_with.is_some())
+                            && ui
+                                .add_enabled(can_remove, egui::Button::new("Drop").small())
+                                .on_hover_text("Take him out of the rotation. At least five stay.")
+                                .clicked()
+                        {
+                            remove = Some(i);
+                        }
                         if let Some((a, b, label)) = swap_with {
                             let incoming = &players[t.rotation[b].player as usize];
                             let fit = incoming.injury.is_none();
