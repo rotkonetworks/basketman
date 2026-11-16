@@ -461,8 +461,11 @@ impl App {
             ui.add_space(4.0);
             let width = ui.available_width();
             // Where each column starts, from the left edge of a row.
-            let (x_pos, x_ovr, x_min, x_cond, x_act) =
-                (132.0, 160.0, 188.0, 222.0, (width - 128.0).max(276.0));
+            let (x_pos, x_ovr, x_min, x_cond, x_act) = if width < 404.0 {
+                (118.0, 146.0, 172.0, 204.0, width - 88.0)
+            } else {
+                (132.0, 160.0, 188.0, 222.0, (width - 128.0).max(276.0))
+            };
             let header = |ui: &mut Ui, title: &str| {
                 let (rect, _) = ui.allocate_exact_size(vec2(width, 18.0), Sense::hover());
                 for (x, text) in [
@@ -546,18 +549,20 @@ impl App {
                 at(ui, cell(x_act, width - x_act), &mut |ui| {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
-                        if ui
-                            .add_enabled(can_remove, egui::Button::new("Drop").small())
-                            .on_hover_text("Take him out of the rotation. At least five stay.")
-                            .clicked()
-                        {
-                            remove = Some(i);
-                        }
                         let swap_with = match sel_index {
                             Some(s) if s < 5 && i >= 5 => Some((s, i, "Swap in")),
                             Some(s) if s >= 5 && i < 5 => Some((i, s, "Swap out")),
                             _ => None,
                         };
+                        // On a phone the row has room for one button.
+                        if !(width < 404.0 && swap_with.is_some())
+                            && ui
+                                .add_enabled(can_remove, egui::Button::new("Drop").small())
+                                .on_hover_text("Take him out of the rotation. At least five stay.")
+                                .clicked()
+                        {
+                            remove = Some(i);
+                        }
                         if let Some((a, b, label)) = swap_with {
                             let incoming = &players[t.rotation[b].player as usize];
                             let fit = incoming.injury.is_none();

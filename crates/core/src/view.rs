@@ -29,6 +29,7 @@ use crate::legal::{Waiting, waiting};
 use crate::player::{Attr, Body, Player, PlayerId, Position};
 use crate::sponsor::slot_name;
 use crate::staff::Job;
+use crate::fit::{self, Choice, Group};
 use crate::tactics::Tactics;
 use crate::training::Schedule;
 
@@ -545,6 +546,20 @@ pub struct TacticView {
     pub active: bool,
     pub familiarity_pct: u8,
     pub tactics: Tactics,
+    /// How well the five who start suit each offense, defense and press
+    /// (0..=100, with the reason), worked out from their attributes.
+    pub fits: Vec<FitView>,
+}
+
+/// One choice and how well the squad fits it.
+#[derive(Clone, Debug, Serialize)]
+pub struct FitView {
+    pub kind: &'static str,
+    pub choice: &'static str,
+    pub chosen: bool,
+    pub score: u8,
+    pub verdict: &'static str,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -602,6 +617,10 @@ pub struct OwnClub {
     pub squad: Vec<PlayerView>,
     pub reserves: Vec<PlayerView>,
     pub playbook: Vec<TacticView>,
+    /// What the assistant would set up for the tactic in use, from fit and
+    /// the matchup against the next opponent (no test possessions here;
+    /// the app's Help me choose plays those too).
+    pub assistant_proposal: Option<fit::Proposal>,
     pub training: TrainingView,
     pub staff: Vec<StaffRow>,
     pub gm: GmView,
@@ -1541,8 +1560,28 @@ impl World {
                     active: i == team.active,
                     familiarity_pct: pct(s.familiarity()),
                     tactics: s.tactics.clone(),
+                    fits: [Group::Offense, Group::Defense, Group::Press]
+                        .into_iter()
+                        .flat_map(Group::choices)
+                        .map(|c| {
+                            let f = c.fit(&s.tactics, &self.players);
+                            FitView {
+                                kind: match c {
+                                    Choice::Offense(_) => "offense",
+                                    Choice::Defense(_) => "defense",
+                                    _ => "press",
+                                },
+                                choice: c.title(),
+                                chosen: c.is_on(&s.tactics),
+                                score: f.score,
+                                verdict: f.verdict(),
+                                reason: f.reason,
+                            }
+                        })
+                        .collect(),
                 })
                 .collect(),
+            assistant_proposal: Some(fit::propose(self, club, team.active, false)),
             training: TrainingView {
                 schedule: team.schedule.clone(),
                 delegated_to_assistant: team.delegate_training,

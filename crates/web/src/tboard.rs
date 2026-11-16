@@ -8,6 +8,8 @@ use basketman_core::fit::{Mark, next_opponent, place_fit, sample_opponent, scout
 use basketman_core::player::{Attr, PlayerId};
 use basketman_core::scrimmage::{self, Focus, Outcome, Setup};
 use basketman_core::tactics::{BOARD_ROLES, Board, DefenseScheme};
+#[cfg(test)]
+use basketman_core::tactics::OffenseSet;
 use eframe::egui::{self, Align2, pos2, Color32, FontId, Pos2, Rect, RichText, Sense, Shape, Stroke, Ui, vec2};
 
 use crate::app::App;
@@ -944,5 +946,33 @@ impl App {
         if stop {
             self.room.play = None;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_screen_puts_a_body_between_the_man_and_the_basket() {
+        let mut b = Board::stock(OffenseSet::Motion);
+        let (user, screener) = (1, 4);
+        let me = b.spots[user];
+        set_screen(&mut b, screener, user);
+        assert!(b.spots[screener].dist(HOOP) < me.dist(HOOP));
+        assert!(b.spots[screener].dist(me) < 1.5);
+        assert!(b.runs[user].is_some() && b.runs[screener].is_some());
+        // Still on the floor.
+        assert_eq!(Board::clamp(b.spots[screener]), b.spots[screener]);
+    }
+
+    #[test]
+    fn the_board_fits_its_area_and_keeps_the_court_shape() {
+        let h = Half::fit(Rect::from_min_size(pos2(0.0, 0.0), vec2(500.0, 300.0)));
+        assert!(h.rect.height() <= 300.0 + 0.01 && h.rect.width() <= 500.0 + 0.01);
+        let ratio = h.rect.width() / h.rect.height();
+        assert!((ratio - 15.0 / 12.6).abs() < 0.01);
+        let p = v(1.5, 4.0);
+        assert!(h.back(h.at(p)).dist(p) < 0.01);
     }
 }

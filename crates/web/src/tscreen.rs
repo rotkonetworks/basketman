@@ -201,12 +201,24 @@ impl App {
             }).size(12.5));
         }
         if !with_ball {
+            let shown = sample.map_or("their offense", |o| o.label());
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 ui.label(dim("Against").size(12.5));
-                ui.selectable_value(&mut sample, None, "their offense");
-                for o in OffenseSet::ALL {
-                    ui.selectable_value(&mut sample, Some(o), o.label());
+                if narrow {
+                    egui::ComboBox::from_id_salt("sample_offense")
+                        .selected_text(shown)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut sample, None, "their offense");
+                            for o in OffenseSet::ALL {
+                                ui.selectable_value(&mut sample, Some(o), o.label());
+                            }
+                        });
+                } else {
+                    ui.selectable_value(&mut sample, None, "their offense");
+                    for o in OffenseSet::ALL {
+                        ui.selectable_value(&mut sample, Some(o), o.label());
+                    }
                 }
             });
         }

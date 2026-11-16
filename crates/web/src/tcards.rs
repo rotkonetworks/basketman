@@ -304,9 +304,7 @@ impl App {
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if on {
-                        ui.label(dim("Chosen"));
-                    } else if ui.button("Use this").clicked() {
+                    if !on && ui.button("Use this").clicked() {
                         use_it = true;
                     }
                 });
