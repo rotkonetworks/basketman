@@ -14,6 +14,7 @@ use crate::engine::GameResult;
 use crate::inbox::Kind;
 use crate::league::{TeamId, World};
 use crate::player::PlayerId;
+use crate::rng::Rng;
 
 /// Where belief settles with nothing happening.
 const NEUTRAL: f32 = 0.55;
@@ -23,6 +24,8 @@ pub enum Topic {
     AfterWin,
     AfterLoss,
     BeforeBig,
+    /// A wrong call decided the game against us.
+    BadCall,
 }
 
 /// A question from the press, and what the manager said.
@@ -231,6 +234,11 @@ impl World {
                 "Criticise the performance".to_string(),
                 format!("Say {who} let the team down"),
             ],
+            Topic::BadCall => [
+                "Say nothing about the officials".to_string(),
+                "Say, politely, that the calls were wrong".to_string(),
+                "Go for the referee".to_string(),
+            ],
             Topic::BeforeBig => [
                 "\"We are going there to win\"".to_string(),
                 "\"We respect them and fear nobody\"".to_string(),
@@ -291,6 +299,42 @@ impl World {
         }
     }
 
+    /// The press after a game a wrong call decided against the user's club:
+    /// by the film, the margin was smaller than the points the wrong calls
+    /// gave the other side.
+    pub(crate) fn press_bad_call(&mut self, day: u32, fixture: usize) {
+        let Some(me) = self.watch else { return };
+        let f = &self.fixtures[fixture];
+        let Some(r) = &f.result else { return };
+        let side = if f.home == me { 0 } else { 1 };
+        let Some(o) = &r.officiating else { return };
+        let Some(winner) = o.decided_for(r.score) else { return };
+        if winner as usize == side {
+            return;
+        }
+        let who = o
+            .notable
+            .iter()
+            .filter(|c| c.verdict().is_wrong() && c.gains as usize != side)
+            .map(|c| c.by as usize)
+            .next()
+            .and_then(|b| self.officials.get(o.crew[b.min(2)]))
+            .map(|r| r.name.clone())
+            .unwrap_or_else(|| "the officials".into());
+        let (us, them) = (r.score[side], r.score[1 - side]);
+        self.ask(
+            day,
+            Topic::BadCall,
+            None,
+            format!("Press: {us}-{them}, and the officials"),
+            format!(
+                "\"Coach, {them}-{us}, and the replays show some calls that went against you, \
+                 {who}'s among them. What do you say about the officiating?\"\n\nThe players, \
+                 the supporters and the board will read it, and so may the league office."
+            ),
+        );
+    }
+
     /// The press before a game against one of the top three.
     pub(crate) fn press_before(&mut self, opp: TeamId, rank: usize) {
         if self.round < 3 || rank > 3 {
@@ -336,6 +380,7 @@ impl World {
         };
         let belief = self.teams[me].belief;
         let squad = self.teams[me].roster.clone();
+        let mut fined: Option<i64> = None;
         let mut shift = 0.0;
         let mut total = 0.0;
         let mut each = |w: &mut World, f: &dyn Fn(&crate::player::Player, bool) -> f32| {
@@ -395,6 +440,29 @@ impl World {
                 });
                 shift = if belief >= 0.7 { 0.0 } else { -0.025 };
             }
+            (Topic::BadCall, 0) => {}
+            (Topic::BadCall, 1) => {
+                each(self, &|_, _| 0.012);
+                self.fans_move(me, crate::fans::C_MOVES, 0.002);
+            }
+            (Topic::BadCall, _) => {
+                // The players like a coach who fights for them; the board
+                // and the league office do not like it as much.
+                each(self, &|_, _| 0.03);
+                shift = if belief >= 0.35 { 0.012 } else { 0.0 };
+                self.fans_move(me, crate::fans::C_MOVES, 0.004);
+                let (season, round_now) = (self.season, self.round as u16);
+                let b = &mut self.club.clubs[me].board;
+                b.confidence = (b.confidence - 1.5).clamp(0.0, 100.0);
+                b.push_reason(season, round_now, -1.5, "Unhappy that you attacked the referee in public.");
+                // The league office may fine him: one time in three.
+                let mut rng = Rng::new(self.econ.seed ^ 0x0FF1CE ^ ((self.season as u64) << 24) ^ i as u64);
+                if rng.chance(0.34) {
+                    let fine = 4_000 * (3 - self.teams[me].division.min(2)) as i64;
+                    self.transact(me, -fine, crate::finance::Cat::Other);
+                    fined = Some(fine);
+                }
+            }
             (Topic::BeforeBig, 0) => {
                 each(self, &|_, _| 0.015);
                 self.desk.pledge = Some(Pledge { round, bold: true });
@@ -432,6 +500,9 @@ impl World {
                 self.players[p as usize].mood().to_lowercase()
             );
             let _ = m;
+        }
+        if let Some(fine) = fined {
+            outcome += &format!(" The league office fined the club {}.", crate::inbox::money(fine));
         }
         if let Some(extra) = self.press_fame(topic, choice, about, i) {
             outcome += &extra;

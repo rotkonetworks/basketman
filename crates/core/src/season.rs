@@ -604,6 +604,7 @@ impl World {
 
         self.after_retirements();
         let n = self.teams.len();
+        self.officials_new_season();
         self.season += 1;
         self.round = 0;
         self.day = 0;

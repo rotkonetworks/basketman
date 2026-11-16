@@ -36,6 +36,7 @@ pub mod live_feed;
 pub mod legal;
 pub mod media;
 pub mod observations;
+pub mod officials;
 pub mod ops;
 pub mod opponent;
 pub mod player;

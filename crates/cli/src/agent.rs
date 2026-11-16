@@ -155,6 +155,7 @@ fn stop_name(s: Stop) -> &'static str {
 fn pause_name(p: Pause, me: usize) -> Value {
     match p {
         Pause::Timeout(s) => json!({"timeout": if s == me { "you" } else { "opponent" }}),
+        Pause::Review(_) => json!("review"),
         Pause::PeriodEnd => json!("period_end"),
         Pause::Final => json!("final"),
     }
@@ -723,7 +724,42 @@ impl Session {
             "rules_fired": rules_fired,
             "assistant_notes": crate::feeds::recent(w, &live.round, live.team, &live.notes, 3),
             "team": live.team,
+            "officials": self.officials_json(w, live),
         }))
+    }
+
+    /// The crew, what each side has left to challenge with, and a call
+    /// waiting to be challenged.
+    fn officials_json(&self, w: &World, live: &Live) -> Value {
+        let g = &live.round.game;
+        let side = live.round.side;
+        let crew: Vec<Value> = g
+            .crew()
+            .map(|c| {
+                c.ids()
+                    .iter()
+                    .filter_map(|&id| w.officials.get(id))
+                    .map(|r| json!({"name": r.name, "tags": r.tags()}))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let review = g.review().map(|r| {
+            json!({
+                "call": r.call_text(|p| w.players[p as usize].name.as_str()),
+                "period": r.period + 1,
+                "seconds_left": r.clock.round(),
+                "assistant": r.opinion.words(),
+                "challenges_left": r.left,
+                "timeouts_left": r.timeouts,
+                "how": "send the live input \"Challenge\" now, or step on to let it stand; a lost challenge costs a timeout",
+            })
+        });
+        json!({
+            "crew": crew,
+            "challenges_left": g.challenges_left(side),
+            "challenged": g.calls().iter().any(|c| c.review.is_some_and(|r| r.by as usize == side)),
+            "review": review,
+        })
     }
 
     fn live_step(&mut self, a: &Value) -> Res {
@@ -839,6 +875,12 @@ impl Session {
                 .any(|v| !(1..=20).contains(v)) =>
             {
                 return Err(AgentError::new("out_of_range", "sliders run from 1 to 20"));
+            }
+            LiveInput::Challenge if live.round.game.review().is_none() => {
+                return Err(AgentError::new(
+                    "refused",
+                    "there is no call to challenge: wait for a review pause",
+                ));
             }
             LiveInput::Timeout
                 if live.round.game.timeouts_left(side) == 0

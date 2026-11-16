@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use crate::assistant::{self, Reason};
 use crate::command::{Command, CommandError};
 use crate::engine::{
-    BoxLine, GameResult, Lineup, LiveMatch, Orders, Pause, Reaction, Rules, Shout, simulate_game,
-    simulate_recorded,
+    BoxLine, GameResult, Lineup, LiveMatch, Orders, Pause, Reaction, Rules, Shout,
+    simulate_game_crewed, simulate_recorded_crewed,
 };
 use crate::inbox::Desk;
 use crate::player::{
@@ -252,6 +252,9 @@ pub struct World {
     /// Where each club has been lately; see `travel.rs`.
     #[serde(default)]
     pub travel: Vec<crate::travel::TeamTravel>,
+    /// The referees; see `officials.rs`.
+    #[serde(default)]
+    pub officials: crate::officials::Officials,
 }
 
 pub(crate) const CITIES: [&str; 20] = [
@@ -414,6 +417,7 @@ impl World {
             club: Default::default(),
             career: Default::default(),
             travel: Vec::new(),
+            officials: crate::officials::Officials::generate(seed, n_teams),
         };
         world.fixtures = schedule_tiers(&world.teams);
         world.date_fixtures();
@@ -548,13 +552,13 @@ impl World {
             .copied()
             .filter(|&i| i != fixture && self.fixtures[i].day == today)
             .collect();
-        let jobs: Vec<(TeamId, TeamId, u64, bool, Option<u32>)> = others
+        let jobs: Vec<SimJob> = others
             .iter()
             .map(|&i| {
                 let g = &self.fixtures[i];
                 let i_n = played.iter().position(|&j| j == i).unwrap_or(0);
                 let record = g.day == today || self.watch == Some(g.home) || self.watch == Some(g.away);
-                (g.home, g.away, seeds[i_n], record, Some(g.day))
+                (g.home, g.away, seeds[i_n], record, Some(g.day), self.crew_for(GameKey::League(i)))
             })
             .collect();
         let mut pre = Vec::new();
@@ -574,13 +578,16 @@ impl World {
                 || self.scout_wants(g.day, g.home, g.away);
             pre.push((i, result, recording.filter(|_| keep)));
         }
-        let game = LiveMatch::new(
+        let mut game = LiveMatch::new(
             &home,
             &away,
             &self.rules,
             Rng::new(seeds[n]),
             Some(side),
         );
+        if let Some(crew) = self.crew_for(GameKey::League(fixture)) {
+            game = game.crewed(&crew);
+        }
         Some(LiveRound {
             fixture,
             side,
@@ -694,19 +701,17 @@ impl World {
 
     /// Simulate a batch of games, in parallel when the feature is on.
     /// `record` says which are recorded for the viewer.
-    pub(crate) fn simulate_batch(
-        &self,
-        jobs: &[(TeamId, TeamId, u64, bool, Option<u32>)],
-    ) -> Vec<(GameResult, Option<Recording>)> {
-        let simulate = |&(home, away, seed, record, day): &(TeamId, TeamId, u64, bool, Option<u32>)| {
-            let (home, away) = self.lineups_for(home, away, day);
-            let rng = &mut Rng::new(seed);
+    pub(crate) fn simulate_batch(&self, jobs: &[SimJob]) -> Vec<(GameResult, Option<Recording>)> {
+        let simulate = |(home, away, seed, record, day, crew): &SimJob| {
+            let (home, away) = self.lineups_for(*home, *away, *day);
+            let rng = &mut Rng::new(*seed);
             // Recording does not change the result, only keeps it.
-            if record {
-                let (result, recording) = simulate_recorded(&home, &away, &self.rules, rng);
+            if *record {
+                let (result, recording) =
+                    simulate_recorded_crewed(&home, &away, &self.rules, rng, crew.as_ref());
                 (result, Some(recording))
             } else {
-                (simulate_game(&home, &away, &self.rules, rng), None)
+                (simulate_game_crewed(&home, &away, &self.rules, rng, crew.as_ref()), None)
             }
         };
         #[cfg(feature = "parallel")]
@@ -741,7 +746,7 @@ impl World {
             self.econ_round_start(&all);
         }
         self.econ_gates(&played);
-        let jobs: Vec<(TeamId, TeamId, u64, bool, Option<u32>)> = played
+        let jobs: Vec<SimJob> = played
             .iter()
             .zip(&seeds)
             .filter(|(i, _)| !pre.iter().any(|p| p.0 == **i))
@@ -750,7 +755,7 @@ impl World {
                 let record = self.watch == Some(f.home)
                     || self.watch == Some(f.away)
                     || self.scout_wants(f.day, f.home, f.away);
-                (f.home, f.away, seed, record, Some(f.day))
+                (f.home, f.away, seed, record, Some(f.day), self.crew_for(GameKey::League(i)))
             })
             .collect();
         let mut simulated = self.simulate_batch(&jobs).into_iter();
@@ -820,6 +825,7 @@ impl World {
             self.judge_coaches(i, &result);
             self.after_game(i, &result);
             self.fixtures[i].result = Some(result);
+            self.book_officials(i);
         }
         self.after_games(&played);
         self.send_off(&played);
@@ -922,6 +928,14 @@ impl World {
     }
 }
 
+/// A game to simulate: home, away, seed, whether it is recorded, the league
+/// day it is played on (for preparation) and the crew that works it.
+pub(crate) type SimJob = (TeamId, TeamId, u64, bool, Option<u32>, Option<crate::officials::Crew>);
+
+use crate::officials::GameKey;
+#[cfg(test)]
+use crate::engine::{simulate_game, simulate_recorded};
+
 /// How much of the round a played game takes with it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
@@ -979,6 +993,9 @@ pub enum LiveInput {
         orders: Orders,
         familiarity: f32,
     },
+    /// Ask for a call to be reviewed. Only meaningful in the stoppage a
+    /// `Pause::Review` opened; at any other time it does nothing.
+    Challenge,
 }
 
 impl LiveRound {
@@ -1012,6 +1029,9 @@ impl LiveRound {
                 orders,
                 familiarity,
             } => self.game.set_orders(side, orders, familiarity),
+            LiveInput::Challenge => {
+                self.game.challenge(side);
+            }
         }
         self.inputs.push((self.steps, input));
         said

@@ -10,6 +10,7 @@ mod balance;
 mod export;
 mod feeds;
 mod lab;
+mod lab_officials;
 mod mcp;
 mod play;
 
@@ -122,6 +123,7 @@ fn main() {
                 lab::frames(games.unwrap_or(0), a, b)
             }
             Some("fouls") => lab::fouls(games.unwrap_or(200)),
+            Some("officials") => lab_officials::run(games.unwrap_or(600)),
             Some("physics") => {
                 lab::physics(games.unwrap_or(300));
                 lab::physics_post(games.unwrap_or(300));

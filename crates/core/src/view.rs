@@ -1252,6 +1252,7 @@ impl World {
                             crate::dressing::Topic::AfterWin => "after_win",
                             crate::dressing::Topic::AfterLoss => "after_loss",
                             crate::dressing::Topic::BeforeBig => "before_big_game",
+                            crate::dressing::Topic::BadCall => "bad_call",
                         },
                         about: p.about,
                         options: p.options.clone(),
