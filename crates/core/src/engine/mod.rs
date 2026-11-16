@@ -23,6 +23,8 @@ mod shot;
 mod stance;
 pub use shot::make_rate;
 #[cfg(test)]
+mod hands_tests;
+#[cfg(test)]
 mod relations_tests;
 #[cfg(test)]
 mod replay_tests;
