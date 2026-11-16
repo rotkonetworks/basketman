@@ -41,7 +41,8 @@ impl World {
     }
 
     /// True if there is a game for the manager to play today (or one that
-    /// should have been). With nobody in charge, any game due.
+    /// should have been). With nobody in charge of a bare league, any game
+    /// due.
     pub fn match_today(&self) -> bool {
         if self.season_over() {
             return false;
@@ -50,6 +51,9 @@ impl World {
             Some(_) => self
                 .user_fixture()
                 .is_some_and(|i| self.fixtures[i].day <= self.day),
+            // A manager out of work has no game to wait for: the days go by
+            // and the league plays them.
+            None if self.jobless() => false,
             None => self
                 .fixtures
                 .iter()

@@ -183,6 +183,13 @@ impl World {
             json!({}),
             Some(Command::Advance),
         ));
+        actions.push(spec(
+            "Continue",
+            "Pass one day. Every club's games are played on their days, by the assistants.",
+            None,
+            json!({}),
+            Some(Command::Continue),
+        ));
         let over = self.season_over().then(|| "The season is over.".to_string());
         actions.push(spec(
             "PlayRound",
@@ -216,7 +223,8 @@ impl World {
             .map(|&i| {
                 let o = &self.career.offers[i];
                 json!({"offer": i, "club": o.club, "club_name": self.teams[o.club].name,
-                       "stature": self.stature(o.club), "why": o.why})
+                       "stature": self.stature(o.club),
+                       "division": self.division_name(self.teams[o.club].division), "why": o.why})
             })
             .collect();
         let draft = self

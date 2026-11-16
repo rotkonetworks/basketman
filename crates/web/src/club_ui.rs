@@ -69,11 +69,31 @@ fn years(list: &[u16]) -> String {
 }
 
 fn honours_text(s: &ClubSummary) -> String {
-    match s.titles.len() {
-        0 => "Never champions.".to_string(),
-        1 => format!("Champions once, in {}.", s.titles[0]),
-        n => format!("Champions {n} times: {}.", years(&s.titles)),
+    let top = match s.titles.len() {
+        0 => "Never champions of the top division.".to_string(),
+        1 => format!("Champions of the top division once, in {}.", s.titles[0]),
+        n => format!("Champions of the top division {n} times: {}.", years(&s.titles)),
+    };
+    if s.lower_titles.is_empty() {
+        top
+    } else {
+        let lower: Vec<u16> = s.lower_titles.iter().map(|t| t.0).collect();
+        format!("{top} Won a lower division in {}.", years(&lower))
     }
+}
+
+/// "Best finish: 2nd, in 2011." and, below the top, the division.
+fn best_text(s: &ClubSummary) -> Option<String> {
+    let (p, y) = s.best?;
+    let place = basketman_core::budget::ordinal(p as usize);
+    Some(if s.best_division == 0 {
+        format!("Best finish: {place}, in {y}.")
+    } else {
+        let n = ["First", "Second", "Third", "Fourth", "Fifth"]
+            .get(s.best_division as usize)
+            .map_or("lower".to_string(), |n| n.to_string());
+        format!("Best finish: {place} in the {n} Division, in {y}.")
+    })
 }
 
 fn person_card(ui: &mut Ui, bd: &Backdrop, p: &PersonView, speaks: bool) {
@@ -305,7 +325,12 @@ impl App {
         bd.card(ui, |ui| {
             ui.set_width(ui.available_width());
             heading(ui, "The club", &s.name);
-            ui.label(dim(format!("Founded {}. {}.", s.founded, capital(s.stature_word))));
+            ui.label(dim(format!(
+                "Founded {}. {}. Plays in the {}.",
+                s.founded,
+                capital(s.stature_word),
+                s.division_name
+            )));
             ui.add_space(6.0);
             para(ui, &s.origin);
             ui.add_space(6.0);
@@ -313,10 +338,10 @@ impl App {
             if !s.finals.is_empty() {
                 para(ui, &format!("Lost the final in {}.", years(&s.finals)));
             }
-            if let Some((p, y)) = s.best
+            if let Some(text) = best_text(s)
                 && s.titles.is_empty()
             {
-                para(ui, &format!("Best finish: {} place, in {y}.", p));
+                para(ui, &text);
             }
             ui.add_space(6.0);
             record_strip(ui, &s.record);
@@ -455,29 +480,55 @@ impl App {
 
     fn intro_next(&self, ui: &mut Ui, bd: &Backdrop, s: &ClubSummary) {
         let w = &self.world;
+        let me = self.team;
+        let versus = |f: &basketman_core::league::Fixture| {
+            if f.home == me {
+                format!("home against {}", w.teams[f.away].name)
+            } else {
+                format!("away at {}", w.teams[f.home].name)
+            }
+        };
         bd.card(ui, |ui| {
             ui.set_width(ui.available_width());
             heading(ui, "What happens next", "Your first dates");
             ui.add_space(6.0);
-            let next = w
-                .fixtures
-                .iter()
-                .find(|f| f.round == w.round && !f.playoff && (f.home == self.team || f.away == self.team));
-            if let Some(f) = next {
-                let (other, home) = if f.home == self.team {
-                    (f.away, true)
-                } else {
-                    (f.home, false)
-                };
+            if w.in_preseason() {
                 para(
                     ui,
                     &format!(
-                        "{}: {} {}.",
-                        date(w.match_day()),
-                        if home { "home against" } else { "away at" },
-                        w.teams[other].name
+                        "{}: the training camp is on. It runs until the league opens, {} days of \
+                         training. Press Continue to pass a day.",
+                        w.day_long(w.day),
+                        w.preseason_days
                     ),
                 );
+                let friendlies: Vec<_> = w
+                    .friendlies
+                    .iter()
+                    .filter(|f| f.home == me || f.away == me)
+                    .collect();
+                if !friendlies.is_empty() {
+                    ui.add_space(4.0);
+                    theme::eyebrow(ui, "Friendlies");
+                    for f in friendlies {
+                        para(ui, &format!("{}: {}.", w.day_long(f.day), versus(f)));
+                    }
+                    para(ui, "Friendlies do not count in the table. They are for sharpness.");
+                }
+            }
+            let next = w
+                .fixtures
+                .iter()
+                .filter(|f| !f.playoff && (f.home == me || f.away == me) && f.result.is_none())
+                .min_by_key(|f| f.day);
+            if let Some(f) = next {
+                ui.add_space(4.0);
+                theme::eyebrow(
+                    ui,
+                    if w.round == 0 { "Opening day" } else { "Next league game" },
+                );
+                para(ui, &format!("{}: {}.", w.day_long(f.day), versus(f)));
+                let other = if f.home == me { f.away } else { f.home };
                 para(
                     ui,
                     &format!(
@@ -486,11 +537,13 @@ impl App {
                     ),
                 );
             }
+            ui.add_space(4.0);
             para(
                 ui,
                 &format!(
-                    "The season is {} rounds, one game every Saturday. The board has asked for \
-                     a place in the top {}.",
+                    "You play in the {}. The season is {} rounds, one a week. The board has \
+                     asked for a place in the top {}.",
+                    s.division_name,
                     w.rounds(),
                     s.expected_place
                 ),
@@ -511,7 +564,12 @@ impl App {
         bd.card(ui, |ui| {
             ui.set_width(ui.available_width());
             heading(ui, "Your club", &s.name);
-            ui.label(dim(format!("Founded {}. {}.", s.founded, capital(s.stature_word))));
+            ui.label(dim(format!(
+                "Founded {}. {}. Plays in the {}.",
+                s.founded,
+                capital(s.stature_word),
+                s.division_name
+            )));
             ui.add_space(4.0);
             para(ui, &s.origin);
             ui.add_space(6.0);
@@ -519,8 +577,8 @@ impl App {
             if !s.finals.is_empty() {
                 para(ui, &format!("Runners-up: {}.", years(&s.finals)));
             }
-            if let Some((p, y)) = s.best {
-                ui.label(dim(format!("Best finish: {} place, {y}.", p)));
+            if let Some(text) = best_text(&s) {
+                ui.label(dim(text));
             }
             ui.add_space(6.0);
             record_strip(ui, &s.record);
@@ -641,8 +699,14 @@ impl App {
                     "{} wins, {} losses{}{}",
                     sp.wins,
                     sp.losses,
-                    sp.best_place.map_or(String::new(), |p| format!(", best finish {p}")),
-                    if sp.titles > 0 { format!(", {} title(s)", sp.titles) } else { String::new() }
+                    sp.best_place.map_or(String::new(), |p| format!(", best finish {p} in division {}", sp.best_division + 1)),
+                    {
+                        let mut t = String::new();
+                        if sp.titles > 0 { t += &format!(", {} title(s)", sp.titles); }
+                        if sp.promotions > 0 { t += &format!(", {} promotion(s)", sp.promotions); }
+                        if sp.relegations > 0 { t += &format!(", {} relegation(s)", sp.relegations); }
+                        t
+                    }
                 )));
                 ui.add_space(4.0);
             }
@@ -658,7 +722,7 @@ impl App {
             for o in open {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(name(&o.club_name));
-                    ui.label(dim(format!("stature {}", o.stature)));
+                    ui.label(dim(format!("{}, stature {}", o.division_name, o.stature)));
                     if ui.button("Look at the offer").clicked() {
                         look = Some(o.offer);
                     }
@@ -777,7 +841,12 @@ impl App {
         let facts = |ui: &mut Ui, s: &ClubSummary, title: &str| {
             ui.label(theme::eyebrow_text(title));
             ui.label(name(&s.name));
-            ui.label(dim(format!("{}. Founded {}.", capital(s.stature_word), s.founded)));
+            ui.label(dim(format!(
+                "{}. Founded {}. Plays in the {}.",
+                capital(s.stature_word),
+                s.founded,
+                s.division_name
+            )));
             ui.label(dim(honours_text(s)));
             ui.label(dim(format!("Rival: {}", s.rival)));
             for p in &s.people {

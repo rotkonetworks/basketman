@@ -349,3 +349,230 @@ fn a_dismissed_manager_takes_another_job_and_the_log_replays() {
     assert_eq!(second.log, first.log);
     assert!(format!("{first:?}") == format!("{second:?}"), "worlds differ after replay");
 }
+
+// ---- clubs and careers across divisions -------------------------------------
+
+#[test]
+fn the_past_of_a_pyramid_has_one_top_champion_a_year_and_small_clubs_below() {
+    let w = World::new_career_tiers(7, 12, 3);
+    let n = w.teams.len();
+    let mut top_titles = [0usize; 3];
+    for year in (START_YEAR - PAST_YEARS)..START_YEAR {
+        let champs: Vec<usize> = (0..n)
+            .filter(|&t| w.honours(t).titles.contains(&year))
+            .collect();
+        assert_eq!(champs.len(), 1, "year {year}: {champs:?}");
+        let finals = (0..n)
+            .filter(|&t| w.honours(t).finals.contains(&year))
+            .count();
+        assert_eq!(finals, 1, "year {year}");
+    }
+    let mut stature = [0u32; 3];
+    for t in 0..n {
+        let d = w.teams[t].division;
+        top_titles[d] += w.honours(t).titles.len();
+        stature[d] += w.stature(t) as u32;
+        // Every club has a place in every year it existed, in some division.
+        assert!(w.club_record(t).iter().all(|l| l.place == 0 || (l.division as usize) < 3));
+    }
+    assert_eq!(top_titles.iter().sum::<usize>(), PAST_YEARS as usize);
+    // Clubs of the top division are bigger, and own nearly all the titles.
+    assert!(stature[0] > stature[1] && stature[1] > stature[2], "{stature:?}");
+    assert!(top_titles[0] > 3 * top_titles[2].max(1), "{top_titles:?}");
+    // A club of the bottom division is not a giant.
+    assert!((0..n).filter(|&t| w.teams[t].division == 2).all(|t| w.stature(t) <= 55));
+}
+
+#[test]
+fn promotion_and_relegation_reach_the_board_the_record_and_the_name() {
+    let mut w = World::new_career_tiers(8, 6, 3);
+    // Nobody to dismiss: the test is about the clubs.
+    let before: Vec<usize> = w.teams.iter().map(|t| t.division).collect();
+    let mut guard = 0;
+    while w.history.is_empty() {
+        guard += 1;
+        assert!(guard < 3000);
+        match w.apply(Command::Advance).unwrap().stop {
+            Some(Stop::MatchDay) => {
+                w.apply(Command::PlayRound).unwrap();
+            }
+            Some(Stop::Draft) => {
+                let _ = w.apply(Command::DraftAuto { all: true });
+            }
+            _ => {}
+        }
+    }
+    let mut moved = 0;
+    for t in 0..18 {
+        let line = w.club_record(t).pop().unwrap();
+        assert_eq!(line.division as usize, before[t]);
+        let now = w.teams[t].division;
+        assert_eq!(line.moved, (before[t] as i8 - now as i8).signum(), "club {t}");
+        if now != before[t] {
+            moved += 1;
+            let up = now < before[t];
+            let reasons = &w.club.clubs[t].board.reasons;
+            assert!(
+                reasons.iter().any(|r| r.text.contains(if up { "promoted" } else { "relegated" })),
+                "club {t}: {reasons:?}"
+            );
+            assert_eq!(w.honours(t).promotions.last() == Some(&START_YEAR), up, "club {t}");
+        }
+    }
+    assert!(moved >= 8, "{moved} clubs moved");
+}
+
+#[test]
+fn a_board_judges_by_its_own_division_table() {
+    let mut w = World::new_career_tiers(9, 6, 3);
+    // Round 8 of 10, a club last in the Third Division: warned, out of patience.
+    w.round = crate::board::GRACE_ROUNDS;
+    let third = w.division_teams(2);
+    for (i, &t) in third.iter().enumerate() {
+        w.standings[t].wins = 10 - i as u16 * 2;
+    }
+    let (last, middle) = (third[5], third[2]);
+    for club in [last, middle] {
+        let b = &mut w.club.clubs[club].board;
+        b.confidence = 5.0;
+        b.warned = true;
+    }
+    assert!(w.in_the_bottom_third(last));
+    assert!(!w.in_the_bottom_third(middle));
+    w.board_verdict(middle, 0, 10);
+    assert!(w.career.vacancies.iter().all(|v| v.club != middle));
+    w.board_verdict(last, 0, 10);
+    assert!(w.career.vacancies.iter().any(|v| v.club == last));
+    // The target is a place in the club's own division.
+    for t in 0..18 {
+        assert!((1..=4).contains(&w.board_target(t)), "club {t}: {}", w.board_target(t));
+    }
+}
+
+#[test]
+fn offers_cross_divisions_in_the_right_direction() {
+    let mut w = World::new_career_tiers(10, 12, 3);
+    let third = w.division_teams(2);
+    let me = third[0];
+    w.apply(Command::TakeCharge(me)).unwrap();
+    // A good name in the Third Division: second-tier clubs call, top clubs do not.
+    w.career.reputation = 35;
+    let second = w.division_teams(1);
+    let first = w.division_teams(0);
+    let called = |w: &World, c: usize| w.career.offers.iter().any(|o| o.club == c);
+    for &c in &second {
+        w.manager_out(c, "test");
+    }
+    for &c in &first {
+        w.manager_out(c, "test");
+    }
+    assert!(second.iter().any(|&c| called(&w, c)), "no second-division club called");
+    assert!(first.iter().all(|&c| !called(&w, c)), "a top club called a third-division man");
+    // The approach after a championship season comes from the division above.
+    let mut w = World::new_career_tiers(10, 12, 3);
+    w.apply(Command::TakeCharge(me)).unwrap();
+    let tables = w.division_tables();
+    let mut got = false;
+    for season in 0..12 {
+        w.season = season;
+        w.career.offers.clear();
+        w.career.vacancies.clear();
+        w.career_close_season(&tables, tables[0][0]);
+        got |= w.career.offers.iter().any(|o| w.teams[o.club].division == 1);
+        assert!(w.career.offers.iter().all(|o| w.teams[o.club].division == 1));
+    }
+    assert!(got, "twelve championship seasons and no call from above");
+}
+
+#[test]
+fn a_dismissed_manager_is_called_mostly_from_his_own_level_and_below() {
+    let mut w = World::new_career_tiers(12, 12, 3);
+    let second = w.division_teams(1);
+    let me = second[3];
+    w.apply(Command::TakeCharge(me)).unwrap();
+    w.career.reputation = 50;
+    w.manager_dismissed("test");
+    assert!(w.jobless());
+    assert_eq!(w.career.last_division, 1);
+    let mut counts = [0usize; 3];
+    for t in 0..36 {
+        if t != me {
+            w.manager_out(t, "test");
+        }
+    }
+    for o in &w.career.offers {
+        counts[w.teams[o.club].division] += 1;
+    }
+    assert!(counts[1] + counts[2] > 0, "{counts:?}");
+    assert!(counts[0] <= counts[1] + counts[2], "{counts:?}");
+}
+
+#[test]
+fn a_career_in_the_calendar_loses_its_job_and_finds_another_day_by_day() {
+    let make = || {
+        let mut w = World::new_career_tiers(5, 6, 3);
+        // An owner with no patience, so the board acts.
+        let b = &mut w.club.clubs[15].board;
+        b.owner.patience = 1;
+        b.owner.ambition = 20;
+        b.chairman = None;
+        w
+    };
+    let mut w = make();
+    assert!(w.in_preseason());
+    w.apply(Command::TakeCharge(15)).unwrap();
+    let start = w.club.clubs[15].board.confidence;
+    // The camp and its friendlies do not move the board.
+    while w.in_preseason() {
+        w.apply(Command::Continue).unwrap();
+        assert!(w.match_day() >= w.day || !w.match_today());
+    }
+    assert!(w.desk.messages.iter().any(|m| m.subject.starts_with("Friendly")));
+    assert_eq!(w.club.clubs[15].board.confidence, start, "a friendly moved the board");
+    assert_eq!(w.round, 0);
+    // League days: play when it is time, otherwise let the day pass.
+    let mut guard = 0;
+    while w.watch.is_some() && w.season < 3 {
+        guard += 1;
+        assert!(guard < 6000, "stuck");
+        if w.match_today() {
+            w.apply(Command::PlayToday).unwrap();
+        } else if let Some(Stop::Draft) = w.apply(Command::Continue).unwrap().stop {
+            let _ = w.apply(Command::DraftAuto { all: true });
+        }
+    }
+    if w.watch.is_some() {
+        w.apply(Command::Resign).unwrap();
+    }
+    assert!(w.jobless());
+    // Out of work, days go by until somebody calls.
+    let mut guard = 0;
+    while w.open_job_offers().is_empty() {
+        guard += 1;
+        assert!(guard < 6000, "nobody called: season {} round {} day {} idle {} rep {} vac {:?} offers {:?} draft {} over {}", w.season, w.round, w.day, w.career.idle_rounds, w.career.reputation, w.career.vacancies.len(), w.career.offers.len(), w.draft.is_some(), w.season_over());
+        if let Some(Stop::Draft) = w.apply(Command::Continue).unwrap().stop {
+            let _ = w.apply(Command::DraftAuto { all: true });
+        }
+    }
+    let offer = w.open_job_offers()[0];
+    let club = w.career.offers[offer].club;
+    w.apply(Command::AcceptJob { offer, bring: vec![], keep: Job::HIRED.to_vec() })
+        .unwrap();
+    assert_eq!(w.watch, Some(club));
+    let mut guard = 0;
+    while w.round < 3 && w.season < 4 {
+        guard += 1;
+        assert!(guard < 6000);
+        if w.match_today() {
+            w.apply(Command::PlayToday).unwrap();
+        } else if let Some(Stop::Draft) = w.apply(Command::Continue).unwrap().stop {
+            let _ = w.apply(Command::DraftAuto { all: true });
+        }
+    }
+    // The same commands on the same world give the same world.
+    let mut again = make();
+    for cmd in w.log.clone() {
+        again.apply(cmd).unwrap();
+    }
+    assert!(format!("{w:?}") == format!("{again:?}"), "worlds differ after replay");
+}

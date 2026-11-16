@@ -288,7 +288,13 @@ impl World {
                 s <= rep + 10 && s >= rep - 50 && (!step_up || (division + 1 == last && luck))
             }
         };
-        if fits && self.watch != Some(club) {
+        // Nobody is called back to the job he has just left.
+        let left = self
+            .career
+            .spells
+            .last()
+            .is_some_and(|s| s.club == club && s.ended != Ending::Current);
+        if fits && self.watch != Some(club) && !(left && self.watch.is_none()) {
             self.make_offer(club, "Your name was the first they thought of.");
         }
     }
