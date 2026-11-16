@@ -15,7 +15,7 @@ const BOUNCE: f32 = 0.55;
 /// Where the ball centre is when it touches the iron: on the ring.
 pub(super) const RIM_TOUCH: f32 = RIM_RADIUS + 0.03;
 /// Longest a path can be, in arcs.
-const MAX_ARCS: usize = 9;
+const MAX_ARCS: usize = 40;
 
 #[derive(Copy, Clone, Debug)]
 pub(super) struct Arc {
@@ -98,6 +98,40 @@ impl Path {
             t -= a.dur;
         }
         self.end()
+    }
+
+    pub fn arcs(&self) -> &[Arc] {
+        &self.arcs[..self.n]
+    }
+
+    /// Position, height and velocity (over the floor, and vertical) at `t`.
+    pub fn state(&self, mut t: f32) -> (Vec2, f32, Vec2, f32) {
+        for a in &self.arcs[..self.n] {
+            if t <= a.dur {
+                let t = t.max(0.0);
+                let (p, z) = a.at(t);
+                return (p, z, (a.p1 - a.p0) * (1.0 / a.dur), a.vz - a.g * t);
+            }
+            t -= a.dur;
+        }
+        let (p, z) = self.end();
+        (p, z, Vec2::ZERO, 0.0)
+    }
+
+    /// First time at or after `t0` that the ball is coming down through
+    /// height `h` (or is already below it and coming down), with where it
+    /// is then. `None` if it never comes down that far.
+    pub fn comes_down_to(&self, t0: f32, h: f32) -> Option<(f32, Vec2)> {
+        let total = self.total();
+        let mut t = t0;
+        while t <= total {
+            let (p, z, _, vz) = self.state(t);
+            if z <= h && vz < 0.0 {
+                return Some((t, p));
+            }
+            t += 0.02;
+        }
+        None
     }
 
     pub fn end(&self) -> (Vec2, f32) {

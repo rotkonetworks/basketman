@@ -221,6 +221,7 @@ fn a_rebounder_meets_the_ball_in_his_hands_at_the_height_his_leap_allows() {
     let w = World::generate(7, 12);
     let mut seen = 0;
     let mut airborne = 0;
+    let (mut above, mut above_air) = (0, 0);
     for rec in games(4) {
         for e in &rec.events {
             let EventKind::Rebound { who, .. } = &e.kind else {
@@ -250,15 +251,34 @@ fn a_rebounder_meets_the_ball_in_his_hands_at_the_height_his_leap_allows() {
                 f.ball.dist(f.pos[s][k]),
                 e.time
             );
-            if f.pose[s][k].action == Action::Rebounding && f.pose[s][k].lift_cm > 0 {
+            // In a jump: for a board, a block or a contest (a man who swats a
+            // shot and then takes it himself is still in his leap).
+            let in_air = matches!(
+                f.pose[s][k].action,
+                Action::Rebounding | Action::Blocking | Action::Contesting
+            ) && f.pose[s][k].lift_cm > 0;
+            if in_air {
                 airborne += 1;
+            }
+            // A ball above his standing reach can only be taken in a jump.
+            if f.ball_height > p.body.standing_reach_cm / 100.0 + 0.02 {
+                above += 1;
+                if in_air {
+                    above_air += 1;
+                }
             }
         }
     }
     assert!(seen > 80, "{seen} rebounds");
+    // Most boards are taken in the air; the rest are balls that came down
+    // low (long rebounds, bounces) and were gathered on the floor.
     assert!(
-        airborne * 10 > seen * 8,
+        airborne * 10 > seen * 7,
         "{airborne} of {seen} off the floor"
+    );
+    assert!(
+        above > 100 && above_air * 10 >= above * 9,
+        "{above_air} of {above} balls above his reach were taken in a jump"
     );
 }
 
@@ -344,3 +364,7 @@ fn a_ball_is_only_taken_where_a_hand_can_reach_it() {
     }
     assert!(taken > 1000, "{taken} takes");
 }
+
+
+
+

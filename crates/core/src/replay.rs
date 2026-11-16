@@ -745,11 +745,45 @@ pub struct Recording {
     pub post: [f32; 3],
     #[serde(default)]
     pub leaned: [Vec<f32>; 2],
+    /// The ball's real path after a shot, a block or a tip: stretches
+    /// between contacts, each exactly a parabola in height over a straight
+    /// line on the floor. Sorted by start time. The viewer draws these
+    /// instead of gliding between frames.
+    #[serde(default)]
+    pub ball_arcs: Vec<BallArc>,
     #[serde(default)]
     pub leaned_ticks: [Vec<u32>; 2],
 }
 
+/// One stretch of the ball's flight, in full-court coordinates.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct BallArc {
+    pub t0: f32,
+    pub dur: f32,
+    pub p0: Vec2,
+    /// Metres per second over the floor.
+    pub vel: Vec2,
+    pub z0: f32,
+    pub vz: f32,
+    /// 9.81 in the air, 0 for a ball rolling.
+    pub g: f32,
+}
+
+impl BallArc {
+    pub fn at(&self, t: f32) -> (Vec2, f32) {
+        let t = t.clamp(0.0, self.dur);
+        (self.p0 + self.vel * t, self.z0 + self.vz * t - 0.5 * self.g * t * t)
+    }
+}
+
 impl Recording {
+    /// The ball's recorded path at `time`, if it was in free flight then.
+    pub fn ball_at(&self, time: f32) -> Option<(Vec2, f32)> {
+        let i = self.ball_arcs.partition_point(|a| a.t0 <= time);
+        let a = self.ball_arcs[..i].iter().rev().take(4).find(|a| time <= a.t0 + a.dur)?;
+        Some(a.at(time - a.t0))
+    }
+
     pub fn duration(&self) -> f32 {
         self.frames.last().map_or(0.0, |f| f.time)
     }

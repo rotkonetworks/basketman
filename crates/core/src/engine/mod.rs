@@ -12,11 +12,14 @@
 // arrays; indexing them by court index reads better than zipped iterators.
 #![allow(clippy::needless_range_loop)]
 
+mod ball;
 pub mod contact;
 mod defense;
 mod flight;
 mod floor;
 mod offense;
+mod shot;
+pub use shot::make_rate;
 #[cfg(test)]
 mod replay_tests;
 pub(crate) use offense::{places, template};

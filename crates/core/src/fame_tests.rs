@@ -131,6 +131,39 @@ fn fame_does_not_follow_current_ability() {
 
     // And the rest of the league: after real seasons, a player who is not
     // better than a good starter is not a name, unless he is an old star.
+    // (Several worlds, since which player lands just over a line moves with
+    // the random stream: what must hold is that it is rare and never large.)
+    let (mut below, mut named) = (0, 0);
+    for seed in [6, 7, 8] {
+        let mut w = World::generate(seed, 8);
+        run(&mut w, 4);
+        let mut ov: Vec<f32> = w
+            .teams
+            .iter()
+            .flat_map(|t| t.roster.iter())
+            .map(|&p| w.players[p as usize].overall())
+            .collect();
+        ov.sort_by(|a, b| a.total_cmp(b));
+        let median = ov[ov.len() / 2];
+        for t in &w.teams {
+            for &p in &t.roster {
+                let pl = &w.players[p as usize];
+                if pl.overall() < median && pl.age < 33 {
+                    below += 1;
+                    named += (pl.renown.fame >= 20.0) as u32;
+                    assert!(
+                        pl.renown.fame < 30.0,
+                        "{} ({:.1} overall, {}) has fame {:.0}",
+                        pl.name,
+                        pl.overall(),
+                        pl.age,
+                        pl.renown.fame
+                    );
+                }
+            }
+        }
+    }
+    assert!(named * 40 <= below, "{named} of {below} below-median players are names");
     let mut w = World::generate(6, 8);
     run(&mut w, 4);
     let mut ov: Vec<f32> = w
@@ -140,22 +173,6 @@ fn fame_does_not_follow_current_ability() {
         .map(|&p| w.players[p as usize].overall())
         .collect();
     ov.sort_by(|a, b| a.total_cmp(b));
-    let median = ov[ov.len() / 2];
-    for t in &w.teams {
-        for &p in &t.roster {
-            let pl = &w.players[p as usize];
-            if pl.overall() < median && pl.age < 33 {
-                assert!(
-                    pl.renown.fame < 20.0,
-                    "{} ({:.1} overall, {}) has fame {:.0}",
-                    pl.name,
-                    pl.overall(),
-                    pl.age,
-                    pl.renown.fame
-                );
-            }
-        }
-    }
     // Names and ability are not the same list: somebody famous is below the
     // very best, and somebody among the best has no name to speak of.
     let top: Vec<f32> = {

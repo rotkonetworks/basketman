@@ -2218,3 +2218,45 @@ pub fn diag(games: usize) {
         avg(&hang)
     );
 }
+
+/// Make rates of the launch model at fixed spots, by size of error at the
+/// ring: the table the shooting errors are fitted from. `LAUNCH="lat,depth"`
+/// sets the unit error in metres: lat0,lat per m,depth0,depth per m.
+pub fn launch() {
+    use basketman_core::court::HOOP;
+    use basketman_core::engine::make_rate;
+    use basketman_core::replay::Style;
+    let spots: [(&str, f32, f32, f32, Style); 10] = [
+        ("free throw 4.2", 0.0, HOOP.y + 4.2, 2.6, Style::Jumper),
+        ("mid 3.0 straight", 0.0, HOOP.y + 3.0, 2.9, Style::Jumper),
+        ("mid 5.0 straight", 0.0, HOOP.y + 5.0, 2.9, Style::Jumper),
+        ("mid 5.0 wing", 3.5, HOOP.y + 3.5, 2.9, Style::Jumper),
+        ("three 7.0 top", 0.0, HOOP.y + 7.0, 3.0, Style::Jumper),
+        ("three 7.0 wing", 5.0, HOOP.y + 5.0, 3.0, Style::Jumper),
+        ("corner three 6.6", 6.5, HOOP.y + 0.8, 3.0, Style::Jumper),
+        ("three 9.0", 0.0, HOOP.y + 9.0, 3.0, Style::Jumper),
+        ("layup front", 0.0, HOOP.y + 1.0, 3.2, Style::Layup),
+        ("layup side", 1.4, HOOP.y + 0.4, 3.2, Style::Layup),
+    ];
+    let unit: Vec<f32> = std::env::var("LAUNCH")
+        .ok()
+        .map(|s| s.split(',').filter_map(|x| x.parse().ok()).collect())
+        .unwrap_or_else(|| vec![0.04, 0.006, 0.085, 0.012]);
+    let scales = [0.25f32, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0];
+    print!("{:<20}", "scale of error");
+    for k in scales {
+        print!("{k:>7.2}");
+    }
+    println!();
+    for (name, x, y, z, st) in spots {
+        print!("{name:<20}");
+        for k in scales {
+            let d = ((x - HOOP.x).powi(2) + (y - HOOP.y).powi(2)).sqrt();
+            let lat = unit[0] + unit[1] * d;
+            let depth = unit[2] + unit[3] * d;
+            let r = make_rate((x, y, z), st, (lat * k, depth * k), 3000, 1);
+            print!("{:>6.1}%", r * 100.0);
+        }
+        println!();
+    }
+}

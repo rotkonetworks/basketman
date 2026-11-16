@@ -4,22 +4,93 @@
 //! `court.rs`) and are mirrored when possession changes, so players really do
 //! have to run back. Indices `k` are court indices 0..5 into `Side::on`.
 
+use super::ball::{self, Ball, Flown, Hand, v3};
 use super::contact::{self, Bulk, Touch};
 use super::defense::{self, View, is_zone};
 use super::flight::{self, Path};
 use super::offense;
+use super::shot::{self, Errors};
 use super::{BoxLine, DT, GameResult, Lineup, Pause, Rules, Shout, Side};
 use crate::court::{
-    BALL_RADIUS, BOARD_LOW, BOARD_Y, GRAVITY, HOOP, LENGTH, NO_CHARGE_RADIUS, RIM_HEIGHT, ShotKind,
+    BALL_RADIUS, BOARD_HALF, BOARD_LOW, BOARD_Y, GRAVITY, HOOP, LENGTH, NO_CHARGE_RADIUS, RIM_HEIGHT, ShotKind,
     Vec2, v,
 };
 use crate::player::{Attr, PlayerId};
 use crate::replay::{
-    Action, Event, EventKind, FRAME_RATE, FoulKind, Frame, Mistake, Pose, Recording, ShotStage,
+    Action, BallArc, Event, EventKind, FRAME_RATE, FoulKind, Frame, Mistake, Pose, Recording, ShotStage,
     Source, Style, TurnoverKind, to_court,
 };
 use crate::rng::Rng;
 use crate::tactics::{Brief, DefenseScheme, OffenseSet, Press};
+
+// ---- the shot's error model -------------------------------------------
+/// Scale of the error of an average shooter's open shot in play, against
+/// the free throw's `shot::tune("FT_SCALE", FT_SCALE)`: a live shot is taken on the run of a play,
+/// with a crowd and a clock.
+const GAME: f32 = 0.95;
+/// What a live two, a three and a finish at the rim add or take off the
+/// error, on top of their own base: the part of in-game difficulty that
+/// the base error shape does not carry.
+const MID_SCALE: f32 = 1.12;
+const THREE_SCALE: f32 = 0.96;
+const RIM_SCALE: f32 = 0.96;
+/// What each point of rating above 10 takes off the error of a jump shot,
+/// of a finish at the rim, and of a free throw.
+const SKILL_SLOPE: f32 = 0.022;
+const FINISH_SLOPE: f32 = 0.025;
+const FT_SCALE: f32 = 0.31;
+const FT_SLOPE: f32 = 0.045;
+/// What a hand in the face (contest 1) adds to the error: on a three, a
+/// two, at the rim and on a dunk; and what each point of the defender's
+/// skill above 10 adds to that.
+const CONTEST_THREE: f32 = 0.23;
+const CONTEST_MID: f32 = 0.23;
+const CONTEST_RIM: f32 = 1.1;
+const DUNK_CONTEST: f32 = 1.5;
+const GUARD_SLOPE: f32 = 0.04;
+/// A dunk from the very top of his reach is shaky: what each metre short
+/// of a clear 0.15 m adds.
+const DUNK_EDGE: f32 = 8.0;
+/// Per m/s of the shooter's own speed as the ball leaves a jump shot, and
+/// for a shot off the dribble.
+const MOVING: f32 = 0.10;
+const OFF_DRIBBLE: f32 = 0.07;
+/// Per point of composure above 10, for an unfamiliar set, for the home crowd.
+const COMPOSURE: f32 = 0.004;
+const RHYTHM: f32 = 0.06;
+const HOME: f32 = 0.016;
+/// A hand on the shooter that was called, and one that was not.
+const FOULED_ERR: f32 = 4.0;
+const CONTACT_ERR: f32 = 1.35;
+/// A defender who has not jumped still has a hand up: how much of a
+/// contest he is, against one in the air.
+const HAND_STANDING: f32 = 0.75;
+/// How much of a man's standing reach is his arm (shoulder to fingertip).
+const ARM_SHARE: f32 = 0.37;
+/// How much shorter than his arm the reach is at which his hand meets a
+/// ball in flight: a block needs the ball well inside it, not at the fingertip.
+const BLOCK_SLACK: f32 = 0.28;
+// ---- the loose ball ------------------------------------------------------
+/// How high a rebounder jumps, as a share of the most he can.
+const JUMP_FRAC: f32 = 0.9;
+/// His read of where the ball will be: metres of error for a player of
+/// rating 0, and what each point of rating takes off.
+const READ_SPOT: f32 = 0.6;
+const READ_SPOT_SKILL: f32 = 0.04;
+/// Seconds before he reacts to a ball off the iron, by rating.
+const READ_DELAY: f32 = 0.26;
+const READ_DELAY_SKILL: f32 = 0.012;
+/// Seconds of error in the timing of his jump.
+const READ_TIMING: f32 = 0.22;
+const READ_TIMING_SKILL: f32 = 0.008;
+/// Chance a hand on the ball holds it: for an average man, per point of skill
+/// above 10, less for a contested ball and for a fast one.
+const HOLD_BASE: f32 = 0.9;
+const HOLD_SKILL: f32 = 0.012;
+const HOLD_CONTEST: f32 = 0.15;
+const HOLD_SPEED: f32 = 0.03;
+/// Metres within which an opponent makes a ball a contested one.
+const CONTEST_ZONE: f32 = 1.4;
 
 const ACCEL: f32 = 7.0;
 /// A shooter stopping for a jump shot brakes this many times as hard as he
@@ -56,9 +127,6 @@ const INBOUND_WAIT: f32 = 3.2;
 const PUTBACK_EDGE: f32 = 0.25;
 /// Seconds the floor stands still after a foul away from a shot.
 const DEAD_FOUL: f32 = 1.2;
-/// A man who would still be further than this from a rebound when it comes
-/// down is not in the running for it.
-const REB_REACH: f32 = 2.5;
 /// Where the free throw shooter stands, in the attack frame.
 const FT_LINE: Vec2 = v(0.0, 5.8);
 /// How far in front of his body a finisher releases the ball, in metres.
@@ -70,10 +138,6 @@ const BEATEN_GRACE: f32 = 0.62;
 /// decided by the two bodies.
 /// Speed (m/s) under which a defender counts as set in the driver's path.
 const HELP_SET_SPEED: f32 = 2.0;
-/// How much a boxed-out player's chance at the ball shrinks for each body, as
-/// heavy as himself, that holds the inside in front of him.
-const REB_HELD: f32 = 0.5;
-const REB_OFF: f32 = 1.5;
 /// Fatigue per metre of being pushed, per m/s of closing speed in a collision
 /// (as a share of a metre), and the anchor of a body that takes the cost as
 /// given.
@@ -198,24 +262,6 @@ const UNDER_SKILL: f32 = 0.01;
 /// A finisher releases the ball a forearm in front of his chest, so a body
 /// that cannot get closer to the rim than another body lets him still
 /// finishes at the rim.
-/// A ball in the air near the basket is not inside the board or the ring:
-/// moved out in front of the glass and outside the ring if it is.
-fn clear_hoop(mut p: Vec2, z: f32) -> Vec2 {
-    if z > RIM_HEIGHT - 0.5 && p.dist(HOOP) < 0.6 {
-        let out = (p - HOOP).norm();
-        p = HOOP + if out == Vec2::ZERO { v(0.0, 1.0) } else { out } * 0.6;
-    }
-    if z > BOARD_LOW - 0.1 && (p.x - HOOP.x).abs() < 1.0 && p.y < BOARD_Y + BALL_RADIUS + 0.02 {
-        let side = if p.x >= HOOP.x { 1.0 } else { -1.0 };
-        // In front of the glass, and outside the ring.
-        p.y = BOARD_Y + BALL_RADIUS + 0.02;
-        if p.dist(HOOP) < 0.6 {
-            p.x = HOOP.x + side * 0.6;
-        }
-    }
-    p
-}
-
 fn shot_kind(p: Vec2) -> ShotKind {
     if p.dist(HOOP) < 3.0 {
         ShotKind::at(p.toward(HOOP, LUNGE))
@@ -292,8 +338,8 @@ impl Mover {
     }
 }
 
-/// A jump, kept only to show it: when it starts, how long it lasts and how
-/// high it goes. Never read by the game.
+/// A jump: when it starts, how long it lasts and how high it goes. The
+/// game reads it (for a hand's height) as well as the replay.
 #[derive(Copy, Clone)]
 struct Jump {
     action: Action,
@@ -382,7 +428,6 @@ enum FlightKind {
         kind: ShotKind,
         assist: Option<usize>,
         and_one: bool,
-        landing: Vec2,
         /// Free throws to shoot once this missed shot has settled (he was
         /// fouled in the act and missed).
         foul_shots: u16,
@@ -410,8 +455,11 @@ enum AfterKind {
     Drop { shooter: usize, then: u16 },
     /// Off the iron on a dead ball; `shots` free throws follow.
     Fall { shooter: usize, shots: u16 },
-    /// Off the rim to the hands of attacker-first index `who`.
-    Rebound { who: usize, free_throw: bool },
+    /// Off the iron or the glass and live: the ball is in the air or on the
+    /// floor and whoever gets a hand to it first has it.
+    Live { free_throw: bool },
+    /// Out of bounds with the attackers: the ball is brought back to him.
+    Inbound { who: usize },
     /// Back to the free throw shooter.
     Return { shooter: usize },
 }
@@ -431,12 +479,42 @@ struct After {
 #[derive(Copy, Clone)]
 struct Verdict {
     kind: ShotKind,
+    /// How the contest stood as he left the floor, and the edge a won post
+    /// move gave him.
     c: f32,
+    edge: f32,
     near: Option<usize>,
-    made: bool,
+    /// A hand got to him, and the crew called it.
+    contact: bool,
     fouled: bool,
-    blocker: Option<usize>,
     assist: Option<usize>,
+}
+
+/// How a player reads a ball that has come off the iron: where he thinks it
+/// will be when he meets it, when he starts moving and jumping, and when he
+/// expects it (path seconds).
+#[derive(Copy, Clone)]
+struct Chase {
+    active: bool,
+    spot: Vec2,
+    /// Where it really comes down: he sees it better the nearer it gets.
+    truth: Vec2,
+    go: f32,
+    arrive: f32,
+    jump_at: f32,
+    jumped: bool,
+}
+
+impl Chase {
+    const NONE: Chase = Chase {
+        active: false,
+        spot: Vec2::ZERO,
+        truth: Vec2::ZERO,
+        go: 0.0,
+        arrive: 0.0,
+        jump_at: 0.0,
+        jumped: false,
+    };
 }
 
 /// A shot being taken, from the moment he decided to the end of his
@@ -498,8 +576,12 @@ struct Play {
     after: Option<After>,
     shot: Option<ShotPlan>,
     verdict: Option<Verdict>,
-    /// Where the last shot was in the air at the iron: touch point and height.
-    rim: (Vec2, f32),
+    /// How each of the ten (attackers first) reads the loose ball.
+    chase: [Chase; 10],
+    /// The last man to touch the ball was a defender, and how many times it
+    /// has been tipped since the shot.
+    def_touch: bool,
+    tips: u8,
     /// Attacker who goes to pick up a loose ball, once it has stopped, and
     /// the play time he was sent at.
     fetcher: Option<usize>,
@@ -637,7 +719,8 @@ pub(super) struct Game {
     /// Jumps being shown, `[side][k]`. Only kept while recording.
     jump: [[Jump; 5]; 2],
     /// The rebounders of the shot in the air have been sent up.
-    reb_up: bool,
+    /// Where the ten stood at the start of the tick.
+    prev_pos: [[Vec2; 5]; 2],
 }
 
 impl Game {
@@ -706,7 +789,7 @@ impl Game {
             credit: 0.0,
             loose: None,
             ft_spot: [Vec2::ZERO; 10],
-            reb_up: false,
+            prev_pos: [[Vec2::ZERO; 5]; 2],
             m,
             frame: 0,
             play: Play::idle(),
@@ -1257,6 +1340,11 @@ impl Game {
         for side in &mut self.m {
             for m in side {
                 m.hard = false;
+            }
+        }
+        for t in 0..2 {
+            for k in 0..5 {
+                self.prev_pos[t][k] = self.m[t][k].pos;
             }
         }
 
@@ -1908,21 +1996,24 @@ impl Game {
         } else if let Some(a) = self.play.after.as_mut() {
             a.t += DT;
             let (mut p, z) = a.path.at(a.t);
-            let (t, end, kind, dest) = (a.t, a.end, a.kind, a.path.end().0);
-            if let AfterKind::Rebound { who, .. } = kind {
+            if let AfterKind::Inbound { who } = a.kind {
                 // Into his hands, wherever he has got to.
-                let at = if who < 5 {
-                    self.m[o][who].pos
-                } else {
-                    self.m[1 - o][who - 5].pos
-                };
-                let u = (t / end.max(0.05)).min(1.0);
-                p = p + (at - dest) * (u * u);
-                p = clear_hoop(p, z);
+                let at = self.m[o][who].pos;
+                let u = (a.t / a.end.max(0.05)).min(1.0);
+                p = p + (at - a.path.end().0) * (u * u);
             }
             self.play.ball = p;
             self.play.ball_h = z;
         } else if let Some(h) = self.play.holder {
+            // A man holding the ball up at the height of the glass cannot
+            // take it through: his body stops against it.
+            if self.play.ball_h > BOARD_LOW - 0.15 {
+                let m = &mut self.m[o][h];
+                if m.pos.y < BOARD_Y + BALL_RADIUS && m.pos.x.abs() < BOARD_HALF + BALL_RADIUS {
+                    m.pos.y = BOARD_Y + BALL_RADIUS;
+                    m.vel.y = m.vel.y.max(0.0);
+                }
+            }
             let m = &self.m[o][h];
             self.play.ball = m.pos + m.vel * 0.08;
             // The hands come down after a catch.
@@ -1954,36 +2045,6 @@ impl Game {
         }
     }
 
-    /// Whoever is under a rebound goes for it, the winner to where he will
-    /// meet it.
-    fn steer_rebound(&mut self) {
-        let Some(After {
-            kind: AfterKind::Rebound { who, .. },
-            path,
-            ..
-        }) = self.play.after
-        else {
-            return;
-        };
-        let dest = path.end().0;
-        let o = self.play.o;
-        for i in 0..10 {
-            let (t, k) = if i < 5 { (o, i) } else { (1 - o, i - 5) };
-            let m = &mut self.m[t][k];
-            if i == who {
-                m.target = dest;
-                m.pace = 1.0;
-                // Nobody takes it from behind the glass.
-                if m.pos.y < BOARD_Y + 0.3 && m.pos.x.abs() < 1.0 {
-                    m.pos.y = (m.pos.y + 0.12).min(BOARD_Y + 0.3);
-                }
-            } else if m.pos.dist(dest) < 2.0 {
-                m.target = dest;
-                m.pace = 0.9;
-            }
-        }
-    }
-
     fn step_phase(&mut self) -> Option<End> {
         if let Some(f) = self.play.flight {
             if f.t >= f.dur {
@@ -1993,6 +2054,9 @@ impl Game {
             return None;
         }
         if let Some(a) = self.play.after {
+            if matches!(a.kind, AfterKind::Live { .. }) {
+                return self.live_ball(a);
+            }
             if a.t >= a.end {
                 self.play.after = None;
                 return self.settle(a);
@@ -2155,12 +2219,32 @@ impl Game {
     /// 0 = nobody near, 1 = a hand in the face. At the rim every body in the
     /// way counts, so a crowded paint can go above 1.
     fn contest(&self, p: Vec2, k: usize, rim: bool) -> (f32, Option<usize>) {
+        let w = self.contest_each(p, k, rim);
+        Self::sum_contest(w, rim)
+    }
+
+    fn sum_contest(w: [f32; 5], rim: bool) -> (f32, Option<usize>) {
+        let mut total = 0.0f32;
+        let mut near: Option<(f32, usize)> = None;
+        for (dk, &w) in w.iter().enumerate() {
+            if w <= 0.0 {
+                continue;
+            }
+            if near.is_none_or(|n| w > n.0) {
+                near = Some((w, dk));
+            }
+            total = if rim { total + w } else { total.max(w) };
+        }
+        (total.min(if rim { 1.4 } else { 1.0 }), near.map(|n| n.1))
+    }
+
+    /// How much each defender bothers a shot from `p` by attacker `k`.
+    fn contest_each(&self, p: Vec2, k: usize, rim: bool) -> [f32; 5] {
         let to_hoop = (HOOP - p).norm();
         let off = self.off();
         let reach = off.slots[off.on[k]].p.body.standing_reach_cm;
         let def = self.def();
-        let mut total = 0.0f32;
-        let mut near: Option<(f32, usize)> = None;
+        let mut out = [0.0f32; 5];
         for dk in 0..5 {
             let q = self.dp(dk);
             let dist = q.dist(p);
@@ -2188,12 +2272,21 @@ impl Game {
             if (q - p).dot(to_hoop) < -0.25 && p.dist(HOOP) > 1.0 {
                 w *= 0.45;
             }
-            if near.is_none_or(|n| w > n.0) {
-                near = Some((w, dk));
-            }
-            total = if rim { total + w } else { total.max(w) };
+            out[dk] = w;
         }
-        (total.min(if rim { 1.4 } else { 1.0 }), near.map(|n| n.1))
+        out
+    }
+
+    /// How high above standing height defender or attacker `k` of side `t`
+    /// is, `ahead` seconds from now, in the jump he is in.
+    fn lift_at(&self, t: usize, k: usize, ahead: f32) -> f32 {
+        let j = &self.jump[t][k];
+        let u = self.anim + ahead - j.start;
+        if j.dur <= 0.0 || u <= 0.0 || u >= j.dur {
+            return 0.0;
+        }
+        let w = u / j.dur;
+        j.peak * 4.0 * w * (1.0 - w)
     }
 
     fn pct(&self, k: usize, kind: ShotKind, c: f32, dk: Option<usize>, off_dribble: bool) -> f32 {
@@ -3277,9 +3370,6 @@ impl Game {
     /// seconds from now, to a fraction `frac` of the best his Vertical
     /// allows. Only for the replay.
     fn leap(&mut self, t: usize, k: usize, action: Action, frac: f32, after: f32, dur: f32) {
-        if self.rec.is_none() {
-            return;
-        }
         let side = &self.sides[t];
         let vertical = side.slots[side.on[k]].p.attrs[Attr::Vertical];
         self.jump[t][k] = Jump {
@@ -3378,32 +3468,42 @@ impl Game {
             peak,
             hand_z,
         });
-        if self.rec.is_some() && !free_throw {
-            // A contesting hand goes up with the shot, topping out as it is released.
-            let (_, c, near) = self.look(h);
-            if let Some(dk) = near
-                && c > 0.35
-            {
-                let vertical = {
+        if !free_throw {
+            // Hands go up with the shot, each timed to top out near the
+            // release: how well, and how high, is the defender's blocking.
+            let p = self.op(h);
+            let w = self.contest_each(p, h, ShotKind::at(p) == ShotKind::Rim);
+            for (dk, &wk) in w.iter().enumerate() {
+                if wk <= 0.3 {
+                    continue;
+                }
+                let (vertical, block) = {
                     let side = self.def();
-                    side.slots[side.on[dk]].p.attrs[Attr::Vertical]
+                    (
+                        side.slots[side.on[dk]].p.attrs[Attr::Vertical],
+                        side.eff(side.on[dk], Attr::Block),
+                    )
                 };
-                let air = 2.0 * (2.0 * Pose::max_lift(vertical) * 0.6 / GRAVITY).sqrt();
-                let after = (release - t0 - air / 2.0).max(0.0);
-                self.leap(1 - o, dk, Action::Contesting, 0.6, after, air);
+                let frac = (0.5 + 0.025 * block).clamp(0.5, 1.0);
+                let jitter = (0.16 - 0.006 * block).clamp(0.04, 0.18);
+                let late = shot::gauss(&mut self.rng) * jitter;
+                let air = 2.0 * (2.0 * Pose::max_lift(vertical) * frac / GRAVITY).sqrt();
+                let after = (release - t0 - air / 2.0 + late).max(0.0);
+                self.leap(1 - o, dk, Action::Contesting, frac, after, air);
             }
         }
     }
 
-    /// What the shot will be, settled as he leaves the floor: the contest on
-    /// it, whether he is fouled, whether it goes in, whether a hand gets to
-    /// it. A three is a three by where his feet left the floor.
+    /// What is settled as he leaves the floor: the contest on the shot, and
+    /// whether a hand fouls him. Whether it goes in is not: that is up to
+    /// the ball.
     fn verdict(&mut self, h: usize, off_dribble: bool) -> Verdict {
+        let _ = off_dribble;
         let p = self.op(h);
         let (kind, c, near) = self.look(h);
-        let c = c * self.play.edge;
+        let edge = self.play.edge;
+        let c = c * edge;
         self.play.edge = 1.0;
-        let pct = self.pct(h, kind, c, near, off_dribble);
         // Contact on the shooter: more of it from a defender moving into
         // him than from one who goes straight up, from a man who cannot
         // keep his hands off, and for a shooter who goes looking for it.
@@ -3418,57 +3518,138 @@ impl Game {
             self.rng.chance(raw.min(0.95))
         });
         let fouled = contact && self.called(1.0);
-        let made = self.rng.chance(if fouled {
-            pct * 0.55
-        } else if contact {
-            pct * 0.8
-        } else {
-            pct
-        });
-        let blocker = near.filter(|&dk| {
-            let base = match kind {
-                ShotKind::Rim => 0.235,
-                ShotKind::Mid => 0.07,
-                ShotKind::Three => 0.008,
-            };
-            let def = self.def();
-            let p_block =
-                base * c.min(1.0) * self.de(dk, Attr::Block) / 10.0 * def.length(def.on[dk]);
-            let planted = self.play.hunt.is_some_and(|(hk, _, _)| hk == dk);
-            !made && !fouled && !planted && self.rng.chance(p_block)
-        });
         let assist = self
             .play
             .assist
-            .filter(|&(_, at)| made && self.play.t - at < 3.0)
+            .filter(|&(_, at)| self.play.t - at < 3.0)
             .map(|(k, _)| k);
-        if let Some(dk) = blocker {
-            // He goes up to meet it.
-            let max = {
-                let d = self.def();
-                Pose::max_lift(d.slots[d.on[dk]].p.attrs[Attr::Vertical])
-            };
-            let air = 2.0 * (2.0 * max / GRAVITY).sqrt();
-            let rise = self.play.shot.map_or(0.3, |s| s.release - self.play.t);
-            let d = 1 - self.play.o;
-            self.leap(
-                d,
-                dk,
-                Action::Blocking,
-                1.0,
-                (rise - air / 2.0 + 0.18).max(0.0),
-                air,
-            );
-        }
         Verdict {
             kind,
             c,
+            edge,
             near,
-            made,
+            contact,
             fouled,
-            blocker,
             assist,
         }
+    }
+
+    /// The error in a launch: how far the ball is put off line and off the
+    /// speed, one standard deviation at the ring. Skill shrinks it; distance,
+    /// a man on the move, a hand in his face (how close, how long, and
+    /// whether he is up), a poor look, an unfamiliar set and being hit all
+    /// grow it.
+    #[allow(clippy::too_many_arguments)]
+    fn shot_errors(
+        &self,
+        h: usize,
+        style: Style,
+        kind: ShotKind,
+        d: f32,
+        c: f32,
+        near: Option<usize>,
+        off_dribble: bool,
+        verdict: &Verdict,
+        reach_edge: f32,
+    ) -> Errors {
+        let rim = matches!(style, Style::Layup | Style::Dunk) || kind == ShotKind::Rim;
+        let (lat, depth) = shot::base(style, rim, d);
+        let comp = self.oe(h, Attr::Composure) - 10.0;
+        let mut m = if style == Style::Dunk {
+            // The hand carries it through: only a body in the way, or the
+            // top of his reach, spoils it.
+            1.0 + shot::tune("DUNK_CONTEST", DUNK_CONTEST) * c + shot::tune("DUNK_EDGE", DUNK_EDGE) * (0.15 - reach_edge).max(0.0)
+        } else if rim {
+            let finish = 0.6 * self.oe(h, Attr::CloseShot)
+                + 0.2 * self.oe(h, Attr::Vertical)
+                + 0.2 * self.oe(h, Attr::Strength);
+            let protect = near.map_or(10.0, |dk| {
+                0.5 * self.de(dk, Attr::InteriorD) + 0.5 * self.de(dk, Attr::Block)
+            });
+            (1.0 - shot::tune("FINISH_SLOPE", FINISH_SLOPE) * (finish - 10.0)).clamp(0.4, 2.0)
+                * (1.0 + shot::tune("CONTEST_RIM", CONTEST_RIM) * c * (1.0 + shot::tune("GUARD_SLOPE", GUARD_SLOPE) * (protect - 10.0)).max(0.3))
+        } else {
+            let touch = if kind == ShotKind::Three {
+                self.oe(h, Attr::ThreePoint)
+            } else if d < 4.0 {
+                self.oe(h, Attr::MidRange).max(self.oe(h, Attr::PostMoves))
+            } else {
+                self.oe(h, Attr::MidRange)
+            };
+            let guard = near.map_or(10.0, |dk| self.de(dk, Attr::PerimeterD));
+            let k = if kind == ShotKind::Three {
+                shot::tune("CONTEST_THREE", CONTEST_THREE)
+            } else {
+                shot::tune("CONTEST_MID", CONTEST_MID) + (4.0 - d).max(0.0) * 0.06
+            };
+            // Off balance: the speed he is going at as the ball leaves him.
+            let speed = self.m[self.play.o][h].vel.len();
+            (1.0 - shot::tune("SKILL_SLOPE", SKILL_SLOPE) * (touch - 10.0)).clamp(0.4, 2.0)
+                * (1.0 + k * c * (1.0 + shot::tune("GUARD_SLOPE", GUARD_SLOPE) * (guard - 10.0)).max(0.3))
+                * (1.0 + shot::tune("MOVING", MOVING) * speed)
+                * if off_dribble { 1.0 + shot::tune("OFF_DRIBBLE", OFF_DRIBBLE) } else { 1.0 }
+        };
+        m *= match (style, rim, kind) {
+            (Style::Dunk, _, _) => 1.0,
+            (_, true, _) => shot::tune("RIM_SCALE", RIM_SCALE),
+            (_, _, ShotKind::Three) => shot::tune("THREE_SCALE", THREE_SCALE),
+            _ => shot::tune("MID_SCALE", MID_SCALE),
+        };
+        m *= 1.0 - shot::tune("COMPOSURE", COMPOSURE) * comp;
+        m *= 1.0 + shot::tune("RHYTHM", RHYTHM) * self.off().unfamiliar;
+        if self.play.o == 0 {
+            m *= 1.0 - shot::tune("HOME", HOME);
+        }
+        // A hand on the arm or the body: whether or not it was called, he felt it.
+        if verdict.fouled {
+            m *= shot::tune("FOULED_ERR", FOULED_ERR);
+        } else if verdict.contact {
+            m *= shot::tune("CONTACT_ERR", CONTACT_ERR);
+        }
+        Errors::at_rim(d, lat * m * shot::tune("GAME", GAME), depth * m * shot::tune("GAME", GAME))
+    }
+
+    /// The arms of the defenders who could reach this ball as it leaves a
+    /// shooter's hand: where he stands, how long his arm, and the jump he
+    /// is in.
+    fn block_hands(&self, shooter: Vec2) -> ([Hand; 5], usize) {
+        let d = 1 - self.play.o;
+        let mut out = [Hand {
+            who: 0,
+            pos: Vec2::ZERO,
+            vel: Vec2::ZERO,
+            shoulder: 0.0,
+            arm: 0.0,
+            up_at: 0.0,
+            air: 0.0,
+            peak: 0.0,
+        }; 5];
+        let mut n = 0;
+        for dk in 0..5 {
+            let m = &self.m[d][dk];
+            if m.pos.dist(shooter) > 2.4 {
+                continue;
+            }
+            // A man planted for a charge has his arms folded.
+            if self.play.hunt.is_some_and(|(hk, _, _)| hk == dk) {
+                continue;
+            }
+            let reach = self.sides[d].slots[self.sides[d].on[dk]].p.body.standing_reach_cm / 100.0;
+            let arm = reach * shot::tune("ARM_SHARE", ARM_SHARE);
+            let j = &self.jump[d][dk];
+            out[n] = Hand {
+                who: dk,
+                pos: m.pos,
+                vel: m.vel,
+                shoulder: reach - arm,
+                arm: arm - shot::tune("BLOCK_SLACK", BLOCK_SLACK),
+                up_at: j.start - self.anim,
+                air: j.dur,
+                peak: j.peak,
+            };
+            n += 1;
+        }
+        (out, n)
     }
 
     fn shoot(&mut self, h: usize, off_dribble: bool) -> Option<End> {
@@ -3479,69 +3660,13 @@ impl Game {
         };
         let Verdict {
             kind,
-            c,
-            near,
-            made,
+            c: c_takeoff,
+            near: near_takeoff,
             fouled,
-            blocker,
             assist,
+            ..
         } = verdict;
-        if made || !fouled {
-            let line = self.oline(h);
-            line.fga += 1;
-            if kind == ShotKind::Three {
-                line.tpa += 1;
-            }
-        }
-        if self.play.source == Source::Drive
-            && let Some(rec) = &mut self.rec
-        {
-            let d = &mut rec.drive[self.play.drive_class];
-            d[0] += 1.0;
-            d[1] += (kind == ShotKind::Rim) as u8 as f32;
-            d[2] += c;
-            d[3] += if made { kind.points() as f32 } else { 0.0 };
-        }
-        let who = self.oid(h);
-        let event = EventKind::Shot {
-            who,
-            kind,
-            source: self.play.source,
-            made,
-            contest: c,
-            defender: near.map(|dk| self.did(dk)),
-            assist: assist.map(|k| self.oid(k)),
-            blocked_by: blocker.map(|dk| self.did(dk)),
-            fouled,
-        };
-        self.event(event);
-        if made {
-            self.blame(h, kind, c);
-        }
-        let mut foul_shots = 0;
-        if fouled && let Some(dk) = near {
-            let shots = if made { 1 } else { kind.points() };
-            self.defensive_foul(dk, h, shots as u8, FoulKind::Shooting);
-            if !made {
-                foul_shots = shots;
-            }
-        }
-
-        // Somewhere off the rim, further out the longer the shot.
-        let reach = match kind {
-            ShotKind::Rim => 0.6 + self.rng.f32() * 1.4,
-            ShotKind::Mid => 0.8 + self.rng.f32() * 2.2,
-            ShotKind::Three => 1.0 + self.rng.f32() * 3.4,
-        };
-        let dir = v(self.rng.f32() - 0.5, self.rng.f32() * 0.8 - 0.15).norm();
-        let mut landing = HOOP + dir * reach;
-        // A ball that comes off the front of the ring does not go through the
-        // glass: what would have gone behind the board comes off the other way.
-        if landing.y < 1.4 {
-            landing.y = 2.8 - landing.y;
-        }
-
-        // The flight: from the hand above his head, and agreeing with the result.
+        // The flight: from the hand above his head.
         let mut plan = self
             .play
             .shot
@@ -3558,7 +3683,7 @@ impl Game {
                 hand_z: 2.6,
             });
         let to_rim = p.dist(HOOP);
-        if plan.style == Style::Dunk && (!made || blocker.is_some() || to_rim > DUNK_RANGE) {
+        if plan.style == Style::Dunk && to_rim > DUNK_RANGE {
             plan.style = Style::Layup;
         }
         self.play.shot = Some(plan);
@@ -3574,68 +3699,128 @@ impl Game {
         } else {
             plan.hand_z
         };
-        let dur = match style {
-            Style::Dunk => 0.1 + 0.15 * (to_rim - 0.5).max(0.0),
-            Style::Layup => 0.42,
-            _ => match kind {
-                ShotKind::Rim => 0.5,
-                ShotKind::Mid => 0.9,
-                ShotKind::Three => 1.2,
-            },
+
+        // How the contest stands as the ball leaves his hand: the men near
+        // him as they are now, and how high their hands are.
+        let rim_kind = kind == ShotKind::Rim;
+        let mut w = self.contest_each(p, h, rim_kind);
+        for (dk, w) in w.iter_mut().enumerate() {
+            if *w > 0.0 {
+                let up = self.lift_at(1 - self.play.o, dk, 0.0);
+                let max = {
+                    let d = self.def();
+                    Pose::max_lift(d.slots[d.on[dk]].p.attrs[Attr::Vertical])
+                };
+                *w *= shot::tune("HAND_STANDING", HAND_STANDING) + (1.0 - shot::tune("HAND_STANDING", HAND_STANDING)) * (up / (0.5 * max)).min(1.0);
+            }
+        }
+        let (c_now, near_now) = Self::sum_contest(w, rim_kind);
+        let c = c_now * verdict.edge;
+        let near = near_now.or(near_takeoff);
+        let _ = c_takeoff;
+        let reach_edge = {
+            let pl = &self.off().slots[self.off().on[h]].p;
+            pl.body.standing_reach_cm / 100.0 + plan.peak - (RIM_HEIGHT + DUNK_CLEAR)
         };
-        let sign = if p.x >= HOOP.x { 1.0 } else { -1.0 };
-        let (path, ring_at, rim) = if made {
-            let bank = (style == Style::Layup && (p.x - HOOP.x).abs() > 0.8).then_some(0.25 * sign);
-            let (path, t) = flight::made(from, z0, dur, v(0.03 * sign, 0.0), bank);
-            (path, t, (HOOP, RIM_HEIGHT))
-        } else if let Some(dk) = blocker {
-            // Met by a hand a step in front of the shooter and swatted back.
-            let (max, reach_d) = {
-                let d = self.def();
-                let body = &d.slots[d.on[dk]].p;
-                (
-                    Pose::max_lift(body.attrs[Attr::Vertical]),
-                    body.body.standing_reach_cm / 100.0,
-                )
-            };
-            let tb = 0.18f32;
-            let vz = (2.0 * GRAVITY * max).sqrt();
-            let lift = (vz * tb - 0.5 * GRAVITY * tb * tb).max(0.0);
-            let hand = (reach_d + lift - 0.05).clamp(1.9, 3.8);
-            let bp = self.dp(dk);
-            let gap = p.dist(bp);
-            let at = p.toward(bp, (gap - 0.25).clamp(0.25, 1.2));
-            let mut path = Path::new();
-            path.push(flight::Arc::reach(from, z0, at, hand, tb));
-            let out = (p - HOOP).norm();
-            landing = at + out * 1.5;
-            let dd = 1 - self.play.o;
-            self.m[dd][dk].target = at;
-            (path, tb, (at, hand))
+        let errors = self.shot_errors(
+            h,
+            style,
+            kind,
+            to_rim,
+            c,
+            near,
+            off_dribble,
+            &verdict,
+            reach_edge,
+        );
+        let start = ball::clear_start(v3(from.x, from.y, z0));
+        let (ideal, _) = shot::ideal(start, style);
+        let launch = shot::perturb(ideal, errors, &mut self.rng);
+        let (hands, nh) = if style == Style::Dunk {
+            ([Hand::NONE; 5], 0)
         } else {
-            let glass = matches!(style, Style::Layup | Style::Hook) && landing.x > HOOP.x;
-            let (path, touch, tz) = flight::missed(from, z0, dur, glass);
-            (path, dur, (touch, tz))
+            self.block_hands(p)
         };
+        let flown = ball::fly(Ball { p: start, v: launch }, &hands[..nh]);
+        let made = flown.made;
+        let blocker = flown.blocked.map(|(dk, _)| dk);
+
+        if made || !fouled {
+            let line = self.oline(h);
+            line.fga += 1;
+            if kind == ShotKind::Three {
+                line.tpa += 1;
+            }
+        }
+        let who = self.oid(h);
+        let event = EventKind::Shot {
+            who,
+            kind,
+            source: self.play.source,
+            made,
+            contest: c_takeoff,
+            defender: near_takeoff.map(|dk| self.did(dk)),
+            assist: assist.filter(|_| made).map(|k| self.oid(k)),
+            blocked_by: blocker.map(|dk| self.did(dk)),
+            fouled,
+        };
+        if self.play.source == Source::Drive
+            && let Some(rec) = &mut self.rec
+        {
+            let d = &mut rec.drive[self.play.drive_class];
+            d[0] += 1.0;
+            d[1] += (kind == ShotKind::Rim) as u8 as f32;
+            d[2] += c_takeoff;
+            d[3] += if made { kind.points() as f32 } else { 0.0 };
+        }
+        self.event(event);
+        if made {
+            self.blame(h, kind, c_takeoff);
+        }
+        let mut foul_shots = 0;
+        if fouled && let Some(dk) = near_takeoff {
+            let shots = if made { 1 } else { kind.points() };
+            self.defensive_foul(dk, h, shots as u8, FoulKind::Shooting);
+            if !made {
+                foul_shots = shots;
+            }
+        }
         if let Some(dk) = blocker {
             self.dline(dk).blk += 1;
+            let d = 1 - self.play.o;
+            let tb = flown.blocked.map_or(0.0, |b| b.1);
+            let j = self.jump[d][dk];
+            if j.dur > 0.0 && self.anim + tb >= j.start && self.anim + tb <= j.start + j.dur {
+                self.jump[d][dk].action = Action::Blocking;
+            } else {
+                // He met it standing, arm up: shown as a reach, not a leap.
+                self.leap(d, dk, Action::Blocking, 0.0, (tb - 0.2).max(0.0), 0.5);
+            }
         }
-        self.play.rim = rim;
+        self.play.def_touch = blocker.is_some();
+        self.play.tips = 0;
+
+        let path = flown.path;
+        self.log_path(&path, 0.0, 0.0);
         let (b, bz) = path.at(0.0);
         self.play.ball = b;
         self.play.ball_h = bz;
+        let dur = if made {
+            flown.ring_at
+        } else {
+            Self::live_time(&flown)
+        };
         self.play.flight = Some(Flight {
             from: p,
             to: HOOP,
             t: 0.0,
-            dur: ring_at,
+            dur,
             kind: FlightKind::Shot {
                 shooter: h,
                 made,
                 kind,
-                assist,
+                assist: assist.filter(|_| made),
                 and_one: fouled,
-                landing,
                 foul_shots,
                 line: false,
             },
@@ -3644,7 +3829,6 @@ impl Game {
         self.play.holder = None;
         self.play.phase = Phase::Air;
         self.play.boxout = foul_shots == 0;
-        self.reb_up = false;
 
         // Who goes to the glass, who gets back and who stays to watch it.
         let crash = match self.off().tactics.crash_boards {
@@ -3680,6 +3864,25 @@ impl Game {
         // The shooter holds his follow-through and watches.
         self.play.task[h] = Task::Watch(plan.follow_end);
         None
+    }
+
+    /// Seconds into the flight at which the ball can be played: when it
+    /// first touches iron, glass or a hand, or, if it touches nothing, when
+    /// it is on its way down.
+    fn live_time(f: &Flown) -> f32 {
+        if let Some((t, _, _)) = f.touch {
+            return t;
+        }
+        let total = f.path.total();
+        let mut t = 0.1;
+        while t < total {
+            let (_, z, _, vz) = f.path.state(t);
+            if vz < 0.0 && z < 4.2 {
+                return t;
+            }
+            t += 0.02;
+        }
+        total
     }
 
     /// Pin a made basket on a defender when one was clearly at fault.
@@ -3756,31 +3959,27 @@ impl Game {
                 kind,
                 assist,
                 and_one,
-                landing,
                 foul_shots,
                 line,
             } => {
                 let path = f.path.unwrap_or_else(Path::new);
                 if line {
-                    return self.land_free_throw(shooter, made, landing, f.t, path);
+                    return self.land_free_throw(shooter, made, f.t, path);
                 }
                 if !made {
                     if foul_shots > 0 {
                         // A dead ball: it falls away and the shooter goes to the line.
-                        let (touch, z) = self.play.rim;
-                        let mut fall = Path::new();
-                        fall.fall(touch, z, 1.0, Self::off_the_iron(touch));
                         self.after_path(
                             AfterKind::Fall {
                                 shooter,
                                 shots: foul_shots,
                             },
-                            fall,
-                            0.0,
+                            path,
+                            f.t,
                         );
                         return None;
                     }
-                    return self.rebound(landing, false);
+                    return self.go_live(path, f.t, false);
                 }
                 let points = kind.points();
                 let line = self.oline(shooter);
@@ -3818,15 +4017,6 @@ impl Game {
         self.play.after = Some(After { kind, path, t, end });
     }
 
-    /// Which way a dead ball bounces off the iron or the glass: into the court.
-    fn off_the_iron(touch: Vec2) -> Vec2 {
-        if touch.y <= HOOP.y {
-            v(0.0, 1.2)
-        } else {
-            (touch - HOOP).norm() * 1.2
-        }
-    }
-
     /// The ball has done what the result said; what comes next.
     fn settle(&mut self, a: After) -> Option<End> {
         match a.kind {
@@ -3838,7 +4028,7 @@ impl Game {
                 }
                 self.loose = Some((a.path, a.t));
                 if then > 0 {
-                    return self.free_throws(shooter, then, Some(a.path.end().0));
+                    return self.free_throws(shooter, then, Some(a.path.at(a.t).0));
                 }
                 self.credit = 0.9;
                 Some(End::Dead)
@@ -3846,12 +4036,26 @@ impl Game {
             AfterKind::Fall { shooter, shots } => {
                 self.loose = Some((a.path, a.t));
                 if shots > 0 {
-                    return self.free_throws(shooter, shots, Some(a.path.end().0));
+                    return self.free_throws(shooter, shots, Some(a.path.at(a.t).0));
                 }
                 self.send_back(shooter, a)
             }
-            AfterKind::Rebound { who, free_throw } => {
-                self.finish_rebound(who, a.path.end().0, free_throw)
+            AfterKind::Live { .. } => None,
+            AfterKind::Inbound { who } => {
+                // Back from out of bounds to the attackers.
+                self.play.holder = Some(who);
+                self.play.ball = self.op(who);
+                self.play.ball_h = a.path.end().1;
+                self.play.phase = Phase::Set;
+                self.play.think = 0.5;
+                self.play.shot_clock = self.play.shot_clock.max(14.0);
+                self.play.task = [Task::Spot; 5];
+                self.play.dribbled = false;
+                self.play.moves = 0;
+                self.play.assist = None;
+                self.play.from = None;
+                self.play.boxout = false;
+                None
             }
             AfterKind::Return { shooter } => {
                 self.play.holder = Some(shooter);
@@ -3888,226 +4092,459 @@ impl Game {
         None
     }
 
-    /// Where a man who runs flat out for `to` is after `secs`, from the way
-    /// he is moving now.
-    fn reach_by(&self, t: usize, k: usize, to: Vec2, secs: f32) -> Vec2 {
-        let mut m = self.m[t][k];
-        m.hard = false;
-        m.pace = 1.0;
-        let (top, r) = (self.cache.top[t * 5 + k], self.bulk_base[t * 5 + k].r);
-        for _ in 0..(secs / DT).ceil() as usize {
-            m.step(top, to, r);
+    /// Record the arcs of `path` from path time `from_t` on, with path time
+    /// `from_t` falling `ahead` seconds after the current frame time.
+    fn log_path(&mut self, path: &Path, from_t: f32, ahead: f32) {
+        let f = self.frame;
+        let wall = self.wall + ahead;
+        let Some(rec) = &mut self.rec else { return };
+        let mut start = 0.0f32;
+        for a in path.arcs() {
+            let end = start + a.dur;
+            if end > from_t {
+                let s = (from_t - start).max(0.0);
+                let u = s / a.dur;
+                let p0 = a.p0.lerp(a.p1, u);
+                let vel = (a.p1 - a.p0) * (1.0 / a.dur);
+                let c0 = to_court(p0, f);
+                let cv = to_court(p0 + vel, f) - c0;
+                rec.ball_arcs.push(BallArc {
+                    t0: wall + (start + s - from_t),
+                    dur: a.dur - s,
+                    p0: c0,
+                    vel: cv,
+                    z0: a.z0 + a.vz * s - 0.5 * a.g * s * s,
+                    vz: a.vz - a.g * s,
+                    g: a.g,
+                });
+            }
+            start = end;
         }
-        m.pos
     }
 
-    fn rebound(&mut self, landing: Vec2, free_throw: bool) -> Option<End> {
-        let mut weights = [0.0f32; 10];
-        let (touch, touch_z) = self.play.rim;
-        let flight_time = (touch.dist(landing) / 4.0).clamp(0.55, 1.1);
-        // Somebody who cannot get to the ball in the time it takes to come
-        // down does not get it.
-        let mut cannot = [false; 10];
-        for (i, c) in cannot.iter_mut().enumerate() {
-            let (t, k) = if i < 5 {
-                (self.play.o, i)
+    /// The ball was taken out of the air `back` seconds from the current
+    /// frame time (zero or negative): drop what was recorded after that.
+    fn cut_log(&mut self, back: f32) {
+        let at = self.wall + back;
+        let Some(rec) = &mut self.rec else { return };
+        while let Some(a) = rec.ball_arcs.last() {
+            if a.t0 >= at - 1e-4 {
+                rec.ball_arcs.pop();
             } else {
-                (1 - self.play.o, i - 5)
-            };
-            // Nobody outruns his top speed: no need to work it out for the far ones.
-            let far = self.m[t][k].pos.dist(landing)
-                > self.cache.top[t * 5 + k] * flight_time + REB_REACH;
-            *c = far || {
-                let end = self.reach_by(t, k, landing, flight_time);
-                // A man behind the board is not going to get the ball.
-                end.dist(landing) > REB_REACH || (end.y < BOARD_Y + 0.3 && end.x.abs() < 1.0)
-            };
-        }
-        for k in 0..5 {
-            let near = |p: Vec2| {
-                let d = p.dist(landing);
-                1.0 / (0.6 + d * d)
-            };
-            let off = self.off();
-            let o = self.oe(k, Attr::OffRebound);
-            let going = if self.play.task[k] == Task::Crash {
-                1.0
-            } else {
-                0.35
-            };
-            weights[k] = o
-                * o
-                * off.length(off.on[k])
-                * near(self.op(k))
-                * going
-                * if free_throw { 0.4 } else { 0.85 };
-            let def = self.def();
-            let d = self.de(k, Attr::DefRebound);
-            weights[5 + k] = d * d * def.length(def.on[k]) * near(self.dp(k))
-                // Nobody has a man to box out in a zone.
-                * match self.scheme() {
-                    DefenseScheme::Zone23 => 0.85,
-                    DefenseScheme::Zone32 => 0.78,
-                    _ => 1.0,
-                };
-        }
-        // A body between a player and the ball, on the inside, with the
-        // weight and strength to hold it, keeps him off it.
-        let bulk = self.bulks();
-        let o = self.play.o;
-        let at: [Vec2; 10] = std::array::from_fn(|i| {
-            let (t, k) = if i < 5 { (o, i) } else { (1 - o, i - 5) };
-            self.m[t][k].pos
-        });
-        let still: [f32; 10] = std::array::from_fn(|i| {
-            let (t, k) = if i < 5 { (o, i) } else { (1 - o, i - 5) };
-            if self.m[t][k].vel.len() < 1.0 {
-                1.3
-            } else {
-                1.0
+                break;
             }
+        }
+        if let Some(a) = rec.ball_arcs.last_mut() {
+            a.dur = a.dur.min(at - a.t0);
+        }
+    }
+
+    /// Court index (side, k) of attackers-first index `i`.
+    fn side_of(&self, i: usize) -> (usize, usize) {
+        if i < 5 {
+            (self.play.o, i)
+        } else {
+            (1 - self.play.o, i - 5)
+        }
+    }
+
+    /// The ball is off the iron, the glass or a hand and live. Everybody
+    /// reads it, and goes to where he thinks it will be.
+    fn go_live(&mut self, path: Path, t0: f32, free_throw: bool) -> Option<End> {
+        self.play.boxout = false;
+        self.play.after = Some(After {
+            kind: AfterKind::Live { free_throw },
+            path,
+            t: t0,
+            end: path.total(),
         });
-        // `bulk` is indexed by side; `at` and `weights` attackers first.
-        let anchor = |i: usize| {
-            bulk[if i < 5 {
-                o * 5 + i
-            } else {
-                (1 - o) * 5 + i - 5
-            }]
-            .anchor
-        };
-        let radius = |i: usize| {
-            bulk[if i < 5 {
-                o * 5 + i
-            } else {
-                (1 - o) * 5 + i - 5
-            }]
-            .r
-        };
-        let mut held_by = [0.0f32; 10];
-        let mut holder = [(0usize, 0.0f32); 10];
+        self.plan_chase(&path, t0);
+        None
+    }
+
+    /// Each man's read of the loose ball. How well he reads it is his
+    /// rebounding: how early he sees where it is going, how close his guess
+    /// lands and how well he times the jump. Whether he can be there is a
+    /// matter of where he stands, how fast he is and who is in the way.
+    fn plan_chase(&mut self, path: &Path, t0: f32) {
         for i in 0..10 {
-            let mine = at[i].dist(landing);
-            let mut held = 0.0;
-            for j in 0..10 {
-                if (i < 5) == (j < 5) || at[j].dist(landing) > mine - 0.1 {
+            let (t, k) = self.side_of(i);
+            let side = &self.sides[t];
+            let slot = side.on[k];
+            let attr = if t == self.play.o {
+                Attr::OffRebound
+            } else {
+                Attr::DefRebound
+            };
+            let skill = side.eff(slot, attr);
+            let pl = &side.slots[slot].p;
+            let reach = pl.body.standing_reach_cm / 100.0;
+            let peak = Pose::max_lift(pl.attrs[Attr::Vertical]) * shot::tune("JUMP_FRAC", JUMP_FRAC);
+            let air = 2.0 * (2.0 * peak / GRAVITY).sqrt();
+            let want = (reach + 0.9 * peak - 0.05).clamp(2.0, 3.6);
+            let (tc, spot) = path
+                .comes_down_to(t0, want)
+                .or_else(|| path.comes_down_to(t0, 1.2))
+                .unwrap_or((path.total(), path.end().0));
+            let sigma = (shot::tune("READ_SPOT", READ_SPOT) - shot::tune("READ_SPOT_SKILL", READ_SPOT_SKILL) * skill).clamp(0.12, 1.2);
+            let truth = spot;
+            let spot = Vec2 {
+                x: spot.x + shot::gauss(&mut self.rng) * sigma,
+                y: spot.y + shot::gauss(&mut self.rng) * sigma,
+            };
+            let react = (shot::tune("READ_DELAY", READ_DELAY) - shot::tune("READ_DELAY_SKILL", READ_DELAY_SKILL) * skill).clamp(0.05, 0.5);
+            let jitter = (shot::tune("READ_TIMING", READ_TIMING) - shot::tune("READ_TIMING_SKILL", READ_TIMING_SKILL) * skill).clamp(0.03, 0.3);
+            let jump_at = tc + shot::gauss(&mut self.rng) * jitter - 0.5 * air;
+            let me = self.m[t][k].pos;
+            let top = self.cache.top[t * 5 + k];
+            let secs = (tc - t0 + 0.3 - react).max(0.0);
+            self.play.chase[i] = Chase {
+                active: me.dist(spot) <= top * secs + 1.5,
+                spot,
+                truth,
+                go: t0 + react,
+                arrive: tc,
+                jump_at,
+                jumped: false,
+            };
+        }
+    }
+
+    /// Whoever is under a rebound goes for it, and goes up to meet it.
+    fn steer_rebound(&mut self) {
+        let Some(After {
+            kind: AfterKind::Live { .. },
+            t: now,
+            path,
+            ..
+        }) = self.play.after
+        else {
+            return;
+        };
+        let ball = self.play.ball;
+        for i in 0..10 {
+            let c = self.play.chase[i];
+            let (t, k) = self.side_of(i);
+            let pos = self.m[t][k].pos;
+            // A man who sees the ball coming into his jump reach goes up
+            // for it, planned or not.
+            if !c.jumped {
+                let pl = &self.sides[t].slots[self.sides[t].on[k]].p;
+                let reach = pl.body.standing_reach_cm / 100.0;
+                let frac = shot::tune("JUMP_FRAC", JUMP_FRAC);
+                let peak = Pose::max_lift(pl.attrs[Attr::Vertical]) * frac;
+                let (bp, bz, _, bvz) = path.state(now + 0.25);
+                if bp.dist(pos) < 1.3 && bz > reach - 0.3 && bz < reach + peak && bvz < 1.0 && self.lift_at(t, k, 0.0) == 0.0 {
+                    self.play.chase[i].jumped = true;
+                    let air = 2.0 * (2.0 * peak / GRAVITY).sqrt();
+                    self.leap(t, k, Action::Rebounding, frac, 0.0, air);
                     continue;
                 }
-                let lane = at[j].project(at[i], landing);
-                if at[j].dist(lane) < radius(i) + radius(j) + 0.25 {
-                    held += anchor(j) * still[j] / anchor(i);
-                    if anchor(j) > holder[i].1 {
-                        holder[i] = (j, anchor(j));
+            }
+            // A ball that has come down and is still moving: whoever is
+            // near goes to it where it is.
+            let late = now > c.arrive + 0.2;
+            if late && pos.dist(ball) < 6.0 {
+                let m = &mut self.m[t][k];
+                m.target = ball;
+                m.pace = 1.0;
+                continue;
+            }
+            if !c.active || now < c.go {
+                continue;
+            }
+            // He sees it better as it comes: his guess closes on the truth.
+            let w = ((now - c.go) / (c.arrive - c.go).max(0.1)).clamp(0.0, 1.0);
+            let aim = c.spot.lerp(c.truth, w * w * 0.85);
+            let dist = pos.dist(aim);
+            let m = &mut self.m[t][k];
+            m.target = aim;
+            m.pace = if dist < 0.15 { 0.0 } else { 1.0 };
+            let can = self.cache.top[t * 5 + k] * (c.arrive - now).max(0.0) + 1.2;
+            if !c.jumped && now >= c.jump_at && dist < can {
+                self.play.chase[i].jumped = true;
+                let vertical = self.sides[t].slots[self.sides[t].on[k]].p.attrs[Attr::Vertical];
+                let peak = Pose::max_lift(vertical) * shot::tune("JUMP_FRAC", JUMP_FRAC);
+                let air = 2.0 * (2.0 * peak / GRAVITY).sqrt();
+                self.leap(t, k, Action::Rebounding, shot::tune("JUMP_FRAC", JUMP_FRAC), 0.0, air);
+            }
+        }
+    }
+
+    /// Whose hand, if any, is on the ball at `ball` (over the floor, height)
+    /// with the men where they are `ahead` seconds from now: for each of
+    /// the ten, how far inside his reach it is.
+    fn reach_of(&self, i: usize, ball: (Vec2, f32), pos: Vec2, ahead: f32) -> Option<f32> {
+        let (t, k) = self.side_of(i);
+        // The glass is in the way of a man behind it.
+        if (pos.y < BOARD_Y) != (ball.0.y < BOARD_Y)
+            && ball.1 > BOARD_LOW - 0.3
+            && ball.0.x.abs() < 1.2
+            && pos.x.abs() < 1.2
+        {
+            return None;
+        }
+        let reach = self.sides[t].slots[self.sides[t].on[k]].p.body.standing_reach_cm / 100.0;
+        let arm = reach * shot::tune("ARM_SHARE", ARM_SHARE);
+        let lift = self.lift_at(t, k, ahead);
+        let dh = pos.dist(ball.0);
+        let dz = ball.1 - (reach - arm + lift);
+        let gap = arm + 0.02 - (dh * dh + dz * dz).sqrt();
+        if gap >= 0.0 {
+            return Some(gap);
+        }
+        // Down at his feet he can bend for it.
+        (ball.1 < 0.9 && dh < 0.65).then_some(0.0)
+    }
+
+    /// One tick of a live ball: look for the first hand on it, in fine
+    /// steps through the tick.
+    fn live_ball(&mut self, a: After) -> Option<End> {
+        let AfterKind::Live { free_throw } = a.kind else {
+            return None;
+        };
+        let steps = 10;
+        let t1 = a.t;
+        let t0 = (t1 - DT).max(0.0);
+        for s in 1..=steps {
+            let f = s as f32 / steps as f32;
+            let ts = t0 + (t1 - t0) * f;
+            let (bp, bz, bv, bvz) = a.path.state(ts);
+            // On the rim the ball can still go in: nobody has a hand on it.
+            let near_ring = bp.dist(HOOP) < 0.45 && bz > RIM_HEIGHT - 0.3 && bz < RIM_HEIGHT + 0.6;
+            let mut cands: [(usize, f32); 10] = [(0, 0.0); 10];
+            let mut n = 0;
+            if !near_ring {
+                for i in 0..10 {
+                    let (t, k) = self.side_of(i);
+                    let pos = self.prev_pos[t][k].lerp(self.m[t][k].pos, f);
+                    if let Some(gap) = self.reach_of(i, (bp, bz), pos, ts - t1) {
+                        cands[n] = (i, gap);
+                        n += 1;
                     }
                 }
             }
-            held_by[i] = held;
-            // Offensive rebounders are the ones kept out, so the whole
-            // field is scaled to keep the league's offensive rebound rate.
-            weights[i] *= if i < 5 { REB_OFF } else { 1.0 } / (1.0 + REB_HELD * held);
-        }
-        for (w, c) in weights.iter_mut().zip(cannot) {
-            if c {
-                *w = 1e-6;
+            if n > 0 {
+                return self.touch_ball(a, ts, (bp, bz, bv, bvz), &cands[..n], free_throw);
+            }
+            // Out of play.
+            if bp.x.abs() > 7.5 + BALL_RADIUS || bp.y < -BALL_RADIUS || bp.y > LENGTH + BALL_RADIUS
+            {
+                return self.out_of_bounds(a, ts);
             }
         }
-        let mut who = self.rng.weighted(&weights);
-        self.play.boxout = false;
+        if t1 >= a.end + 8.0 {
+            // Nobody has gone for it: the nearest man.
+            let (bp, _, _, _) = a.path.state(a.end);
+            let mut best = (0, f32::MAX);
+            for i in 0..10 {
+                let (t, k) = self.side_of(i);
+                let d = self.m[t][k].pos.dist(bp);
+                if d < best.1 {
+                    best = (i, d);
+                }
+            }
+            return self.control(a, a.end, best.0, free_throw);
+        }
+        None
+    }
+
+    /// Hands are on the ball: who has it, or whether it is knocked about
+    /// and stays live.
+    fn touch_ball(
+        &mut self,
+        a: After,
+        ts: f32,
+        state: (Vec2, f32, Vec2, f32),
+        cands: &[(usize, f32)],
+        free_throw: bool,
+    ) -> Option<End> {
+        let (bp, bz, bv, bvz) = state;
+        let speed = (bv.dot(bv) + bvz * bvz).sqrt();
+        // Whose it is when several have a hand on it: the one with the
+        // better reach into it, the better rebounder and the stronger.
+        let mut weights = [0.0f32; 10];
+        for (j, &(i, gap)) in cands.iter().enumerate() {
+            let (t, k) = self.side_of(i);
+            let side = &self.sides[t];
+            let attr = if t == self.play.o {
+                Attr::OffRebound
+            } else {
+                Attr::DefRebound
+            };
+            let skill = side.eff(side.on[k], attr);
+            weights[j] = skill * skill * (0.3 + gap) * side.length(side.on[k]);
+        }
+        let pick = self.rng.weighted(&weights[..cands.len()]);
+        let who = cands[pick].0;
+        let (t, k) = self.side_of(who);
+        // Another hand close enough to it makes it a fight.
+        let mut contested = cands.len() > 1;
+        for i in 0..10 {
+            if (i < 5) == (who < 5) {
+                continue;
+            }
+            let (ot, ok) = self.side_of(i);
+            if self.m[ot][ok].pos.dist(self.m[t][k].pos) < shot::tune("CONTEST_ZONE", CONTEST_ZONE) {
+                contested = true;
+            }
+        }
+        let side = &self.sides[t];
+        let attr = if t == self.play.o {
+            Attr::OffRebound
+        } else {
+            Attr::DefRebound
+        };
+        let skill = side.eff(side.on[k], attr);
+        let hands = side.eff(side.on[k], Attr::Handling);
+        let p_hold = (shot::tune("HOLD_BASE", HOLD_BASE) + shot::tune("HOLD_SKILL", HOLD_SKILL) * (0.7 * skill + 0.3 * hands - 10.0)
+            - if contested { shot::tune("HOLD_CONTEST", HOLD_CONTEST) } else { 0.0 }
+            - (speed - 4.0).max(0.0) * shot::tune("HOLD_SPEED", HOLD_SPEED))
+            .clamp(0.2, 0.99);
+        if self.play.tips >= 3 || self.rng.chance(p_hold) {
+            return self.control(a, ts, who, free_throw);
+        }
+        // Tipped: it goes up and away off his fingers and is live again.
+        self.play.tips += 1;
+        self.play.def_touch = who >= 5;
+        let ang = self.rng.f32();
+        // A direction from a unit square, no trigonometry.
+        let (dx, dy) = (self.rng.f32() * 2.0 - 1.0, self.rng.f32() * 2.0 - 1.0);
+        let dir = if dx == 0.0 && dy == 0.0 { v(1.0, 0.0) } else { v(dx, dy).norm() };
+        let _ = ang;
+        let kick = 1.5 + self.rng.f32() * 1.5;
+        let vel = v3(
+            bv.x * 0.25 + dir.x * kick,
+            bv.y * 0.25 + dir.y * kick,
+            (bvz * 0.2).max(0.0) + 1.5 + self.rng.f32() * 2.0,
+        );
+        self.cut_log(ts - a.t);
+        let flown = ball::fly(Ball { p: v3(bp.x, bp.y, bz), v: vel }, &[]);
+        // The rest of this tick on the new path.
+        let skip = a.t - ts;
+        self.log_path(&flown.path, 0.0, -skip);
+        self.play.after = Some(After {
+            kind: a.kind,
+            path: flown.path,
+            t: skip,
+            end: flown.path.total(),
+        });
+        self.plan_chase(&flown.path, skip);
+        None
+    }
+
+    /// The ball goes out of bounds.
+    fn out_of_bounds(&mut self, a: After, ts: f32) -> Option<End> {
+        self.cut_log(ts - a.t);
+        self.play.after = None;
+        let (bp, bz, _, _) = a.path.state(ts);
+        if self.play.def_touch {
+            // Off a defender: it is the attackers' ball still. Somebody
+            // brings it back to the nearest of them.
+            let k = (0..5)
+                .min_by(|&x, &y| self.op(x).dist(bp).total_cmp(&self.op(y).dist(bp)))
+                .unwrap_or(0);
+            let mut path = Path::new();
+            path.push(flight::Arc::reach(bp, bz, self.op(k), 1.1, 1.0));
+            self.log_path(&path, 0.0, -(a.t - ts));
+            self.play.after = Some(After {
+                kind: AfterKind::Inbound { who: k },
+                path,
+                t: a.t - ts,
+                end: 1.0,
+            });
+            return None;
+        }
+        let mut path = Path::new();
+        path.fall(
+            Vec2 {
+                x: bp.x.clamp(-7.8, 7.8),
+                y: bp.y.clamp(-0.3, LENGTH + 0.3),
+            },
+            bz.max(BALL_RADIUS),
+            0.0,
+            Vec2::ZERO,
+        );
+        self.loose = Some((path, 0.0));
+        self.credit = 0.0;
+        Some(End::Dead)
+    }
+
+    /// A hand has the ball and keeps it.
+    fn control(&mut self, a: After, ts: f32, who: usize, free_throw: bool) -> Option<End> {
+        self.cut_log(ts - a.t);
+        self.play.after = None;
+        let (bp, bz, _, _) = a.path.state(ts);
+        let (t, k) = self.side_of(who);
+        // He takes it where it is: the hand brings it to his body.
+        self.play.ball_h = bz;
+        self.play.ball = self.m[t][k].pos;
+        let _ = bp;
         // Going through a man who had the inside is a push, more likely the
         // more of him there is.
-        if held_by[who] > 0.0 && !free_throw {
-            let (side_k, other_k) = if who >= 5 {
-                (1 - self.play.o, who - 5)
-            } else {
-                (self.play.o, who)
-            };
+        let mut who = who;
+        let landing = bp;
+        let (held, blocker) = self.held_by(who, landing);
+        if held > 0.0 && !free_throw {
+            let (side_k, other_k) = self.side_of(who);
             let mult = self.sides[side_k].foul_mult(self.sides[side_k].on[other_k]);
-            let raw = REB_PUSH * held_by[who].min(2.0) * mult / CALL_BASE;
+            let raw = REB_PUSH * held.min(2.0) * mult / CALL_BASE;
             if self.rng.chance(raw.min(0.9)) && self.called(1.0) {
-                let blocker = holder[who].0;
                 if who >= 5 {
-                    // A defender over the back: the offense keeps it.
-                    let victim = (0..5)
-                        .min_by(|&a, &b| {
-                            self.op(a)
-                                .dist(landing)
-                                .total_cmp(&self.op(b).dist(landing))
-                        })
-                        .unwrap_or(0);
+                    // A defender over the back: the offense keeps it, and it
+                    // is the man he went through who has it.
+                    let victim = blocker.min(4);
                     self.play.push = Some((who, victim));
                     who = victim;
                 } else {
-                    self.play.push = Some((who, blocker - 5));
+                    self.play.push = Some((who, blocker.saturating_sub(5)));
                 }
             }
         }
-        // He goes to where he can meet it, and the ball comes to him: off
-        // the iron, up, and down to his hands at the top of his jump.
-        let (t, k) = if who >= 5 {
-            (1 - self.play.o, who - 5)
-        } else {
-            (self.play.o, who)
+        self.finish_rebound(who, landing, free_throw)
+    }
+
+    /// How much body is between man `i` and the ball at `landing`, on the
+    /// inside of him, and the heaviest of it (attackers-first index).
+    fn held_by(&self, i: usize, landing: Vec2) -> (f32, usize) {
+        let bulk = self.bulks();
+        let o = self.play.o;
+        let pos = |i: usize| {
+            let (t, k) = self.side_of(i);
+            self.m[t][k].pos
         };
-        let (reach, max_lift) = {
-            let pl = &self.sides[t].slots[self.sides[t].on[k]].p;
-            (
-                pl.body.standing_reach_cm / 100.0,
-                Pose::max_lift(pl.attrs[Attr::Vertical]),
-            )
+        let anchor = |i: usize| {
+            let (t, k) = self.side_of(i);
+            bulk[t * 5 + k].anchor
         };
-        let mut dest = contact::keep_in(self.reach_by(t, k, landing, flight_time), 0.35);
-        // The ball does not come through the glass to a man behind the board.
-        if dest.y < BOARD_Y + 0.3 && dest.x.abs() < 1.2 {
-            dest.y = BOARD_Y + 0.3;
-        }
-        let catch_z = (reach + 0.9 * max_lift - 0.05).clamp(2.0, 3.6);
-        dest = clear_hoop(dest, catch_z);
-        let path = flight::off_the_iron(touch, touch_z, dest, catch_z, flight_time);
-        self.play.after = Some(After {
-            kind: AfterKind::Rebound { who, free_throw },
-            path,
-            t: 0.0,
-            end: flight_time,
-        });
-        // Everybody under it goes up, timed to the ball: the winner to the
-        // top of his jump as he takes it.
-        if self.rec.is_some() {
-            for i in 0..10 {
-                let (st, sk) = if i < 5 {
-                    (self.play.o, i)
-                } else {
-                    (1 - self.play.o, i - 5)
-                };
-                if i != who && self.m[st][sk].pos.dist(dest) >= 2.0 {
-                    continue;
+        let radius = |i: usize| {
+            let (t, k) = self.side_of(i);
+            bulk[t * 5 + k].r
+        };
+        let _ = o;
+        let mine = pos(i).dist(landing);
+        let mut held = 0.0;
+        let mut holder = (0usize, 0.0f32);
+        for j in 0..10 {
+            if (i < 5) == (j < 5) || pos(j).dist(landing) > mine - 0.1 {
+                continue;
+            }
+            let lane = pos(j).project(pos(i), landing);
+            if pos(j).dist(lane) < radius(i) + radius(j) + 0.25 {
+                let (t, k) = self.side_of(j);
+                let still = if self.m[t][k].vel.len() < 1.0 { 1.3 } else { 1.0 };
+                held += anchor(j) * still / anchor(i);
+                if anchor(j) > holder.1 {
+                    holder = (j, anchor(j));
                 }
-                let v = self.sides[st].slots[self.sides[st].on[sk]].p.attrs[Attr::Vertical];
-                let frac = if i == who { 0.9 } else { 0.75 };
-                let peak = Pose::max_lift(v) * frac;
-                let air = 2.0 * (2.0 * peak / GRAVITY).sqrt();
-                let after = (flight_time - air / 2.0).max(0.0);
-                self.leap(st, sk, Action::Rebounding, frac, after, air);
             }
         }
-        None
+        (held, holder.0)
     }
 
     /// The ball is in the winner's hands.
     fn finish_rebound(&mut self, who: usize, at: Vec2, free_throw: bool) -> Option<End> {
         let _ = (free_throw, at);
-        // He is not behind the glass when he takes it.
-        {
-            let (t, k) = if who < 5 {
-                (self.play.o, who)
-            } else {
-                (1 - self.play.o, who - 5)
-            };
-            let m = &mut self.m[t][k];
-            if m.pos.y < BOARD_Y + 0.3 && m.pos.x.abs() < 1.0 {
-                m.pos.y = BOARD_Y + 0.3;
-            }
-        }
-        // In his hands, wherever he has got to.
         self.play.ball = if who < 5 {
             self.m[self.play.o][who].pos
         } else {
@@ -4387,7 +4824,9 @@ impl Game {
         let bonus = self.sides[d].team_fouls >= self.rules.bonus_after;
         self.defensive_foul(dk, h, if bonus { 2 } else { 0 }, kind);
         if bonus {
-            return self.free_throws(h, 2, None);
+            // The ball is where it was, and the man who was fouled goes to it.
+            let at = self.play.ball;
+            return self.free_throws(h, 2, Some(at));
         }
         // The floor stands still for a moment while the whistle is answered.
         self.play.dead = DEAD_FOUL;
@@ -4540,14 +4979,12 @@ impl Game {
         None
     }
 
-    /// The free throw leaves his hand.
+    /// The free throw leaves his hand: a standing, unguarded launch, with
+    /// an error that is a matter of his free throw rating.
     fn ft_release(&mut self, h: usize, left: u16, of: u16, made: u16) -> Option<End> {
         let o = self.play.o;
         let slot = self.sides[o].on[h];
-        let pct = self.sides[o].ft_pct(slot);
-        let hit = self.rng.chance(pct);
-        let side = self.rng.f32() - 0.5;
-        let landing = HOOP + v(side, 0.9);
+        let rating = self.sides[o].eff(slot, Attr::FreeThrow);
         let p = self.op(h);
         let plan = self.play.shot.unwrap_or(ShotPlan {
             shooter: h,
@@ -4561,14 +4998,19 @@ impl Game {
             hand_z: 2.4,
         });
         let from = p + (HOOP - p).norm() * 0.2;
-        let (path, ring_at, rim) = if hit {
-            let (path, t) = flight::made(from, plan.hand_z, 1.0, v(0.02, 0.0), None);
-            (path, t, (HOOP, RIM_HEIGHT))
-        } else {
-            let (path, touch, tz) = flight::missed(from, plan.hand_z, 1.0, false);
-            (path, 1.0, (touch, tz))
-        };
-        self.play.rim = rim;
+        let d = from.dist(HOOP);
+        let (lat, depth) = shot::base(Style::Jumper, false, d);
+        let m = (shot::tune("FT_SCALE", FT_SCALE) - shot::tune("FT_SLOPE", FT_SLOPE) * (rating - 10.0)).clamp(0.12, 1.4);
+        let errors = Errors::at_rim(d, lat * m, depth * m);
+        let start = ball::clear_start(v3(from.x, from.y, plan.hand_z));
+        let (ideal, _) = shot::ideal(start, Style::Jumper);
+        let launch = shot::perturb(ideal, errors, &mut self.rng);
+        let flown = ball::fly(Ball { p: start, v: launch }, &[]);
+        let hit = flown.made;
+        let path = flown.path;
+        self.log_path(&path, 0.0, 0.0);
+        self.play.def_touch = false;
+        self.play.tips = 0;
         let (b, bz) = path.at(0.0);
         self.play.ball = b;
         self.play.ball_h = bz;
@@ -4576,14 +5018,17 @@ impl Game {
             from: p,
             to: HOOP,
             t: 0.0,
-            dur: ring_at,
+            dur: if hit {
+                flown.ring_at
+            } else {
+                Self::live_time(&flown)
+            },
             kind: FlightKind::Shot {
                 shooter: h,
                 made: hit,
                 kind: ShotKind::Mid,
                 assist: None,
                 and_one: false,
-                landing,
                 foul_shots: 0,
                 line: true,
             },
@@ -4601,14 +5046,7 @@ impl Game {
         None
     }
 
-    fn land_free_throw(
-        &mut self,
-        shooter: usize,
-        hit: bool,
-        landing: Vec2,
-        t: f32,
-        path: Path,
-    ) -> Option<End> {
+    fn land_free_throw(&mut self, shooter: usize, hit: bool, t: f32, path: Path) -> Option<End> {
         let Phase::Line { left, of, made, .. } = self.play.phase else {
             return None;
         };
@@ -4632,7 +5070,7 @@ impl Game {
                 self.after_path(AfterKind::Drop { shooter, then: 0 }, path, t);
                 return None;
             }
-            return self.rebound(landing, true);
+            return self.go_live(path, t, true);
         }
         self.play.phase = Phase::Line {
             shooter,
@@ -4645,10 +5083,7 @@ impl Game {
         if hit {
             self.after_path(AfterKind::Drop { shooter, then: 0 }, path, t);
         } else {
-            let (touch, z) = self.play.rim;
-            let mut fall = Path::new();
-            fall.fall(touch, z, 1.0, Self::off_the_iron(touch));
-            self.after_path(AfterKind::Fall { shooter, shots: 0 }, fall, 0.0);
+            self.after_path(AfterKind::Fall { shooter, shots: 0 }, path, t);
         }
         None
     }
@@ -4914,7 +5349,9 @@ impl Play {
             after: None,
             shot: None,
             verdict: None,
-            rim: (Vec2::ZERO, RIM_HEIGHT),
+            chase: [Chase::NONE; 10],
+            def_touch: false,
+            tips: 0,
             fetcher: None,
             fetch_t: 0.0,
             push: None,
