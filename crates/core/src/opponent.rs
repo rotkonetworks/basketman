@@ -407,6 +407,9 @@ impl World {
     /// defense or a new offense for the coming weeks. It costs them
     /// familiarity like any change, and it makes an old report wrong.
     pub(crate) fn ai_tactics_drift(&mut self) {
+        if !self.calendar_game() {
+            return;
+        }
         for t in 0..self.teams.len() {
             // Decided by a hash of the club and the week, not the world's
             // stream, so a quiet week draws nothing.

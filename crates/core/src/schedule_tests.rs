@@ -185,3 +185,236 @@ fn more_games_make_a_report_more_trustworthy() {
     assert!(World::report_confidence(16, 1) > World::report_confidence(6, 1));
     assert!(World::report_confidence(20, 9) <= 100);
 }
+
+use crate::engine::simulate_game;
+use crate::league::lineup;
+use crate::rng::Rng;
+
+/// Games of every ordered pair of one world's clubs, plain and with one
+/// side's belief raised by `boost`. Returns, summed over the world, the
+/// prepared side's wins and points margin with and without the boost, and
+/// the games each arm has.
+fn prep_world(seed: u64, boost: f32) -> (f32, f32, f32, f32, usize) {
+    let w = World::generate(seed, 12);
+    let (mut plain_w, mut plain_m, mut prep_w, mut prep_m, mut n) = (0.0, 0.0, 0.0, 0.0, 0);
+    let mut k = 0u64;
+    for h in 0..12 {
+        for a in 0..12 {
+            if h == a {
+                continue;
+            }
+            k += 1;
+            for prepared in [0usize, 1] {
+                // The same seed for the plain and the prepared game of a
+                // side: the stream is shared until the boost bites.
+                let sd = seed * 1_000_003 + k * 2 + prepared as u64;
+                let mut hl = lineup(&w.teams[h], &w.players);
+                let mut al = lineup(&w.teams[a], &w.players);
+                let plain = simulate_game(&hl, &al, &w.rules, &mut Rng::new(sd));
+                if prepared == 0 {
+                    hl.belief = (hl.belief + boost).min(1.0);
+                } else {
+                    al.belief = (al.belief + boost).min(1.0);
+                }
+                let prep = simulate_game(&hl, &al, &w.rules, &mut Rng::new(sd));
+                let m = |r: &crate::engine::GameResult| {
+                    let d = r.score[prepared] as i32 - r.score[1 - prepared] as i32;
+                    (d as f32, (d > 0) as u8 as f32)
+                };
+                let (pm, pw) = m(&plain);
+                let (qm, qw) = m(&prep);
+                plain_m += pm;
+                plain_w += pw;
+                prep_m += qm;
+                prep_w += qw;
+                n += 1;
+            }
+        }
+    }
+    (plain_w, plain_m, prep_w, prep_m, n)
+}
+
+#[test]
+#[ignore]
+fn measure_prep_edge() {
+    let boost: f32 = std::env::var("BOOST").ok().and_then(|s| s.parse().ok()).unwrap_or(crate::prep::PREP_BELIEF);
+    let seeds: Vec<u64> = (1..=16).collect();
+    let results: Vec<_> = std::thread::scope(|s| {
+        let hs: Vec<_> = seeds.iter().map(|&sd| s.spawn(move || prep_world(sd, boost))).collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let (mut pw, mut pm, mut qw, mut qm, mut n) = (0.0, 0.0, 0.0, 0.0, 0usize);
+    for r in results {
+        pw += r.0;
+        pm += r.1;
+        qw += r.2;
+        qm += r.3;
+        n += r.4;
+    }
+    let n = n as f32;
+    eprintln!(
+        "PREP EDGE boost {boost}: {n} games per arm; unprepared win {:.1}% margin {:+.2}; prepared win {:.1}% margin {:+.2}; edge {:+.1} pts win, {:+.2} pts margin",
+        pw / n * 100.0, pm / n, qw / n * 100.0, qm / n, (qw - pw) / n * 100.0, (qm - pm) / n
+    );
+}
+
+#[test]
+fn a_full_edge_is_a_modest_real_gain() {
+    // 16 worlds of 12 clubs, every ordered pair, the prepared side first
+    // at home, then away: aggregate, with the same seeds for both arms.
+    let boost = crate::prep::PREP_BELIEF;
+    let results: Vec<_> = std::thread::scope(|s| {
+        let hs: Vec<_> = (1..=16u64).map(|sd| s.spawn(move || prep_world(sd, boost))).collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let (mut pw, mut pm, mut qw, mut qm, mut n) = (0.0, 0.0, 0.0, 0.0, 0usize);
+    for r in results {
+        pw += r.0;
+        pm += r.1;
+        qw += r.2;
+        qm += r.3;
+        n += r.4;
+    }
+    let n = n as f32;
+    let (win, margin) = ((qw - pw) / n * 100.0, (qm - pm) / n);
+    eprintln!("full edge: {win:+.1} points of win rate, {margin:+.2} points a game over {n} games a side");
+    assert!(margin > 0.5 && margin < 3.0, "margin edge {margin}");
+    assert!(win > 1.0 && win < 8.0, "win edge {win}");
+}
+
+/// Our career with a report on club `opp` that says what the club
+/// actually runs.
+fn with_report(w: &mut World, opp: usize, right: (bool, bool)) {
+    let day = crate::calendar::FRIENDLY_DAYS[0];
+    let f = w.friendlies.iter().find(|f| f.day == day && (f.home == opp || f.away == opp)).unwrap().clone();
+    assert!(f.home != 0 && f.away != 0, "pick a club that does not play us");
+    w.apply(Command::AssignScout { team: opp, day }).unwrap();
+    while w.day <= day {
+        w.apply(Command::Continue).unwrap();
+    }
+    let t = w.teams[opp].tactics().clone();
+    let r = w.scouting.opponent_reports.last_mut().unwrap();
+    use crate::tactics::{DefenseScheme as D, OffenseSet as O};
+    r.offense = Some(if right.0 { t.offense } else if t.offense == O::Motion { O::FiveOut } else { O::Motion });
+    r.defense = Some(if right.1 { t.defense } else if t.defense == D::ManToMan { D::Zone23 } else { D::ManToMan });
+}
+
+fn prep_sessions(w: &mut World, n: usize) {
+    use crate::training::Session;
+    let mut s = w.teams[0].schedule.clone();
+    for (k, slot) in [6usize, 7, 4, 5].iter().enumerate() {
+        s.sessions[*slot] = if k < n { Session::MatchPrep } else { Session::Rest };
+    }
+    w.apply(Command::SetSchedule(s)).unwrap();
+}
+
+#[test]
+fn preparation_helps_as_far_as_the_report_is_right() {
+    let mut w = career(11, 20);
+    let opp = (1..8).find(|&t| w.friendlies.iter().any(|f| f.day == crate::calendar::FRIENDLY_DAYS[0] && f.home != 0 && f.away != 0 && (f.home == t || f.away == t))).unwrap();
+    with_report(&mut w, opp, (true, true));
+    let day = w.fixtures.iter().find(|f| f.round == 0 && (f.home == 0 || f.away == 0)).map(|f| f.day).unwrap();
+    // Nothing set: no edge from a good report.
+    prep_sessions(&mut w, 0);
+    assert_eq!(w.prep_for(0, opp, day).edge, 0.0);
+    // Sessions scale the edge, up to four.
+    prep_sessions(&mut w, 2);
+    assert_eq!(w.prep_sessions(0, day), 2);
+    assert!((w.prep_for(0, opp, day).edge - 0.5).abs() < 1e-6);
+    prep_sessions(&mut w, 4);
+    let full = w.prep_for(0, opp, day);
+    assert!(full.offense_ok && full.defense_ok && (full.edge - 1.0).abs() < 1e-6);
+    // A report right about half of it gives half, a wrong one nothing.
+    let mut half = w.clone();
+    for (right, edge) in [((true, false), 0.5), ((false, true), 0.5), ((false, false), 0.0)] {
+        let r = half.scouting.opponent_reports.last_mut().unwrap();
+        let t = half.teams[opp].tactics().clone();
+        use crate::tactics::{DefenseScheme as D, OffenseSet as O};
+        r.offense = Some(if right.0 { t.offense } else if t.offense == O::Motion { O::FiveOut } else { O::Motion });
+        r.defense = Some(if right.1 { t.defense } else if t.defense == D::ManToMan { D::Zone23 } else { D::ManToMan });
+        assert!((half.prep_for(0, opp, day).edge - edge).abs() < 1e-6, "{right:?}");
+    }
+    // Stale: the club changed its defense since the report.
+    let mut stale = w.clone();
+    let slot = stale.teams[opp].active;
+    let t = &mut stale.teams[opp].playbook[slot].tactics;
+    t.defense = if t.defense == crate::tactics::DefenseScheme::Zone23 { crate::tactics::DefenseScheme::PackLine } else { crate::tactics::DefenseScheme::Zone23 };
+    assert!((stale.prep_for(0, opp, day).edge - 0.5).abs() < 1e-6);
+    // A report on somebody else is no use.
+    let other = (1..8).find(|&t| t != opp).unwrap();
+    assert!(w.prep_for(0, other, day).report.is_none() && w.prep_for(0, other, day).edge == 0.0);
+    // The engine is handed the edge as belief; with no edge, none.
+    let belief = |w: &World, opp| {
+        let (h, _) = w.lineups_for(0, opp, Some(day));
+        h.belief
+    };
+    assert!((belief(&w, opp) - (w.teams[0].belief + crate::prep::PREP_BELIEF).min(1.0)).abs() < 1e-6);
+    assert_eq!(belief(&w, other), w.teams[0].belief, "no report, no edge");
+    let mut wrong = w.clone();
+    with_wrong(&mut wrong, opp);
+    assert_eq!(belief(&wrong, opp), wrong.teams[0].belief, "a wrong report does not help");
+}
+
+fn with_wrong(w: &mut World, opp: usize) {
+    use crate::tactics::{DefenseScheme as D, OffenseSet as O};
+    let t = w.teams[opp].tactics().clone();
+    let r = w.scouting.opponent_reports.last_mut().unwrap();
+    r.offense = Some(if t.offense == O::Motion { O::FiveOut } else { O::Motion });
+    r.defense = Some(if t.defense == D::ManToMan { D::Zone23 } else { D::ManToMan });
+}
+
+#[test]
+fn preparation_costs_the_training_it_replaces() {
+    use crate::training::{Schedule, Session, train_week};
+    let growth = |prep: bool| {
+        let mut w = World::generate(6, 2);
+        let mut s = Schedule::default();
+        if prep {
+            for slot in [0usize, 2, 3, 6] {
+                s.sessions[slot] = Session::MatchPrep;
+            }
+        }
+        let mut rng = Rng::new(1);
+        let before: f32 = w.players.iter().map(|p| p.overall()).sum();
+        for p in &mut w.players {
+            for _ in 0..20 {
+                train_week(p, &s, &mut rng, 1.0, 1.0);
+            }
+        }
+        w.players.iter().map(|p| p.overall()).sum::<f32>() - before
+    };
+    assert!(growth(false) > growth(true), "preparation sessions train nothing: {} v {}", growth(false), growth(true));
+    assert_eq!(Session::MatchPrep.familiarity(), 0.0);
+    assert!(Session::MatchPrep.attrs().is_empty());
+}
+
+#[test]
+fn the_assistant_keeps_the_preparation_the_manager_set() {
+    let mut w = career(12, 12);
+    prep_sessions(&mut w, 3);
+    crate::assistant::run(&mut w, 0);
+    assert_eq!(w.teams[0].schedule.count(crate::training::Session::MatchPrep), 3);
+}
+
+#[test]
+fn clubs_nobody_manages_prepare_in_a_simple_way() {
+    let w = World::new_career(5, 12);
+    // No manager: everyone is the same kind of club. The average edge is
+    // a fraction of the most a manager can have.
+    let day = 40;
+    let (mut sum, mut n, mut full) = (0.0, 0, 0);
+    for a in 0..12 {
+        for b in 0..12 {
+            if a != b {
+                let p = w.prep_for(a, b, day);
+                sum += p.edge;
+                n += 1;
+                full += (p.edge > 0.2) as u32;
+            }
+        }
+    }
+    let mean = sum / n as f32;
+    eprintln!("AI mean edge {mean:.3}");
+    assert!(mean > 0.1 && mean < 0.4, "{mean}");
+    assert!(full > 0 && full < n, "some clubs read the opponent right, some not");
+}

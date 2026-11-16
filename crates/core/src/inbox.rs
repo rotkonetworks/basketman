@@ -1086,6 +1086,10 @@ impl World {
             if let Some(line) = self.gate_line(i) {
                 body += &line;
             }
+            let opp_id = [f.away, f.home][side];
+            if let Some(line) = self.prep_line(me, opp_id, gameday) {
+                body += &line;
+            }
             body += "\nThe full replay and box score are on the Match screen.";
             let subject = format!(
                 "{} {us}-{them} {} {opp}",

@@ -530,9 +530,10 @@ impl World {
         let n = played.iter().position(|&i| i == fixture)?;
         let f = &self.fixtures[fixture];
         let side = if f.home == team { 0 } else { 1 };
+        let (home, away) = self.lineups_for(f.home, f.away, Some(f.day));
         let game = LiveMatch::new(
-            &lineup(&self.teams[f.home], &self.players),
-            &lineup(&self.teams[f.away], &self.players),
+            &home,
+            &away,
             &self.rules,
             Rng::new(seeds[n]),
             Some(side),
@@ -643,11 +644,10 @@ impl World {
     /// `record` says which are recorded for the viewer.
     pub(crate) fn simulate_batch(
         &self,
-        jobs: &[(TeamId, TeamId, u64, bool)],
+        jobs: &[(TeamId, TeamId, u64, bool, Option<u32>)],
     ) -> Vec<(GameResult, Option<Recording>)> {
-        let simulate = |&(home, away, seed, record): &(TeamId, TeamId, u64, bool)| {
-            let home = lineup(&self.teams[home], &self.players);
-            let away = lineup(&self.teams[away], &self.players);
+        let simulate = |&(home, away, seed, record, day): &(TeamId, TeamId, u64, bool, Option<u32>)| {
+            let (home, away) = self.lineups_for(home, away, day);
             let rng = &mut Rng::new(seed);
             // Recording does not change the result, only keeps it.
             if record {
@@ -690,7 +690,7 @@ impl World {
         }
         self.econ_gates(&played);
         let skip = live.as_ref().map(|l| l.0);
-        let jobs: Vec<(TeamId, TeamId, u64, bool)> = played
+        let jobs: Vec<(TeamId, TeamId, u64, bool, Option<u32>)> = played
             .iter()
             .zip(&seeds)
             .filter(|(i, _)| Some(**i) != skip)
@@ -699,7 +699,7 @@ impl World {
                 let record = self.watch == Some(f.home)
                     || self.watch == Some(f.away)
                     || self.scout_wants(f.day, f.home, f.away);
-                (f.home, f.away, seed, record)
+                (f.home, f.away, seed, record, Some(f.day))
             })
             .collect();
         let mut simulated = self.simulate_batch(&jobs).into_iter();

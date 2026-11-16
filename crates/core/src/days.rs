@@ -175,7 +175,7 @@ impl World {
         if due.is_empty() {
             return;
         }
-        let jobs: Vec<(TeamId, TeamId, u64, bool)> = due
+        let jobs: Vec<(TeamId, TeamId, u64, bool, Option<u32>)> = due
             .iter()
             .map(|&i| {
                 let f = &self.friendlies[i];
@@ -184,6 +184,7 @@ impl World {
                     f.away,
                     self.rng.next_u64(),
                     self.scout_wants(f.day, f.home, f.away),
+                    None,
                 )
             })
             .collect();

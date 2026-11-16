@@ -34,6 +34,7 @@ pub mod media;
 pub mod ops;
 pub mod opponent;
 pub mod player;
+pub mod prep;
 pub mod pricing;
 pub mod projection;
 pub mod replay;
@@ -49,6 +50,7 @@ pub mod staff;
 pub mod tactics;
 pub mod tax;
 pub mod training;
+pub mod travel;
 pub mod view;
 pub mod view_more;
 
