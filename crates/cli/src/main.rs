@@ -12,6 +12,7 @@ mod feeds;
 mod lab;
 mod mcp;
 mod play;
+mod realism;
 
 use basketman_core::engine::{BoxLine, GameResult};
 use basketman_core::league::World;
@@ -82,6 +83,10 @@ fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("play") => return play::run(),
         Some("mcp") => return mcp::run(),
+        Some("realism") => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            return realism::run(&rest);
+        }
         Some("balance") => {
             let rest: Vec<String> = std::env::args().skip(2).collect();
             return balance::run(&rest);
@@ -111,6 +116,7 @@ fn main() {
                 lab::transition_watch(arg(4).unwrap_or(0), arg(5).unwrap_or(0), 8.0)
             }
             Some("transition") => lab::transition(games.unwrap_or(300)),
+            Some("league") => lab::league(games.unwrap_or(300)),
             Some("launch") => lab::launch(),
             Some("exploit") => lab::exploit(games.unwrap_or(200)),
             Some("diag") => lab::diag(games.unwrap_or(12)),

@@ -1,14 +1,15 @@
 //! The match screen: the user's game on a 2D court with the event feed next
 //! to it. While the game is live the touchline sits underneath: timeouts,
-//! substitutions, shouts and changes of system. Afterwards the same screen
+//! substitutions. Tactics and talk are changed in the coaching room that
+//! opens when play stops. Afterwards the same screen
 //! is the replay.
 
 use basketman_core::court::Vec2;
-use basketman_core::engine::{GameResult, LivePlayer, Orders, Pause, Reaction, Shout};
-use basketman_core::league::{LiveInput, LiveRound};
+use basketman_core::engine::{GameResult, LivePlayer, Orders, Reaction, Shout};
+use basketman_core::league::{LiveInput, LiveRound, Refusal, Stoppage, World};
 use basketman_core::player::{Player, PlayerId};
 use basketman_core::replay::{EventKind, Frame, Recording};
-use basketman_core::tactics::{DefenseScheme, OffenseSet, Press};
+use basketman_core::tactics::Brief;
 use eframe::egui::{
     self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Shape, Stroke, Ui, pos2, vec2,
 };
@@ -21,7 +22,9 @@ use crate::view3d::{self, Cam3, FigureSpec, Preset, Scene, Vec3, v3};
 
 mod feeds;
 mod hud;
+mod stoproom;
 pub(crate) use feeds::Ctx as FeedCtx;
+pub(crate) use stoproom::StopRoom;
 pub(crate) use hud::{Hud, HudPrefs};
 
 const LENGTH: f32 = 28.0;
@@ -56,6 +59,9 @@ pub(crate) enum Command {
     CancelSwap(usize),
     Shout(Shout, Option<PlayerId>),
     Orders(Orders),
+    Brief(PlayerId, Brief),
+    /// Go on from a stoppage.
+    Resume,
     SkipPeriod,
     SkipAll,
 }
@@ -64,12 +70,16 @@ pub(crate) enum Command {
 pub(crate) struct Touchline {
     /// Player on the floor picked to come off.
     pub off: Option<PlayerId>,
-    /// Who the next shout is for; `None` is the five on the floor.
-    target: Option<PlayerId>,
     /// The last shout and how each player took it.
     said: Option<(Shout, Vec<(PlayerId, Reaction)>)>,
     /// Why the game is stopped.
     notice: Option<String>,
+    /// The coaching room: made when play stops, gone when it resumes.
+    pub room: Option<StopRoom>,
+    /// Play is stopped for the coach and has not been resumed.
+    pub stopped: bool,
+    /// The room before the tip has been shown.
+    pub tip_seen: bool,
 }
 
 impl Touchline {
@@ -1109,9 +1119,22 @@ impl App {
         self.world.replay = replay;
     }
 
-    /// Let the live game catch up with the clock on screen, stopping where
-    /// the coach gets a say.
+    /// Let the live game catch up with the clock on screen, stopping at
+    /// every stoppage: either team's timeout, the end of a period, the
+    /// tip. The coaching room opens there.
     fn run_live(&mut self, ui: &Ui, live: &mut LiveRound) {
+        // Before the tip, and at any stop the coach has not left yet,
+        // nothing moves.
+        if live.stoppage() == Some(Stoppage::Tipoff)
+            && !self.touchline.tip_seen
+            && live.game.recording().frames.is_empty()
+        {
+            self.open_room(live);
+        }
+        if self.touchline.stopped {
+            self.playback.playing = false;
+            return;
+        }
         let pb = &mut self.playback;
         if pb.playing {
             let dt = ui.input(|i| i.stable_dt).min(0.1);
@@ -1119,30 +1142,16 @@ impl App {
             self.touchline.notice = None;
             ui.ctx().request_repaint();
         }
+        let mut stopped = false;
         while !live.game.is_over()
             && (live.game.time() < pb.time || live.game.recording().frames.is_empty())
         {
-            let notice = match live.step() {
-                Some(Pause::Timeout(side)) if side == live.side => {
-                    "Timeout. Make your changes, then resume.".to_string()
-                }
-                Some(Pause::PeriodEnd) => {
-                    let n = live.game.result().periods.len();
-                    let periods = self.world.rules.periods as usize;
-                    if n >= periods {
-                        "Level at the end. Overtime is next.".to_string()
-                    } else if n * 2 == periods {
-                        "Half time. Make your changes, then resume.".to_string()
-                    } else {
-                        format!("End of period {n}. Make your changes, then resume.")
-                    }
-                }
-                _ => continue,
-            };
-            self.touchline.notice = Some(notice);
-            pb.playing = false;
-            pb.time = live.game.time();
-            break;
+            if live.step().is_some() {
+                stopped = true;
+                pb.playing = false;
+                pb.time = live.game.time();
+                break;
+            }
         }
         if pb.time >= live.game.time() {
             pb.time = live.game.time();
@@ -1150,44 +1159,49 @@ impl App {
                 pb.playing = false;
             }
         }
+        if stopped {
+            self.open_room(live);
+        }
     }
 
+    /// Do what the user asked. A refusal (the rule: tactics and talk are
+    /// for stoppages) is said on the screen and nothing changes.
     fn command(&mut self, live: &mut LiveRound, command: Command) {
-        match command {
-            Command::Timeout => {
-                live.input(LiveInput::Timeout);
-            }
-            Command::AutoSubs(on) => {
-                live.input(LiveInput::AutoSubs(on));
-            }
-            Command::Swap(off, on) => {
-                live.input(LiveInput::Swap { off, on });
-            }
-            Command::CancelSwap(n) => {
-                live.input(LiveInput::CancelSwap(n));
-            }
-            Command::Shout(shout, target) => {
-                let reactions = live.input(LiveInput::Shout { shout, target });
-                self.touchline.show(shout, reactions);
-            }
+        let input = match command {
+            Command::Timeout => LiveInput::Timeout,
+            Command::AutoSubs(on) => LiveInput::AutoSubs(on),
+            Command::Swap(off, on) => LiveInput::Swap { off, on },
+            Command::CancelSwap(n) => LiveInput::CancelSwap(n),
+            Command::Shout(shout, target) => LiveInput::Shout { shout, target },
+            Command::Brief(player, brief) => LiveInput::Brief { player, brief },
             Command::Orders(o) => {
                 let familiarity =
                     self.world.teams[self.team].familiarity_with(o.offense, o.defense, o.press);
-                live.input(LiveInput::Orders {
+                LiveInput::Orders {
                     orders: o,
                     familiarity,
-                });
+                }
+            }
+            Command::Resume => {
+                self.touchline.stopped = false;
+                self.touchline.room = None;
+                self.touchline.notice = None;
+                self.playback.playing = true;
+                return;
             }
             Command::SkipPeriod => {
+                // To the next stoppage of any kind.
                 while !live.game.is_over() {
-                    if matches!(live.step(), Some(Pause::PeriodEnd | Pause::Final)) {
+                    if live.step().is_some() {
                         break;
                     }
                 }
                 self.playback.time = live.game.time();
                 self.playback.playing = false;
-                self.touchline.notice = (!live.game.is_over())
-                    .then(|| "Skipped to the break. Make your changes, then resume.".to_string());
+                if !live.game.is_over() {
+                    self.open_room(live);
+                }
+                return;
             }
             Command::SkipAll => {
                 live.input(LiveInput::AutoSubs(true));
@@ -1196,6 +1210,27 @@ impl App {
                 }
                 self.playback.time = live.game.time();
                 self.playback.playing = false;
+                return;
+            }
+        };
+        let was_shout = match &input {
+            LiveInput::Shout { shout, .. } => Some(*shout),
+            _ => None,
+        };
+        match live.try_input(input) {
+            Ok(reactions) => {
+                if let Some(shout) = was_shout {
+                    self.touchline.show(shout, reactions);
+                }
+                if self.touchline.stopped {
+                    self.touchline.notice = None;
+                }
+            }
+            Err(r) => {
+                self.touchline.notice = Some(match r {
+                    Refusal::PlayIsLive => "Play is live. Call a timeout to change that.".to_string(),
+                    other => other.to_string(),
+                });
             }
         }
     }
@@ -1238,7 +1273,8 @@ impl App {
                 RichText::new(if live.game.auto_subs(side) {
                     "Make a swap yourself and the assistant leaves the substitutions to you."
                 } else {
-                    "Take off, then Send on. The swap is made at the next dead ball."
+                    "Take off, then Send on. The swap is made at the next dead ball, \
+                     or when play goes on from a stop."
                 })
                 .color(theme::TEXT_DIM),
             );
@@ -1364,193 +1400,6 @@ impl App {
                 });
             }
         });
-    }
-
-    /// Timeouts and shouts.
-    fn shout_card(
-        &mut self,
-        ui: &mut Ui,
-        bd: &Backdrop,
-        live: &LiveRound,
-        bench: &[LivePlayer],
-        commands: &mut Vec<Command>,
-    ) {
-        let side = live.side;
-        let who = |pid: PlayerId| self.world.players[pid as usize].name.as_str();
-        let bonus = self.world.rules.bonus_after;
-        let target = &mut self.touchline.target;
-        bd.card(ui, |ui| {
-            ui.set_width(ui.available_width());
-            theme::eyebrow(ui, "Touchline");
-            ui.add_space(4.0);
-            let left = live.game.timeouts_left(side);
-            ui.horizontal_wrapped(|ui| {
-                let label = if live.game.timeout_wanted(side) {
-                    "Wave the timeout off"
-                } else {
-                    "Call timeout"
-                };
-                if theme::primary_button(ui, left > 0, label) {
-                    commands.push(Command::Timeout);
-                }
-                ui.label(theme::mono(format!("{left} left")).color(theme::TEXT_DIM));
-            });
-            ui.label(
-                RichText::new(if live.game.timeout_wanted(side) {
-                    "Taken at the next dead ball."
-                } else {
-                    "A minute's rest for the five on the floor, and it settles a team \
-                     that is being run over."
-                })
-                .color(theme::TEXT_DIM),
-            );
-            let fouls = [live.game.team_fouls(side), live.game.team_fouls(1 - side)];
-            ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    theme::mono(format!("team fouls {} / {}", fouls[0], fouls[1]))
-                        .color(theme::TEXT_DIM),
-                );
-                if fouls[0] >= bonus {
-                    ui.label(RichText::new("your next foul is two shots").color(theme::WARN));
-                } else if fouls[1] >= bonus {
-                    ui.label(RichText::new("their next foul is two shots").color(theme::POS));
-                }
-            });
-
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                ui.label("Shout at");
-                egui::ComboBox::from_id_salt("shout_target")
-                    .width(210.0)
-                    .selected_text(target.map_or("The five on the floor", who))
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(target, None, "The five on the floor");
-                        for on_court in [true, false] {
-                            for p in bench.iter().filter(|p| p.on_court == on_court) {
-                                let label = if on_court {
-                                    who(p.id).to_string()
-                                } else {
-                                    format!("{} (bench)", who(p.id))
-                                };
-                                ui.selectable_value(target, Some(p.id), label);
-                            }
-                        }
-                    });
-            });
-            ui.add_space(4.0);
-            ui.horizontal_wrapped(|ui| {
-                for shout in Shout::ALL {
-                    if ui
-                        .button(shout.label())
-                        .on_hover_text(shout.description())
-                        .clicked()
-                    {
-                        commands.push(Command::Shout(shout, *target));
-                    }
-                }
-            });
-            if live.game.voice(side) > 0.55 {
-                ui.label(
-                    RichText::new(
-                        "You have been shouting a lot. It lands softer until you give it \
-                         a few minutes.",
-                    )
-                    .color(theme::WARN),
-                );
-            }
-            if let Some((shout, reactions)) = &self.touchline.said {
-                ui.add_space(6.0);
-                ui.label(theme::eyebrow_text(shout.label()));
-                for (pid, reaction) in reactions {
-                    let color = match reaction {
-                        r if r.is_bad() => theme::WARN,
-                        Reaction::Unmoved => theme::TEXT_MUTE,
-                        _ => theme::POS,
-                    };
-                    ui.horizontal(|ui| {
-                        ui.label(who(*pid));
-                        ui.label(RichText::new(reaction.label()).color(color));
-                    });
-                }
-            }
-        });
-    }
-
-    /// The system, changeable from one dead ball to the next.
-    fn orders_card(
-        &mut self,
-        ui: &mut Ui,
-        bd: &Backdrop,
-        live: &LiveRound,
-        commands: &mut Vec<Command>,
-    ) {
-        let before = live.game.orders(live.side);
-        let mut o = before;
-        let team = &self.world.teams[self.team];
-        bd.card(ui, |ui| {
-            ui.set_width(ui.available_width());
-            theme::eyebrow(ui, "Orders");
-            ui.add_space(4.0);
-            egui::Grid::new("live_orders")
-                .num_columns(2)
-                .spacing(vec2(14.0, 8.0))
-                .show(ui, |ui| {
-                    ui.label("Offense");
-                    egui::ComboBox::from_id_salt("live_offense")
-                        .width(170.0)
-                        .selected_text(o.offense.label())
-                        .show_ui(ui, |ui| {
-                            for v in OffenseSet::ALL {
-                                ui.selectable_value(&mut o.offense, v, v.label());
-                            }
-                        });
-                    ui.end_row();
-                    ui.label("Defense");
-                    egui::ComboBox::from_id_salt("live_defense")
-                        .width(170.0)
-                        .selected_text(o.defense.label())
-                        .show_ui(ui, |ui| {
-                            for v in DefenseScheme::ALL {
-                                ui.selectable_value(&mut o.defense, v, v.label());
-                            }
-                        });
-                    ui.end_row();
-                    ui.label("Press");
-                    egui::ComboBox::from_id_salt("live_press")
-                        .width(170.0)
-                        .selected_text(o.press.label())
-                        .show_ui(ui, |ui| {
-                            for v in Press::ALL {
-                                ui.selectable_value(&mut o.press, v, v.label());
-                            }
-                        });
-                    ui.end_row();
-                    ui.spacing_mut().slider_width = 150.0;
-                    for (label, value) in [
-                        ("Pace", &mut o.pace),
-                        ("Threes", &mut o.three_bias),
-                        ("Crash boards", &mut o.crash_boards),
-                        ("Aggression", &mut o.aggression),
-                    ] {
-                        ui.label(label);
-                        ui.add(egui::Slider::new(value, 1..=20));
-                        ui.end_row();
-                    }
-                });
-            let known = team.familiarity_with(o.offense, o.defense, o.press);
-            let text = format!("The squad knows this system {:.0}%.", known * 100.0);
-            ui.label(RichText::new(text).color(if known < 0.5 {
-                theme::WARN
-            } else {
-                theme::TEXT_DIM
-            }));
-            ui.label(
-                RichText::new("Changes come in at the next dead ball.").color(theme::TEXT_DIM),
-            );
-        });
-        if o != before {
-            commands.push(Command::Orders(o));
-        }
     }
 }
 

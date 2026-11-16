@@ -2336,6 +2336,58 @@ pub fn diag(games: usize) {
     );
 }
 
+/// `basketman lab league [games]`: league games as they are played, with
+/// every club's real coach on the bench (the other lab runs use coach 0):
+/// pace, scoring, and how many timeouts and changes of system the benches
+/// make.
+pub fn league(games: usize) {
+    let w = World::generate(7, 12);
+    let n = w.teams.len();
+    let (mut poss, mut pts, mut played, mut timeouts, mut adjusts) = (0u32, 0u32, 0u32, 0u32, 0u32);
+    let mut by_timeouts = [0u32; 8];
+    let mut calm = 0u32;
+    for g in 0..games {
+        let (a, b) = (g % n, (g * 5 + 1 + g / n) % n);
+        if a == b {
+            continue;
+        }
+        let home = basketman_core::league::lineup(&w.teams[a], &w.players);
+        let away = basketman_core::league::lineup(&w.teams[b], &w.players);
+        let mut rng = Rng::new(1700 + g as u64 * 7919);
+        let (r, rec) = simulate_recorded(&home, &away, &w.rules, &mut rng);
+        played += 1;
+        poss += (r.possessions[0] + r.possessions[1]) as u32;
+        pts += (r.score[0] + r.score[1]) as u32;
+        let (mut t, mut adj) = (0u32, 0u32);
+        for e in &rec.events {
+            match e.kind {
+                EventKind::Timeout { .. } => t += 1,
+                EventKind::Adjust { .. } => adj += 1,
+                _ => {}
+            }
+        }
+        timeouts += t;
+        adjusts += adj;
+        by_timeouts[(t as usize).min(7)] += 1;
+        if adj == 0 {
+            calm += 1;
+        }
+    }
+    let g = played.max(1) as f32;
+    println!(
+        "games {played}  possessions/game {:.1}  points/100 poss {:.2}",
+        poss as f32 / g,
+        pts as f32 / poss.max(1) as f32 * 100.0
+    );
+    println!(
+        "timeouts/game {:.2} (both benches)  changes of system/game {:.2}  games with no change {:.0}%",
+        timeouts as f32 / g,
+        adjusts as f32 / g,
+        calm as f32 / g * 100.0
+    );
+    println!("games by number of timeouts (0..7+): {by_timeouts:?}");
+}
+
 /// Make rates of the launch model at fixed spots, by size of error at the
 /// ring: the table the shooting errors are fitted from. `LAUNCH="lat,depth"`
 /// sets the unit error in metres: lat0,lat per m,depth0,depth per m.

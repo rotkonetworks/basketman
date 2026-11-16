@@ -820,31 +820,70 @@ impl App {
                 if args.get(i + 3).map(String::as_str) == Some("live")
                     && let Some(mut live) = app.world.kickoff(app.team)
                 {
-                    use basketman_core::engine::Shout;
-                    use basketman_core::league::LiveInput;
+                    use basketman_core::league::{LiveInput, Stoppage};
                     // `SHOT_LIVE_TO=1500` plays that many seconds first.
                     let to: f32 = std::env::var("SHOT_LIVE_TO")
                         .ok()
                         .and_then(|v| v.parse().ok())
                         .unwrap_or(420.0);
-                    while live.game.time() < to && !live.game.is_over() {
-                        live.step();
+                    // `SHOT_STOP=tip|timeout|theirs|break|half` has play
+                    // stop there, and the coaching room open; without it
+                    // the game is live, with a timeout and a swap asked
+                    // for. `SHOT_ROOM=read|tactics|players|talk` picks its
+                    // tab, `SHOT_PICK=n` opens the n-th player's row.
+                    let stop = std::env::var("SHOT_STOP").ok();
+                    if stop.as_deref() != Some("tip") {
+                        while live.game.time() < to && !live.game.is_over() {
+                            live.step();
+                        }
                     }
                     let side = live.side;
                     let bench = live.game.players(side);
                     let off = bench.iter().find(|p| p.on_court).map(|p| p.id);
                     let on = bench.iter().find(|p| !p.on_court).map(|p| p.id);
-                    if let (Some(off), Some(on)) = (off, on) {
-                        live.input(LiveInput::Swap { off, on });
+                    match stop.as_deref() {
+                        Some("timeout") | Some("theirs") => {
+                            let ours = stop.as_deref() == Some("timeout");
+                            if ours {
+                                live.input(LiveInput::Timeout);
+                            }
+                            while !live.game.is_over() {
+                                match live.step() {
+                                    Some(basketman_core::engine::Pause::Timeout(s)) if (s == side) == ours => break,
+                                    _ => {}
+                                }
+                            }
+                        }
+                        Some("break") | Some("half") => {
+                            let half = stop.as_deref() == Some("half");
+                            while !live.game.is_over() {
+                                let hit = live.step().is_some();
+                                if hit && (!half || matches!(live.stoppage(), Some(Stoppage::Break { half: true, .. }))) {
+                                    break;
+                                }
+                            }
+                        }
+                        Some("tip") => {}
+                        _ => {
+                            if let (Some(off), Some(on)) = (off, on) {
+                                live.input(LiveInput::Swap { off, on });
+                            }
+                            live.input(LiveInput::Timeout);
+                        }
                     }
-                    live.input(LiveInput::Timeout);
-                    let said = live.input(LiveInput::Shout {
-                        shout: Shout::DemandMore,
-                        target: None,
-                    });
-                    app.touchline.show(Shout::DemandMore, said);
                     app.touchline.off = bench.iter().filter(|p| p.on_court).nth(2).map(|p| p.id);
                     app.playback.time = live.game.time();
+                    if stop.is_some() {
+                        app.playback.playing = false;
+                        app.open_room(&live);
+                        if let Some(r) = app.touchline.room.as_mut() {
+                            r.pick_for_harness(
+                                std::env::var("SHOT_ROOM").ok().as_deref(),
+                                std::env::var("SHOT_PICK").ok().and_then(|n| n.parse().ok()),
+                                &live,
+                            );
+                        }
+                    }
                     app.live = Some(live);
                 }
                 // `SHOT_HUD=full|minimal|clean` and `SHOT_PANEL_ALPHA=0.4`.
@@ -1413,6 +1452,7 @@ impl eframe::App for App {
         self.capture(ui);
         let bd = self.backdrop.clone();
         self.search_keys(ui.ctx());
+        self.match_keys(ui.ctx());
         if !self.started {
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)

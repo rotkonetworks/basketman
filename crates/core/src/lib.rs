@@ -8,6 +8,7 @@ pub mod agenda;
 pub mod arena;
 pub mod assistant;
 pub mod board;
+pub mod briefing;
 pub mod books;
 pub mod budget;
 pub mod calendar;

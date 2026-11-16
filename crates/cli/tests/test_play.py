@@ -304,18 +304,38 @@ def main():
         check(0 < mine["count"] < shots["count"] and all(s["side"] == "yours" and s["period"] == 1 for s in mine["shots"]), "shot filters")
         _, err = p.try_call("live_feeds", part="nonsense")
         check(err and err.kind == "bad_request", "unknown part refused")
+        if p.call("live_state")["play"]["state"] != "live":
+            p.call("live_step", seconds=3)
         st = p.call("live_input", input="Timeout")
         check(st["timeout_wanted"], "timeout requested")
+        check(st["play"]["state"] == "live" and "Shout" not in st["play"]["may"] and "Orders" not in st["play"]["may"],
+              "live play offers only timeouts, swaps and the assistant")
+        o = st["orders"]["yours"]
+        _, err = p.try_call("live_input", input={"Shout": {"shout": "Encourage", "target": None}})
+        check(err and err.kind == "play_is_live", "talk is refused in live play")
+        _, err = p.try_call("live_input", input={"Orders": {"orders": dict(o, pace=17), "familiarity": 1.0}})
+        check(err and err.kind == "play_is_live", "orders are refused in live play")
         on = [q for q in st["players"]["yours"] if q["on_court"]][0]["id"]
         bench = [q for q in st["players"]["yours"] if not q["on_court"]][0]["id"]
         _, err = p.try_call("live_input", input={"Swap": {"off": bench, "on": on}})
         check(err and err.kind == "refused", "a bad swap is refused")
         st = p.call("live_input", input={"Swap": {"off": on, "on": bench}})
         check(st["queued_swaps"], "swap queued")
+        # The timeout (or any other stop) opens the changes.
+        for _ in range(40):
+            st = p.call("live_step")
+            if st["play"]["state"] != "live" or st["over"]:
+                break
+        check(st["play"]["state"] == "stopped" and "Orders" in st["play"]["may"], "stopped at a dead ball")
+        check(st["play"]["talks_left"]["team"] >= 1, "a team talk is left")
         st = p.call("live_input", input={"Shout": {"shout": "Encourage", "target": None}})
         check(len(st["reactions"]) == 5, "shout reactions")
+        _, err = p.try_call("live_input", input={"Shout": {"shout": "Praise", "target": None}})
+        check(err and err.kind == "talk_used", "one team talk a stoppage")
         o = st["orders"]["yours"]
         st = p.call("live_input", input={"Orders": {"orders": dict(o, pace=17), "familiarity": 1.0}})
+        check(st["orders"]["yours"]["pace"] == 17, "orders change in a stoppage")
+        st = p.call("live_input", input={"Brief": {"player": on, "brief": "Pass"}})
         paused = None
         for _ in range(40):
             st = p.call("live_step")

@@ -1,7 +1,7 @@
 //! The match as a place: the court fills the window and everything else is
 //! a panel over it. A scoreboard hangs at the top, the transport sits at the
 //! bottom, the play-by-play runs as a ticker, and the bench, the touchline,
-//! the orders, the other bench and the box score slide in from the right
+//! the other bench and the box score slide in from the right
 //! edge when asked for and slide out again. On a phone the court is on top
 //! and one tabbed panel is under it.
 
@@ -16,8 +16,6 @@ pub(crate) enum Drawer {
     Shots,
     Flow,
     Bench,
-    Shout,
-    Orders,
     Rival,
     Box,
 }
@@ -34,11 +32,10 @@ impl Hud {
 }
 
 impl Drawer {
-    /// What the coach does first, then what is happening.
-    const LIVE: [Drawer; 9] = [
+    /// What the coach does first, then what is happening. Tactics and talk
+    /// are not here: they are in the room that opens when play stops.
+    const LIVE: [Drawer; 7] = [
         Drawer::Bench,
-        Drawer::Shout,
-        Drawer::Orders,
         Drawer::Rival,
         Drawer::Feed,
         Drawer::Scores,
@@ -55,8 +52,6 @@ impl Drawer {
             Drawer::Shots => "Shots",
             Drawer::Flow => "Flow",
             Drawer::Bench => "Bench",
-            Drawer::Shout => "Shout",
-            Drawer::Orders => "Orders",
             Drawer::Rival => "Rival",
             Drawer::Box => "Box",
         }
@@ -149,9 +144,50 @@ impl HudPrefs {
     }
 }
 
+/// The keys of the match, taken before any widget can see them (a focused
+/// button would otherwise take the space bar as a click).
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Keys {
+    pub space: bool,
+    pub timeout: bool,
+    pub escape: bool,
+}
+
+/// Take Space, T and (with the room open) Escape out of the frame's input.
+/// Done before any widget is drawn: a button that has the focus would take
+/// the space bar as a click.
+fn take_keys(ctx: &egui::Context, room_open: bool) -> Keys {
+    ctx.input_mut(|i| Keys {
+        space: i.consume_key(egui::Modifiers::NONE, egui::Key::Space),
+        timeout: i.consume_key(egui::Modifiers::NONE, egui::Key::T),
+        escape: room_open && i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+    })
+}
+
+/// What the transport bar needs to know of a live game.
+#[derive(Clone, Copy)]
+struct LiveBar {
+    /// Play is stopped for the coach: a timeout, a break, the tip.
+    stopped: bool,
+    room_open: bool,
+    left: u8,
+    wanted: bool,
+}
+
+/// What the transport bar asks for.
+#[derive(Default)]
+struct BarOut {
+    panels: bool,
+    room: bool,
+}
+
 /// What the match screen remembers about its panels.
 #[derive(Default)]
 pub(crate) struct Hud {
+    /// Keys pressed this frame, see `App::match_keys`.
+    pub keys: Keys,
+    /// The keys help is out.
+    pub help: bool,
     /// The drawer that is out, on a wide screen.
     pub drawer: Option<Drawer>,
     /// The user has opened or closed one, so it is theirs to decide.
@@ -414,8 +450,6 @@ impl App {
             }
             (Drawer::Box, ..) => self.box_panel(ui, bd, g),
             (Drawer::Bench, Some(l), Some(c), Some(b)) => self.bench_card(ui, bd, l, b, c),
-            (Drawer::Shout, Some(l), Some(c), Some(b)) => self.shout_card(ui, bd, l, b, c),
-            (Drawer::Orders, Some(l), Some(c), _) => self.orders_card(ui, bd, l, c),
             (Drawer::Rival, Some(l), ..) => self.opponent_card(ui, bd, l),
             _ => {}
         }
@@ -480,6 +514,21 @@ fn eye_button(ui: &mut Ui, level: u8) -> egui::Response {
 }
 
 impl App {
+    /// Space, T and Escape of the match screen. Called before the page is
+    /// drawn, as the search keys are.
+    pub(crate) fn match_keys(&mut self, ctx: &egui::Context) {
+        self.sh.hud.keys = Keys::default();
+        if !self.started
+            || self.tab != crate::app::Tab::Match
+            || self.search.open
+            || ctx.text_edit_focused()
+        {
+            return;
+        }
+        let room_open = self.touchline.room.as_ref().is_some_and(|r| r.open);
+        self.sh.hud.keys = take_keys(ctx, room_open);
+    }
+
     /// The match on every size: the court is the window, and what floats
     /// over it is the user's to choose. Full shows everything; Minimal a
     /// small score, with the controls fading while the game runs; Clean
@@ -495,6 +544,46 @@ impl App {
     ) {
         use crate::side::{EDGE, SAFE};
         let screen = ui.ctx().content_rect();
+        // ---- the keys: space goes on (or pauses), T is the timeout, Esc
+        // puts the coaching room away
+        let keys = std::mem::take(&mut self.sh.hud.keys);
+        let live_stopped = live
+            .is_some_and(|l| matches!(l.stoppage(), Some(s) if s != basketman_core::league::Stoppage::Final))
+            && self.touchline.stopped;
+        if let Some(cmds) = commands.as_deref_mut() {
+            if keys.timeout && live.is_some_and(|l| !l.game.is_over()) {
+                cmds.push(Command::Timeout);
+            }
+            if keys.escape && let Some(r) = self.touchline.room.as_mut() {
+                r.open = false;
+            }
+            if keys.space {
+                if live_stopped {
+                    cmds.push(Command::Resume);
+                } else {
+                    self.playback.playing = !self.playback.playing;
+                }
+            }
+        } else if keys.space {
+            if self.playback.time >= g.duration - 0.05 {
+                // Full time: on to whatever is next.
+                self.go(crate::app::Tab::Inbox);
+            } else {
+                self.playback.playing = !self.playback.playing;
+            }
+        }
+        // Before the tip nothing has been played: no court yet, only the
+        // coaching room.
+        if g.rec.frames.is_empty() {
+            ui.painter().rect_filled(screen, 0.0, view3d::SURROUND);
+            if let (Some(l), Some(cmds)) = (live, commands.as_deref_mut()) {
+                if let Some(r) = self.touchline.room.as_mut() {
+                    r.open = true;
+                }
+                self.stop_room(ui, bd, tier, l, cmds);
+            }
+            return;
+        }
         let phone = tier.phone();
         let stacked = tier == Tier::Narrow;
         let mut prefs = self.sh.hud.prefs;
@@ -524,7 +613,7 @@ impl App {
         if touched {
             self.sh.hud.last_input = now;
         }
-        if !ui.ctx().egui_wants_keyboard_input()
+        if !ui.ctx().text_edit_focused()
             && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::H))
         {
             prefs.level = (prefs.level + 1) % 3;
@@ -736,6 +825,9 @@ impl App {
             );
             if hit.clicked() {
                 prefs.level = 1;
+                if let Some(r) = self.touchline.room.as_mut() {
+                    r.open = true;
+                }
             }
             ui.ctx().request_repaint();
         }
@@ -761,6 +853,20 @@ impl App {
             let eye = eye_button(&mut row, level).on_hover_text("Cycle what is shown (H)");
             if eye.clicked() {
                 prefs.level = (prefs.level + 1) % 3;
+            }
+            // With everything else hidden the timeout is still here.
+            if level == 2
+                && let (Some(l), Some(cmds)) = (live, commands.as_deref_mut())
+            {
+                let left = l.game.timeouts_left(l.side);
+                let wanted = l.game.timeout_wanted(l.side);
+                let label = if wanted { "Timeout called".to_string() } else { format!("Timeout {left}") };
+                if row
+                    .add_enabled(wanted || left > 0, egui::Button::new(label).frame(false).min_size(vec2(0.0, 36.0)))
+                    .clicked()
+                {
+                    cmds.push(Command::Timeout);
+                }
             }
             row.menu_button("View", |ui| {
                 ui.set_min_width(210.0);
@@ -808,9 +914,57 @@ impl App {
             );
         }
 
+        // ---- the keys, in a small help
+        if corner > 0.02 || self.sh.hud.help {
+            let r = Rect::from_center_size(pos2(free_right - 14.0 - 18.0, top + 22.0), vec2(36.0, 36.0));
+            let resp = ui.interact(r, egui::Id::unique("hud_help_btn"), Sense::click());
+            let mut c = ui.new_child(egui::UiBuilder::new().max_rect(r));
+            c.set_opacity(corner.max(if self.sh.hud.help { 1.0 } else { 0.0 }));
+            glass_alpha(&c, r, 18, true, solid.max(0.8));
+            c.painter().text(r.center(), Align2::CENTER_CENTER, "?", FontId::new(16.0, theme::mono_semibold()), theme::TEXT);
+            if resp.clicked() {
+                self.sh.hud.help = !self.sh.hud.help;
+            }
+        }
+        if self.sh.hud.help {
+            let w = 330.0f32.min(screen.width() - 24.0);
+            let hr = Rect::from_min_size(pos2((screen.center().x - w / 2.0).max(8.0), top + 52.0), vec2(w, 196.0));
+            glass_alpha(ui, hr, 14, true, 1.0);
+            let mut c = ui.new_child(
+                egui::UiBuilder::new().max_rect(hr.shrink(12.0)).layout(egui::Layout::top_down(egui::Align::Min)),
+            );
+            theme::eyebrow(&mut c, "Keys");
+            for (k, what) in [
+                ("Space", "pause or go on; at a stop, resume play; at full time, leave"),
+                ("T", "call a timeout, again to wave it off"),
+                ("H", "how much is shown"),
+                ("Esc", "put the coaching room away (play stays stopped)"),
+            ] {
+                c.horizontal_wrapped(|ui| {
+                    ui.label(theme::mono(k).strong());
+                    ui.label(RichText::new(what).color(theme::TEXT_DIM));
+                });
+            }
+            c.add_space(2.0);
+            c.label(
+                RichText::new("Tactics, instructions and talk are for a timeout, a break or the tip.")
+                    .color(theme::TEXT_DIM),
+            );
+            if c.add(egui::Button::new("Close").min_size(vec2(0.0, 36.0))).clicked() {
+                self.sh.hud.help = false;
+            }
+        }
+
         // ---- the transport
         let mut st = Transport { time, playing, speed };
         let mut open_panel = false;
+        let bar_live = live.map(|l| LiveBar {
+            stopped: live_stopped,
+            room_open: self.touchline.room.as_ref().is_some_and(|r| r.open),
+            left: l.game.timeouts_left(l.side),
+            wanted: l.game.timeout_wanted(l.side),
+        });
+        let mut open_room = false;
         let avail = free_right - (screen.left() + SAFE);
         let bar_w = avail.min(760.0);
         let bx = if phone { screen.left() + SAFE } else { screen.left() + SAFE + (avail - bar_w) / 2.0 };
@@ -830,7 +984,7 @@ impl App {
             if ctl > 0.6 {
                 child.spacing_mut().item_spacing.x = 6.0;
                 child.add_space(6.0);
-                open_panel = side_transport(
+                let out = side_transport(
                     &mut child,
                     bar.width() - 12.0,
                     &mut st,
@@ -839,7 +993,10 @@ impl App {
                     at_head,
                     commands.as_deref_mut(),
                     open,
+                    bar_live,
                 );
+                open_panel = out.panels;
+                open_room = out.room;
             }
         }
 
@@ -979,6 +1136,9 @@ impl App {
                 }
             }
         }
+        if open_room && let Some(r) = self.touchline.room.as_mut() {
+            r.open = true;
+        }
         if open_panel {
             let d = self
                 .sh
@@ -1010,6 +1170,10 @@ impl App {
             self.playback.time = t;
             self.playback.playing = true;
         }
+        // The coaching room, over everything, while play is stopped.
+        if let (Some(l), Some(cmds)) = (live, commands.as_deref_mut()) {
+            self.stop_room(ui, bd, tier, l, cmds);
+        }
     }
 }
 
@@ -1026,8 +1190,10 @@ fn side_transport(
     at_head: bool,
     commands: Option<&mut Vec<Command>>,
     panel_open: bool,
-) -> bool {
-    let mut panels = false;
+    live: Option<LiveBar>,
+) -> BarOut {
+    let mut out = BarOut::default();
+    let mut commands = commands;
     let mut left = room;
     let fits = |ui: &Ui, text: &str, left: &mut f32| -> bool {
         let w = ui
@@ -1044,6 +1210,7 @@ fn side_transport(
             false
         }
     };
+    let stopped = live.is_some_and(|l| l.stopped);
     let play_label = match (st.playing, g.live) {
         (true, _) => "Pause",
         (false, true) => "Resume",
@@ -1059,17 +1226,46 @@ fn side_transport(
             )
             .clicked()
     {
-        if !g.live && st.time >= g.duration {
-            st.time = 0.0;
+        if stopped {
+            if let Some(c) = commands.as_deref_mut() {
+                c.push(Command::Resume);
+            }
+        } else {
+            if !g.live && st.time >= g.duration {
+                st.time = 0.0;
+            }
+            st.playing = !st.playing;
         }
-        st.playing = !st.playing;
+    }
+    if let Some(l) = live {
+        // The timeout is the one way to change the plan: always at hand.
+        let label = if l.wanted {
+            "Timeout called".to_string()
+        } else {
+            format!("Timeout {}", l.left)
+        };
+        if fits(ui, &label, &mut left)
+            && ui
+                .add_enabled(l.wanted || l.left > 0, egui::Button::new(label).min_size(size))
+                .on_hover_text(if l.wanted {
+                    "Taken at the next dead ball. Press again to wave it off (T)."
+                } else {
+                    "Ask for a timeout at the next dead ball (T). Changes are made in timeouts and breaks."
+                })
+                .clicked()
+            && let Some(c) = commands.as_deref_mut()
+        {
+            c.push(Command::Timeout);
+        }
+        if l.stopped && !l.room_open && fits(ui, "Coach", &mut left) {
+            out.room = ui.add(egui::Button::new("Coach").min_size(size)).clicked();
+        }
     }
     let speed = format!("{:.0}x", st.speed);
     if fits(ui, &speed, &mut left) && ui.add(egui::Button::new(speed).min_size(size)).clicked() {
         let at = SPEEDS.iter().position(|s| *s == st.speed).unwrap_or(0);
         st.speed = SPEEDS[(at + 1) % SPEEDS.len()];
     }
-    let mut commands = commands;
     if let Some(commands) = commands.as_deref_mut() {
         let (text, live_back) = if at_head { ("Break", false) } else { ("Live", true) };
         if fits(ui, text, &mut left) && ui.add(egui::Button::new(text).min_size(size)).clicked() {
@@ -1100,7 +1296,7 @@ fn side_transport(
         };
     }
     if !panel_open && fits(ui, "Panels", &mut left) {
-        panels = ui.add(egui::Button::new("Panels").min_size(size)).clicked();
+        out.panels = ui.add(egui::Button::new("Panels").min_size(size)).clicked();
     }
     if left >= 90.0 {
         ui.spacing_mut().slider_width = left - 24.0;
@@ -1109,19 +1305,128 @@ fn side_transport(
             st.playing = false;
         }
     }
-    panels
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Every text the transport bar draws, for a game that is live (or a
+    /// replay, with `live` None) in a bar `width` wide.
+    fn bar_texts(live: Option<LiveBar>, width: f32) -> (Vec<String>, Vec<Command>) {
+        use basketman_core::engine::GameResult;
+        fn texts(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::epaint::Shape::Text(t) => out.push(t.galley.text().to_string()),
+                egui::epaint::Shape::Vec(v) => v.iter().for_each(|s| texts(s, out)),
+                _ => {}
+            }
+        }
+        let ctx = egui::Context::default();
+        let rec = Recording::default();
+        let result = GameResult {
+            score: [0, 0],
+            periods: Vec::new(),
+            boxes: [Vec::new(), Vec::new()],
+            possessions: [0, 0],
+        };
+        let g = Game {
+            fixture: 0,
+            me: 0,
+            teams: ["A".into(), "B".into()],
+            clubs: [0, 1],
+            rec: &rec,
+            result: &result,
+            duration: 100.0,
+            live: live.is_some(),
+            colors: [Color32::RED, Color32::BLUE],
+        };
+        let mut st = Transport { time: 50.0, playing: false, speed: 4.0 };
+        let mut look = Look::default();
+        let mut commands = Vec::new();
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(900.0, 120.0))),
+            ..Default::default()
+        };
+        let out = ctx.run_ui(input, |ui| {
+            side_transport(ui, width, &mut st, &mut look, &g, true, live.map(|_| &mut commands), false, live);
+        });
+        let mut all = Vec::new();
+        for clipped in &out.shapes {
+            texts(&clipped.shape, &mut all);
+        }
+        (all, commands)
+    }
+
+    /// Space is the picture's key, not a button's: a button with the focus
+    /// does not also click when it is pressed.
+    #[test]
+    fn space_does_not_click_the_focused_button() {
+        let ctx = egui::Context::default();
+        let key = |pressed: bool| egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(300.0, 100.0))),
+            events: vec![egui::Event::Key {
+                key: egui::Key::Space,
+                physical_key: None,
+                pressed,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+        let id = egui::Id::new("resume_button");
+        let draw = |ctx: &egui::Context, input: egui::RawInput, take: bool| {
+            let (mut keys, mut clicked) = (Keys::default(), false);
+            let _ = ctx.run_ui(input, |ui| {
+                if take {
+                    keys = take_keys(ui.ctx(), false);
+                }
+                let r = ui.add(egui::Button::new("Resume").sense(Sense::click()));
+                ui.memory_mut(|m| m.request_focus(r.id));
+                clicked |= r.clicked();
+                let _ = id;
+            });
+            (keys, clicked)
+        };
+        // Control: with no one taking the key, the focused button clicks.
+        let _ = draw(&ctx, egui::RawInput::default(), false);
+        let (_, clicked) = draw(&ctx, key(true), false);
+        assert!(clicked, "the control case: a focused button takes space as a click");
+        // The match takes it first.
+        let ctx = egui::Context::default();
+        let _ = draw(&ctx, egui::RawInput::default(), true);
+        let (keys, clicked) = draw(&ctx, key(true), true);
+        assert!(keys.space && !clicked, "{keys:?} {clicked}");
+    }
+
+    /// The one way to change the plan is a timeout, so the bar must always
+    /// offer it while the game is live, on every width, and say how many
+    /// are left. (It lived in a closed side panel once, and was out of
+    /// reach.)
+    #[test]
+    fn the_transport_always_offers_the_timeout_in_a_live_game() {
+        let play = LiveBar { stopped: false, room_open: false, left: 2, wanted: false };
+        for width in [358.0, 760.0] {
+            let (texts, _) = bar_texts(Some(play), width);
+            assert!(texts.iter().any(|t| t == "Timeout 2"), "{width}: {texts:?}");
+        }
+        let (texts, _) = bar_texts(Some(LiveBar { wanted: true, ..play }), 358.0);
+        assert!(texts.iter().any(|t| t == "Timeout called"), "{texts:?}");
+        // Stopped for the coach: resume, and the way back into the room.
+        let (texts, _) = bar_texts(Some(LiveBar { stopped: true, ..play }), 760.0);
+        assert!(texts.iter().any(|t| t == "Resume") && texts.iter().any(|t| t == "Coach"), "{texts:?}");
+        // A replay has no timeouts.
+        let (texts, _) = bar_texts(None, 760.0);
+        assert!(!texts.iter().any(|t| t.starts_with("Timeout")), "{texts:?}");
+    }
+
     #[test]
     fn what_the_user_chose_is_remembered() {
         let p = HudPrefs {
             level: 2,
             open: true,
-            tab: Some(Drawer::Orders),
+            tab: Some(Drawer::Rival),
             width: 360.0,
             alpha: 0.4,
             score: false,

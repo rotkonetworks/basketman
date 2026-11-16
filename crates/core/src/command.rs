@@ -744,16 +744,31 @@ pub(crate) mod tests {
         }
     }
 
-    /// Coach this round's game by hand, the way the match screen does.
+    /// Coach this round's game by hand, the way the match screen does:
+    /// tactics and talk in a timeout, substitutions and timeouts in play.
     fn coach_live(w: &mut World) -> Vec<usize> {
+        use crate::engine::Pause;
         let mut live = w.kickoff(w.watch.unwrap()).unwrap();
         let side = live.side;
         let who = |live: &LiveRound| live.game.players(side);
         live.input(LiveInput::AutoSubs(false));
+        let first = who(&live).iter().find(|p| p.on_court).unwrap().id;
+        live.input(LiveInput::Brief {
+            player: first,
+            brief: crate::tactics::Brief::Shoot,
+        });
+        let to_timeout = |live: &mut LiveRound| {
+            live.input(LiveInput::Timeout);
+            while !live.game.is_over() {
+                if live.step() == Some(Pause::Timeout(side)) {
+                    return;
+                }
+            }
+        };
         while live.game.time() < 200.0 {
             live.step();
         }
-        live.input(LiveInput::Timeout);
+        to_timeout(&mut live);
         let said = live.input(LiveInput::Shout {
             shout: Shout::DemandMore,
             target: None,
@@ -769,14 +784,22 @@ pub(crate) mod tests {
         for _ in 0..300 {
             live.step();
         }
+        // In live play a word to a player is refused and not logged.
         let target = who(&live).iter().find(|p| p.on_court).map(|p| p.id);
+        assert!(live
+            .try_input(LiveInput::Shout {
+                shout: Shout::Praise,
+                target
+            })
+            .is_err());
+        while live.game.time() < 1100.0 {
+            live.step();
+        }
+        to_timeout(&mut live);
         live.input(LiveInput::Shout {
             shout: Shout::Praise,
             target,
         });
-        while live.game.time() < 1100.0 {
-            live.step();
-        }
         let mut orders = live.game.orders(side);
         orders.pace = 17;
         orders.aggression = 6;
@@ -987,7 +1010,7 @@ pub(crate) mod tests {
             })
             .collect();
         assert_eq!(live.len(), 2);
-        assert_eq!(live[0].len(), 9);
+        assert_eq!(live[0].len(), 11);
         assert!(live[0].windows(2).all(|w| w[0].0 <= w[1].0));
         assert!(live[0].iter().map(|i| i.0).max() > Some(10_000));
 

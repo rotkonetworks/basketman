@@ -64,3 +64,5 @@ The arguments are a screen name and its options (`title`, `squad`, `tactics`, `m
 5. **Tests state what should be true.** When a test fails after an engine change, find out why. Do not loosen the assertion or change the seed until it passes.
 
 6. **Saves must keep loading.** New fields on saved types get `#[serde(default)]`; there is an old-save test in `crates/core/src/save.rs`.
+
+7. **Tactics change only when play is stopped.** In a live game (`LiveRound::input` in `crates/core/src/league.rs`) orders, instructions and talk are refused unless the game is in a timeout (either team's), a break, or before the tip; in live play only a timeout, queued substitutions and the assistant's substitution switch are allowed. The AI benches follow the same rule. Never add a way around it in the UI; the coaching room (`crates/web/src/matchview/stoproom.rs`) is where changes are made.
