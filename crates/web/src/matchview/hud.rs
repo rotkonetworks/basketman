@@ -1355,6 +1355,7 @@ mod tests {
             periods: Vec::new(),
             boxes: [Vec::new(), Vec::new()],
             possessions: [0, 0],
+            officiating: None,
         };
         let g = Game {
             fixture: 0,

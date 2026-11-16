@@ -972,6 +972,11 @@ mod tests {
                 break;
             }
             let stop = live.stoppage().expect("a pause is a stoppage");
+            // A call under review has its own small prompt, not the room:
+            // nothing can be changed in it but the challenge.
+            if stop == Stoppage::Review {
+                continue;
+            }
             let room = StopRoom::new(&live, &w, stop);
             assert!((1..=4).contains(&room.read.len()), "{:?}", room.read);
             match stop {
