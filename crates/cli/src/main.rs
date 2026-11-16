@@ -13,6 +13,7 @@ mod lab;
 mod lab_officials;
 mod mcp;
 mod play;
+mod realism;
 
 use basketman_core::engine::{BoxLine, GameResult};
 use basketman_core::league::World;
@@ -83,6 +84,10 @@ fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("play") => return play::run(),
         Some("mcp") => return mcp::run(),
+        Some("realism") => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            return realism::run(&rest);
+        }
         Some("balance") => {
             let rest: Vec<String> = std::env::args().skip(2).collect();
             return balance::run(&rest);
