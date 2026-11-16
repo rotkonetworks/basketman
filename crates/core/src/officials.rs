@@ -751,6 +751,26 @@ impl World {
         Some(crew)
     }
 
+    /// A crew drawn without a calendar, for a game that is not a fixture
+    /// (a measurement, a friendly between two clubs): three active referees
+    /// by `salt`, and a house as loud as the home club's usual one.
+    pub fn bare_crew(&self, home: usize, salt: u64) -> Option<Crew> {
+        if self.officials.off {
+            return None;
+        }
+        let ids: Vec<RefId> = self.officials.pool.iter().filter(|r| r.active).map(|r| r.id).collect();
+        if ids.len() < 3 {
+            return None;
+        }
+        let n = ids.len() as u64;
+        let first = salt % n;
+        let pick = |j: u64| ids[((first + j * 7) % n) as usize];
+        let mut crew = self.officials.crew([pick(0), pick(1), pick(2)]);
+        let a = &self.econ.arenas[home];
+        crew.crowd = crate::arena::crowd(self.expected_attendance(home), a.capacity, 0.5, false).loud;
+        Some(crew)
+    }
+
     /// A game is in the book: the referees' records.
     pub(crate) fn book_officials(&mut self, i: usize) {
         let Some(report) = self.fixtures[i]

@@ -44,7 +44,23 @@ const TOE_BAND: f32 = 0.22;
 const TOE_BASE: f32 = 0.30;
 /// The most a loud home crowd shifts a whistle (a share of its threshold)
 /// for an official who is all lean.
-const LEAN_SHIFT: f32 = 0.22;
+const LEAN_SHIFT: f32 = 0.16;
+/// Late in a game the side that is behind fouls to stop the clock: the
+/// severity of the contact it makes on the ball handler.
+const HACK_SEV: f32 = 40.0;
+/// The visitors have not played in this hall: how much less sure they are of
+/// the floor, the rims and the backdrop, as the unfamiliarity of a set, for a
+/// full and loud house.
+const HALL: f32 = 0.3;
+/// How much a loud house lifts the home five and rattles the visitors, as
+/// concentration (see `Slot::focus`).
+const HOUSE: f32 = 0.5;
+/// How much more often a shooter is fouled than the contest alone makes him
+/// (`foul_chance`): a defender who hits a man in the act, in a crowded paint,
+/// is whistled more than a simple count of contested shots says. Fitted so
+/// that shooting fouls are about half of all fouls without losing the
+/// free-throw rate (see `docs/realism.md`, "League shape").
+pub(super) const SHOOTING_FOULS: f32 = 1.10;
 /// Seconds a whistle is shown in the replay and the official's arm is up.
 const SIGNAL: f32 = 1.0;
 /// How fast the officials run, m/s.
@@ -409,6 +425,12 @@ impl Game {
         fouler: (usize, usize),
         fouled: (usize, usize),
     ) -> bool {
+        // The side behind, late, hacks the ball handler on purpose.
+        let (contact, sev) = if kind == FoulKind::ReachIn && self.hacking(fouler.0) {
+            (true, HACK_SEV)
+        } else {
+            (contact, sev)
+        };
         if self.ofc.is_none() {
             return contact && self.called(sev);
         }
@@ -446,6 +468,30 @@ impl Game {
             roll < ph * (1.0 + lean)
         };
         self.settle_call(i, kind, truth, whistle, fouler, fouled, contact)
+    }
+
+    /// A whistle has blown that is not yet booked: no violation can be
+    /// called on a play the crew has stopped.
+    pub(super) fn whistled(&self) -> bool {
+        self.ofc.as_ref().is_some_and(|o| o.last.is_some())
+    }
+
+    /// Is side `t`, on defense, fouling on purpose: a bench of its own that
+    /// is behind by a few points in the last two minutes of the game, in the
+    /// bonus or inside the last minute? The fewer the seconds, the more
+    /// points it thinks it can make up.
+    fn hacking(&self, t: usize) -> bool {
+        let s = &self.sides[t];
+        if s.coached || self.period + 1 < self.rules.periods {
+            return false;
+        }
+        let behind = s.opp_score as i32 - s.score as i32;
+        let left = self.clock;
+        if behind < 1 || left > 120.0 {
+            return false;
+        }
+        let reach = (3.0 + left / 15.0).min(10.0) as i32;
+        behind <= reach && (left <= 60.0 || s.team_fouls >= self.rules.bonus_after)
     }
 
     /// Book the decision and what it did to the official's mood; returns
@@ -1283,6 +1329,14 @@ impl Game {
     pub(in crate::engine) fn assign_crew(&mut self, crew: Crew) {
         let ofc = Ofc::new(crew, &mut self.rng);
         self.whistle = ofc.tightness();
+        // The hall: the visitors are less at home in it, the house lifts
+        // the home five and rattles the visitors, all in proportion to how
+        // full and loud it is. Applied once, as the game starts; `Side::tick`
+        // keeps the lift going.
+        let loud = ofc.crew.crowd.clamp(0.0, 1.0);
+        self.sides[1].unfamiliar = (self.sides[1].unfamiliar + HALL * loud).min(1.0);
+        self.sides[0].house = HOUSE * loud;
+        self.sides[1].house = -HOUSE * loud;
         if let Some(r) = &mut self.rec {
             r.whistle = self.whistle;
         }

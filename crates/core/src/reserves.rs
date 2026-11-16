@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::engine::{BoxLine, Lineup, simulate_game};
 use crate::inbox::{MAX_ROSTER, MIN_ROSTER};
-use crate::league::{Standing, TeamId, World, generate_player};
+use crate::league::{Standing, TeamId, World};
 use crate::player::{Player, PlayerId};
 use crate::rng::Rng;
 use crate::tactics::Tactics;
@@ -33,9 +33,9 @@ pub struct ReserveGame {
 /// A youngster for a reserve squad: raw, cheap, with room to grow.
 fn youth(id: PlayerId, quality: f32, rng: &mut Rng) -> Player {
     let slot = rng.range(0, 5) as usize;
-    let mut p = generate_player(id, slot, quality, rng);
-    p.age = 17 + rng.range(0, 4) as u8;
-    p.potential = (p.overall() + 1.0 + rng.f32() * 5.0).min(20.0);
+    let age = 17 + rng.range(0, 4) as u8;
+    let mut p = crate::league::generate_player_at(id, slot, quality, age, rng);
+    p.potential = (p.overall() + crate::league::age_gap(age) + 1.0 + rng.f32() * 5.0).min(20.0);
     p.assign_signatures();
     p.contract.salary = 8_000;
     p.contract.years_left = 2;

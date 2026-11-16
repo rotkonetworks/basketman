@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::engine::BoxLine;
 use crate::inbox::{Kind, MAX_ROSTER, money};
-use crate::league::{Fixture, Standing, TeamId, TeamStats, World, generate_player};
+use crate::league::{Fixture, Standing, TeamId, TeamStats, World};
 use crate::player::Attr;
 use crate::player::{Player, PlayerId};
 
@@ -277,9 +277,9 @@ impl World {
             // projects.
             let quality = 9.8 - i as f32 * step;
             let slot = self.rng.range(0, 5) as usize;
-            let mut p = generate_player(id, slot, quality, &mut self.rng);
-            p.age = 19 + self.rng.range(0, 3) as u8;
-            p.potential = (p.overall() + 1.5 + self.rng.f32() * 4.5).min(20.0);
+            let age = 19 + self.rng.range(0, 3) as u8;
+            let mut p = crate::league::generate_player_at(id, slot, quality, age, &mut self.rng);
+            p.potential = (p.overall() + crate::league::age_gap(age) + 1.0 + self.rng.f32() * 3.5).min(20.0);
             p.assign_signatures();
             p.contract.salary = 15_000;
             p.contract.years_left = 2;

@@ -483,6 +483,15 @@ pub fn train_playbook(playbook: &mut [TacticSlot], active: usize, drill: f32) {
     }
 }
 
+/// Planned minutes by rank in the rotation (best player first) for the
+/// default plan. The engine normalises the column to 200, so these come out
+/// near 26.5 for the best five and 13.5 for the next five. What is played is
+/// less for the starters (garbage time, foul trouble, tired legs) and more for
+/// the bench: about 24 and 16 of 40, a ten-man rotation as a coach plans it.
+/// Fatigue makes this the right plan: a starter at 30 minutes loses to the same
+/// club at 24 (`docs/realism.md`, "League shape").
+pub const AUTO_MINUTES: [u8; 10] = [27, 26, 26, 24, 22, 15, 14, 13, 11, 10];
+
 impl Tactics {
     /// Sensible default: best player per position starts, next five best come
     /// off the bench, roles by overall rank.
@@ -497,7 +506,6 @@ impl Tactics {
                 picked.push(rest.remove(i));
             }
         }
-        let starters = picked.len();
         picked.extend(rest.into_iter().take(5));
 
         let mut rank: Vec<PlayerId> = picked.iter().map(|p| p.id).collect();
@@ -513,10 +521,9 @@ impl Tactics {
 
         let rotation = picked
             .iter()
-            .enumerate()
-            .map(|(i, p)| RotationSlot {
+            .map(|p| RotationSlot {
                 player: p.id,
-                minutes: if i < starters { 30 } else { 10 },
+                minutes: AUTO_MINUTES[rank.iter().position(|id| *id == p.id).unwrap_or(9).min(9)],
                 role: match rank.iter().position(|id| *id == p.id).unwrap_or(9) {
                     0 => Role::PrimaryOption,
                     1 | 2 => Role::Secondary,

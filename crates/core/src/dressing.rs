@@ -16,6 +16,13 @@ use crate::league::{TeamId, World};
 use crate::player::PlayerId;
 use crate::rng::Rng;
 
+/// How much a point of difference in the squads' quality changes the odds a
+/// squad gives itself, and what the hall is worth to the home side. They are
+/// what the game really does (`docs/realism.md`, "League shape"): a squad
+/// that expected less than it got would find more belief in every win and
+/// the strong would grow stronger.
+const EXPECT_PER_POINT: f32 = 0.28;
+const EXPECT_HOME: f32 = 0.09;
 /// Where belief settles with nothing happening.
 const NEUTRAL: f32 = 0.55;
 
@@ -85,10 +92,10 @@ impl World {
         for (side, team) in [home, away].into_iter().enumerate() {
             let sign = if side == 0 { 1.0 } else { -1.0 };
             // What the squad thought its chances were.
-            let expected = (0.5 + sign * (edge * 0.17 + 0.05)).clamp(0.1, 0.9);
+            let expected = (0.5 + sign * (edge * EXPECT_PER_POINT + EXPECT_HOME)).clamp(0.1, 0.9);
             let margin = result.score[side] as f32 - result.score[1 - side] as f32;
             let won = if margin > 0.0 { 1.0 } else { 0.0 };
-            let mut change = 0.055 * (won - expected) + (margin / 800.0).clamp(-0.02, 0.02);
+            let mut change = 0.04 * (won - expected) + (margin / 800.0).clamp(-0.02, 0.02);
 
             // The things players hold against a coach whatever the score.
             let t = &self.teams[team];

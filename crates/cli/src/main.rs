@@ -120,6 +120,10 @@ fn main() {
             }
             Some("transition") => lab::transition(games.unwrap_or(300)),
             Some("league") => lab::league(games.unwrap_or(300)),
+            Some("shape") => lab::shape(games.unwrap_or(40)),
+            Some("foulkinds") => lab::foulkinds(games.unwrap_or(10)),
+            Some("payroll") => lab::payroll(games.unwrap_or(12)),
+            Some("minutes") => lab::minutes(games.unwrap_or(20)),
             Some("launch") => lab::launch(),
             Some("exploit") => lab::exploit(games.unwrap_or(200)),
             Some("diag") => lab::diag(games.unwrap_or(12)),

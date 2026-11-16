@@ -583,7 +583,9 @@ fn travel_only_applies_in_a_managed_calendar() {
 fn home_court_stays_realistic_with_travel() {
     // Aggregate over 12 careers of twelve clubs: home teams win a bit
     // more than half their games and by a few points, with or without
-    // the toll of travel, and the toll adds only a little.
+    // the toll of travel, and the toll adds only a little. A real league's
+    // home side wins 60 to 62 games in a hundred (`docs/realism.md`), which
+    // is a margin near four points, so four and a half is the ceiling.
     let (g0, w0, m0) = career_home_court(1..=12, false);
     let (g1, w1, m1) = career_home_court(1..=12, true);
     let (win0, win1) = (w0 as f32 / g0 as f32, w1 as f32 / g1 as f32);
@@ -591,7 +593,7 @@ fn home_court_stays_realistic_with_travel() {
     eprintln!("home court, travel off: {:.1}% {:+.2}; on: {:.1}% {:+.2}", win0 * 100.0, mar0, win1 * 100.0, mar1);
     for (win, mar) in [(win0, mar0), (win1, mar1)] {
         assert!((0.50..=0.62).contains(&win), "home win share {win}");
-        assert!((0.5..=3.5).contains(&mar), "home margin {mar}");
+        assert!((0.5..=4.5).contains(&mar), "home margin {mar}");
     }
     assert!(mar1 - mar0 < 1.0, "travel adds {}", mar1 - mar0);
 }
