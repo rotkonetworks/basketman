@@ -2758,7 +2758,9 @@ impl Game {
                 && clear
             {
                 let eager = STOP_FOUL * (1.0 + 0.8 * self.def().aggression());
-                if self.rng.chance(eager) && self.called(1.0) {
+                let grab = self.rng.chance(eager);
+                let o = self.play.o;
+                if self.call(grab, 1.0, FoulKind::ReachIn, (1 - o, dk), (o, h)) {
                     return self.floor_foul(dk, h, FoulKind::ReachIn);
                 }
             }

@@ -304,3 +304,43 @@ fn a_review_allows_only_the_challenge_and_only_once() {
     }
     assert!(seen > 0, "no review came up in twelve games");
 }
+
+#[test]
+fn with_a_crew_nobody_teleports_and_the_three_keep_clear_of_a_throw_in() {
+    let w = World::generate(7, 8);
+    let step = 1.0 / crate::replay::FRAME_RATE;
+    let mut throw_ins = 0;
+    for g in 0..4 {
+        let (home, away) = (lineup(&w.teams[g % 8], &w.players), lineup(&w.teams[(g + 3) % 8], &w.players));
+        let (_, rec) = simulate_recorded_crewed(&home, &away, &w.rules, &mut Rng::new(900 + g as u64), Some(&crew(0.4, 0.5)));
+        for pair in rec.frames.windows(2) {
+            let (a, b) = (&pair[0], &pair[1]);
+            if b.cut {
+                continue;
+            }
+            let dt = b.time - a.time;
+            assert!((dt - step).abs() < 0.002, "gap of {dt} s at {}", a.time);
+            for side in 0..2 {
+                for k in 0..5 {
+                    let id = a.who[side][k];
+                    let Some(j) = b.who[side].iter().position(|&w| w == id) else { continue };
+                    assert!(a.pos[side][k].dist(b.pos[side][j]) <= 12.0 * dt + 0.15, "player moved too far at {}", a.time);
+                }
+            }
+            for i in 0..3 {
+                let d = a.officials[i].dist(b.officials[i]);
+                assert!(d <= 6.0 * dt + 0.05, "official {i} moved {d} m in {dt} s at {}", a.time);
+            }
+            // A ball out of bounds in a man's hands is a throw-in: nobody in
+            // stripes stands on top of him.
+            let (x, y) = (b.ball.x, b.ball.y);
+            if x < -0.3 || x > 28.3 || y < -0.3 || y > 15.3 {
+                throw_ins += 1;
+                for o in &b.officials {
+                    assert!(o.dist(b.ball) > 0.6, "an official on the inbounder at {}", b.time);
+                }
+            }
+        }
+    }
+    assert!(throw_ins > 50, "{throw_ins}");
+}
