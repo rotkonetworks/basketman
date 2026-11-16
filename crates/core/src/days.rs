@@ -41,8 +41,7 @@ impl World {
     }
 
     /// True if there is a game for the manager to play today (or one that
-    /// should have been). With nobody in charge of a bare league, any game
-    /// due.
+    /// should have been). With nobody in charge, any game due.
     pub fn match_today(&self) -> bool {
         if self.season_over() {
             return false;
@@ -51,9 +50,6 @@ impl World {
             Some(_) => self
                 .user_fixture()
                 .is_some_and(|i| self.fixtures[i].day <= self.day),
-            // A manager out of work has no game to wait for: the days go by
-            // and the league plays them.
-            None if self.jobless() => false,
             None => self
                 .fixtures
                 .iter()
@@ -295,25 +291,40 @@ impl World {
     /// new mail, or the draft.
     pub fn advance(&mut self) -> Stop {
         loop {
+            let before = self.desk.messages.len();
             if let Some(stop) = self.step_day() {
                 return stop;
             }
-            if self.mail_today() {
+            if self.new_mail(before) {
                 return Stop::Mail;
             }
         }
+    }
+
+    /// Mail that arrived while the day passed. A manager out of work gets
+    /// calls from clubs on the day a round closes, which is dated the day
+    /// before the new one, so for him new mail is counted, not dated.
+    fn new_mail(&self, before: usize) -> bool {
+        self.mail_today() || (self.watch.is_none() && self.desk.messages.len() > before)
     }
 
     /// Pass a single day. Returns what the new day holds for the manager,
     /// if anything: `MatchDay` when a game waits (also when it was already
     /// waiting and the day could not pass), `Mail`, `Draft`.
     pub fn continue_day(&mut self) -> Option<Stop> {
+        let before = self.desk.messages.len();
         if let Some(stop) = self.step_day() {
-            return Some(stop);
+            // A manager out of work has no game to wait for on a day of
+            // play: the league plays it, and the day passes.
+            if stop == Stop::MatchDay && self.jobless() {
+                self.pass_day();
+            } else {
+                return Some(stop);
+            }
         }
-        if self.mail_today() {
+        if self.new_mail(before) {
             Some(Stop::Mail)
-        } else if self.match_today() {
+        } else if self.match_today() && !self.jobless() {
             Some(Stop::MatchDay)
         } else {
             None
