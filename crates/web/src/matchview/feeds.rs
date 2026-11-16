@@ -595,7 +595,7 @@ fn table(ui: &mut Ui, c: &Ctx, rows: &[LiveRow], lines: basketman_core::live_fee
     if !key.is_empty() {
         ui.label(RichText::new(key.join("   ")).font(mono(10.0)).color(theme::TEXT_MUTE));
     }
-    ui.label(RichText::new("A dot marks a game on now; its score is counted as if it ended.").size(11.0).color(theme::TEXT_MUTE));
+    ui.label(RichText::new("A dot marks a game on now; its score is counted as if it ended.").size(crate::theme::fs(11.0)).color(theme::TEXT_MUTE));
 }
 
 // ---- Shots
@@ -813,7 +813,7 @@ impl Feeds {
                 } else {
                     "The replay has jumped to just before it."
                 };
-                ui.label(RichText::new(note).size(11.0).color(theme::TEXT_MUTE));
+                ui.label(RichText::new(note).size(crate::theme::fs(11.0)).color(theme::TEXT_MUTE));
             }
         });
         ui.add_space(6.0);
@@ -843,7 +843,7 @@ impl Feeds {
             });
             ui.label(
                 RichText::new("League: the season's two-point and three-point averages; no finer split is kept.")
-                    .size(10.5)
+                    .size(crate::theme::fs(10.5))
                     .color(theme::TEXT_MUTE),
             );
         });
@@ -913,7 +913,7 @@ impl Feeds {
                 row(ui, "Offensive rebounds", game_flow::orb_rate(a, b), game_flow::orb_rate(b, a), true);
                 row(ui, "Free throws per shot", a.ft_rate(), b.ft_rate(), true);
             });
-            ui.label(RichText::new("Bold is the better of the two.").size(10.5).color(theme::TEXT_MUTE));
+            ui.label(RichText::new("Bold is the better of the two.").size(crate::theme::fs(10.5)).color(theme::TEXT_MUTE));
         });
         ui.add_space(6.0);
         bd.card(ui, |ui| {
@@ -958,12 +958,12 @@ impl Feeds {
                             "He is {}/{} against him ({} pts), beaten {}x; {} has {} in all{verdict}.",
                             m.made_against, m.shots_against, m.points_against, m.beaten, c.short(g), m.his_points
                         ))
-                        .size(11.5)
+                        .size(crate::theme::fs(11.5))
                         .color(theme::TEXT_DIM),
                     );
                     ui.add_space(2.0);
                 }
-                ui.label(RichText::new("Who guards whom is where the bodies were over the last forty seconds.").size(10.5).color(theme::TEXT_MUTE));
+                ui.label(RichText::new("Who guards whom is where the bodies were over the last forty seconds.").size(crate::theme::fs(10.5)).color(theme::TEXT_MUTE));
             });
         }
     }

@@ -89,7 +89,7 @@ impl App {
                 pos2(at, head.center().y),
                 anchor,
                 c.label.to_uppercase(),
-                FontId::new(10.0, egui::FontFamily::Monospace),
+                FontId::new(crate::theme::fs(10.0), egui::FontFamily::Monospace),
                 theme::TEXT_MUTE,
             );
         }
@@ -293,7 +293,7 @@ impl App {
                 });
             ui.label(
                 RichText::new("Underlined: what his training focus works on.")
-                    .size(11.5)
+                    .size(crate::theme::fs(11.5))
                     .color(theme::TEXT_MUTE),
             );
         });

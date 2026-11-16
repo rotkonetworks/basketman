@@ -545,7 +545,7 @@ impl App {
                     let is_best = (p - best).abs() < 0.001;
                     ui.painter().rect_filled(f, 5.0, if is_best { theme::POS } else { theme::TEXT_MUTE });
                     ui.label(theme::mono(format!("{p:.2}")));
-                    ui.label(dim(format!("knows {:.0}%", fam * 100.0)).size(11.5));
+                    ui.label(dim(format!("knows {:.0}%", fam * 100.0)).size(crate::theme::fs(11.5)));
                     if !*current && ui.small_button("Use").clicked() {
                         pick = Some((*o, *d));
                     }

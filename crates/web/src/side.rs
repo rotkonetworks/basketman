@@ -42,14 +42,8 @@ impl App {
         self.shell_keys(ui.ctx());
 
         if self.tab == Tab::Match {
-            // The court has the whole screen; the page asks for what it
-            // needs from `stage`, which keeps clear of the ends.
-            let stage = Rect::from_min_max(
-                pos2(screen.left() + SAFE, screen.top() + EDGE),
-                pos2(screen.right() - SAFE, screen.bottom() - EDGE),
-            );
-            self.screen(ui, stage, Tier::Side);
-            self.side_menu(ui, screen);
+            self.shell_match(ui, screen, Tier::Side);
+            return;
         } else {
             self.sh.rail_open = false;
             let rail = Rect::from_min_max(
@@ -74,7 +68,30 @@ impl App {
         self.take_link(ui.ctx());
     }
 
-    /// The match has no rail of its own: a button over the court opens it.
+    /// The match screen on every size: the court has the whole window, the
+    /// match draws its own controls, and the navigation comes out over it
+    /// from the Menu button or Esc.
+    pub(crate) fn shell_match(&mut self, ui: &mut Ui, screen: Rect, tier: Tier) {
+        let stage = Rect::from_min_max(
+            pos2(screen.left() + SAFE, screen.top() + EDGE),
+            pos2(screen.right() - SAFE, screen.bottom() - EDGE),
+        );
+        let ctx = ui.ctx().clone();
+        if !ctx.egui_wants_keyboard_input()
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
+            self.sh.rail_open = !self.sh.rail_open;
+        }
+        self.screen(ui, stage, tier);
+        self.side_menu(ui, screen);
+        if tier == Tier::Narrow && screen.height() > screen.width() {
+            let bottom = Rect::from_min_max(pos2(screen.left(), screen.bottom() - 8.0), screen.max);
+            self.turn_hint(ui, bottom, 112.0);
+        }
+        self.take_link(&ctx);
+    }
+
+    /// The navigation, out over the match when asked for.
     fn side_menu(&mut self, ui: &mut Ui, screen: Rect) {
         let t = ui.ctx().animate_bool_with_time(
             egui::Id::unique("side_menu"),
@@ -95,24 +112,6 @@ impl App {
             self.side_rail(ui, rail, true);
             if scrim.clicked() {
                 self.sh.rail_open = false;
-            }
-        }
-        if !self.sh.rail_open {
-            let r = Rect::from_min_size(
-                pos2(screen.left() + SAFE, screen.top() + EDGE),
-                vec2(56.0, 36.0),
-            );
-            let resp = ui.interact(r, egui::Id::unique("side_menu_btn"), Sense::click());
-            glass(ui, r, 12, true);
-            ui.painter().text(
-                r.center(),
-                Align2::CENTER_CENTER,
-                "Menu",
-                FontId::new(13.0, theme::semibold()),
-                theme::TEXT,
-            );
-            if resp.clicked() {
-                self.sh.rail_open = true;
             }
         }
     }
@@ -169,7 +168,7 @@ impl App {
                     at,
                     Align2::CENTER_CENTER,
                     unread.min(99).to_string(),
-                    FontId::new(10.0, theme::mono_semibold()),
+                    FontId::new(crate::theme::fs(10.0), theme::mono_semibold()),
                     Color32::WHITE,
                 );
             }

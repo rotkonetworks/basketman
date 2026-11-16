@@ -397,7 +397,7 @@ impl App {
     fn standings_header(&self, ui: &mut Ui) {
         let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), egui::Sense::hover());
         let p = ui.painter();
-        let f = egui::FontId::new(10.0, egui::FontFamily::Monospace);
+        let f = egui::FontId::new(crate::theme::fs(10.0), egui::FontFamily::Monospace);
         for (x, a, t) in [
             (r.left() + 8.0, egui::Align2::LEFT_CENTER, "#"),
             (r.left() + 40.0, egui::Align2::LEFT_CENTER, "TEAM"),

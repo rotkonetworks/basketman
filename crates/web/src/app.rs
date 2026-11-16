@@ -17,6 +17,7 @@ pub(crate) const DIVISIONS: usize = 3;
 pub(crate) const GAP: f32 = 16.0;
 /// Storage key for the court view preference.
 const VIEW_KEY: &str = "basketman.view";
+const HUD_KEY: &str = "basketman.hud";
 
 #[derive(PartialEq, Clone, Copy)]
 pub(crate) enum Tab {
@@ -288,6 +289,10 @@ impl App {
                     app.saved_at = Some(app.save_mark());
                 }
                 persist::Loaded::Unreadable(why) => app.load_failed = Some(why),
+            }
+            if let Some(text) = storage.get_string(HUD_KEY) {
+                app.sh.hud.prefs = crate::matchview::HudPrefs::decode(&text);
+                app.sh.hud.drawer = app.sh.hud.prefs.tab.filter(|_| app.sh.hud.prefs.open);
             }
             // The court view the player last chose. Older saves hold only
             // "angled" or "flat".
@@ -842,6 +847,15 @@ impl App {
                     app.playback.time = live.game.time();
                     app.live = Some(live);
                 }
+                // `SHOT_HUD=full|minimal|clean` and `SHOT_PANEL_ALPHA=0.4`.
+                match std::env::var("SHOT_HUD").as_deref() {
+                    Ok("minimal") => app.sh.hud.prefs.level = 1,
+                    Ok("clean") => app.sh.hud.prefs.level = 2,
+                    _ => {}
+                }
+                if let Some(a) = std::env::var("SHOT_PANEL_ALPHA").ok().and_then(|a| a.parse::<f32>().ok()) {
+                    app.sh.hud.prefs.alpha = a.clamp(0.35, 1.0);
+                }
                 // `SHOT_DRAWER=scores|shots|flow|box|feed` opens that tab.
                 if let Ok(d) = std::env::var("SHOT_DRAWER") {
                     app.sh.hud.pick(&d);
@@ -1318,6 +1332,7 @@ impl eframe::App for App {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         if self.persist {
             storage.set_string(VIEW_KEY, self.look.mode.key().to_string());
+            storage.set_string(HUD_KEY, self.sh.hud.prefs.encode());
         }
         if self.may_save() {
             persist::write(storage, &self.world);

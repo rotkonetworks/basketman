@@ -199,6 +199,11 @@ fn bare() -> bool {
 }
 
 pub(crate) fn glass(ui: &Ui, rect: Rect, radius: u8, shadow: bool) {
+    glass_alpha(ui, rect, radius, shadow, 238.0 / 255.0);
+}
+
+/// Glass of a chosen solidity (0 to 1), for what floats over the court.
+pub(crate) fn glass_alpha(ui: &Ui, rect: Rect, radius: u8, shadow: bool, alpha: f32) {
     if bare() && radius > 0 && rect.height() > 120.0 {
         return;
     }
@@ -209,13 +214,13 @@ pub(crate) fn glass(ui: &Ui, rect: Rect, radius: u8, shadow: bool) {
                 offset: [0, 8],
                 blur: 28,
                 spread: 0,
-                color: ink(46),
+                color: ink((46.0 * alpha.min(1.0)) as u8),
             }
             .as_shape(rect, radius)
             .into(),
         );
     }
-    let sheet = Color32::from_rgba_unmultiplied(250, 248, 243, 238);
+    let sheet = Color32::from_rgba_unmultiplied(250, 248, 243, (alpha * 255.0) as u8);
     shapes.push(RectShape::filled(rect, radius, sheet).into());
     shapes.push(
         RectShape::stroke(
@@ -494,10 +499,8 @@ impl App {
             self.tab = Tab::Film;
         }
         if self.sh.last_tier != Some(tier) {
-            // Turning the phone: what was open stays open.
-            if let Some(was) = self.sh.last_tier {
-                self.sh.hud.carry(was, tier);
-            }
+            // Turning the phone changes only how things are laid out: what
+            // is open (message, player, tab, replay time) lives elsewhere.
             self.sh.last_tier = Some(tier);
         }
         theme::set_side(tier == Tier::Side);
@@ -523,6 +526,11 @@ impl App {
 
         self.shell_keys(ui.ctx());
 
+        // The match is the court and nothing else; its own controls float.
+        if self.tab == Tab::Match {
+            self.shell_match(ui, screen, tier);
+            return;
+        }
         // Where everything goes.
         let portrait_bar = narrow && screen.height() >= 560.0;
         let top_h = if portrait_bar { 88.0 } else { BAR_TOP };
@@ -585,7 +593,57 @@ impl App {
             Tier::Narrow | Tier::Side => self.bottom_bar(ui, bottom),
             _ => self.rail(ui, rail, tier),
         }
+        if tier == Tier::Narrow && screen.height() > screen.width() {
+            self.turn_hint(ui, bottom, bottom.top() - 58.0);
+        }
         self.take_link(ui.ctx());
+    }
+
+    /// Once, on the match and the tactics board of a phone held upright: the
+    /// game is better sideways. Dismissed for good with a tap.
+    pub(crate) fn turn_hint(&mut self, ui: &mut Ui, bottom: Rect, y: f32) {
+        let text = match self.tab {
+            Tab::Match => "Turn the phone sideways for the full court.",
+            Tab::Tactics => "Turn the phone sideways for a bigger board.",
+            _ => return,
+        };
+        let ctx = ui.ctx().clone();
+        let id = egui::Id::unique("turn_hint_seen");
+        let seen = ctx.data_mut(|d| d.get_persisted::<bool>(id)).unwrap_or(false);
+        let forced = self.harness() && std::env::var("SHOT_HINT").is_ok();
+        if (seen && !forced) || (self.harness() && !forced) {
+            return;
+        }
+        let w = (bottom.width() - 24.0).min(420.0);
+        let mut done = false;
+        egui::Area::new(egui::Id::unique("turn_hint"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(pos2(bottom.center().x - w / 2.0, y))
+            .show(&ctx, |ui| {
+                egui::Frame::NONE
+                    .fill(theme::TEXT)
+                    .corner_radius(12)
+                    .inner_margin(egui::Margin::symmetric(14, 6))
+                    .show(ui, |ui| {
+                        ui.set_width(w - 28.0);
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(text).color(theme::BG).size(13.5),
+                                )
+                                .wrap(),
+                            );
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if ui.button("OK").clicked() {
+                                    done = true;
+                                }
+                            });
+                        });
+                    });
+            });
+        if done {
+            ctx.data_mut(|d| d.insert_persisted(id, true));
+        }
     }
 
     /// 1 to 6 open the groups, Alt+Left goes back, F11 is full screen.
@@ -785,7 +843,7 @@ impl App {
             ui.add(
                 egui::Label::new(
                     RichText::new(&v.date)
-                        .font(FontId::new(10.5, egui::FontFamily::Monospace))
+                        .font(FontId::new(crate::theme::fs(10.5), egui::FontFamily::Monospace))
                         .color(theme::TEXT_MUTE),
                 )
                 .truncate(),
@@ -818,7 +876,7 @@ impl App {
                 ui.add(
                     egui::Label::new(
                         theme::mono(format!("{}  room {}", v.next, v.room))
-                            .size(11.0)
+                            .size(crate::theme::fs(11.0))
                             .color(theme::TEXT_DIM),
                     )
                     .truncate(),
@@ -915,7 +973,7 @@ impl App {
                     r.center() + vec2(0.0, 15.0),
                     Align2::CENTER_CENTER,
                     format!("{}", n + 1),
-                    FontId::new(10.5, egui::FontFamily::Monospace),
+                    FontId::new(crate::theme::fs(10.5), egui::FontFamily::Monospace),
                     theme::TEXT_MUTE,
                 );
             }
@@ -926,7 +984,7 @@ impl App {
                     at,
                     Align2::CENTER_CENTER,
                     unread.min(99).to_string(),
-                    FontId::new(9.5, theme::mono_semibold()),
+                    FontId::new(crate::theme::fs(9.5), theme::mono_semibold()),
                     Color32::WHITE,
                 );
             }
@@ -975,7 +1033,7 @@ impl App {
                 r.center() + vec2(0.0, 12.0),
                 Align2::CENTER_CENTER,
                 format!("{}", n + 1),
-                FontId::new(9.5, egui::FontFamily::Monospace),
+                FontId::new(crate::theme::fs(9.5), egui::FontFamily::Monospace),
                 theme::TEXT_MUTE,
             );
             if *g == Group::Home && unread > 0 {
@@ -985,7 +1043,7 @@ impl App {
                     at,
                     Align2::CENTER_CENTER,
                     unread.min(99).to_string(),
-                    FontId::new(9.0, theme::mono_semibold()),
+                    FontId::new(crate::theme::fs(9.0), theme::mono_semibold()),
                     Color32::WHITE,
                 );
             }

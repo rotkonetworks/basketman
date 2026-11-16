@@ -22,7 +22,7 @@ use crate::view3d::{self, Cam3, FigureSpec, Preset, Scene, Vec3, v3};
 mod feeds;
 mod hud;
 pub(crate) use feeds::Ctx as FeedCtx;
-pub(crate) use hud::Hud;
+pub(crate) use hud::{Hud, HudPrefs};
 
 const LENGTH: f32 = 28.0;
 const WIDTH: f32 = 15.0;
@@ -176,15 +176,28 @@ thread_local! {
     static FILL: std::cell::Cell<Option<f32>> = const { std::cell::Cell::new(None) };
 }
 
-thread_local! {
-    /// Whether the 3D court draws its own camera buttons and hint.
-    static CAM_BUTTONS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+/// What the 3D court draws over the picture. The match screen sets this
+/// from what the user chose; everywhere else all of it is on.
+#[derive(Copy, Clone)]
+pub(crate) struct Overlays {
+    pub names: bool,
+    pub swish: bool,
+    pub hint: bool,
+    pub cams: bool,
 }
 
-/// The match screen of a phone on its side puts the camera button in its
-/// own controls and leaves the picture clear.
-fn set_cam_buttons(on: bool) {
-    CAM_BUTTONS.with(|f| f.set(on));
+thread_local! {
+    static OVERLAYS: std::cell::Cell<Overlays> = const {
+        std::cell::Cell::new(Overlays { names: true, swish: true, hint: true, cams: true })
+    };
+}
+
+fn set_overlays(o: Overlays) {
+    OVERLAYS.with(|f| f.set(o));
+}
+
+fn overlays() -> Overlays {
+    OVERLAYS.with(std::cell::Cell::get)
 }
 
 /// Draw the 3D court this high until told otherwise (`None`).
@@ -914,7 +927,7 @@ fn paint_3d(
         let _p = crate::perf::scope("3d: project+sort");
         painter.add(Shape::mesh(scene.mesh(&cam, rect)));
     }
-    if let Some((end, age, points)) = swish {
+    if let Some((end, age, points)) = swish.filter(|_| overlays().swish) {
         paint_points(&painter, &cam, rect, end, age, points);
     }
 
@@ -932,7 +945,7 @@ fn paint_3d(
         };
         let scale = cam.scale(depth, rect);
         let size = (scale * 0.32).min(15.0);
-        if size >= 7.0 && rect.contains(head) {
+        if size >= 7.0 && rect.contains(head) && overlays().names {
             let text = initials(&p.name);
             let font = FontId::new(size, theme::mono_semibold());
             painter.text(
@@ -980,9 +993,7 @@ fn paint_3d(
     }
 
     // Camera buttons over the picture.
-    if !CAM_BUTTONS.with(std::cell::Cell::get) {
-        return;
-    }
+    let ov = overlays();
     let bar = Rect::from_min_size(rect.min + vec2(8.0, 8.0), vec2(rect.width() - 16.0, 26.0));
     let mut row = ui.new_child(
         egui::UiBuilder::new()
@@ -990,7 +1001,7 @@ fn paint_3d(
             .layout(egui::Layout::left_to_right(egui::Align::Min)),
     );
     row.set_clip_rect(rect);
-    for preset in Preset::ALL {
+    for preset in Preset::ALL.into_iter().filter(|_| ov.cams) {
         let on = cam3.preset == preset;
         let mut button = egui::Button::selectable(on, preset.label());
         if !on {
@@ -1006,13 +1017,15 @@ fn paint_3d(
     } else {
         "Scroll to zoom"
     };
-    painter.text(
+    if ov.hint {
+        painter.text(
         rect.left_bottom() + vec2(10.0, -8.0),
         Align2::LEFT_BOTTOM,
         hint,
-        FontId::new(11.0, theme::semibold()),
+        FontId::new(crate::theme::fs(11.0), theme::semibold()),
         Color32::from_white_alpha(150),
-    );
+        );
+    }
 }
 
 impl App {

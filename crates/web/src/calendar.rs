@@ -140,7 +140,7 @@ impl App {
                 pos2(head.left() + cell_w * (i as f32 + 0.5), head.center().y),
                 Align2::CENTER_CENTER,
                 d,
-                FontId::new(10.0, FontFamily::Monospace),
+                FontId::new(crate::theme::fs(10.0), FontFamily::Monospace),
                 theme::TEXT_MUTE,
             );
         }
@@ -185,7 +185,7 @@ impl App {
                     rect.left_top() + vec2(4.0, 3.0),
                     Align2::LEFT_TOP,
                     n.to_string(),
-                    FontId::new(10.5, FontFamily::Monospace),
+                    FontId::new(crate::theme::fs(10.5), FontFamily::Monospace),
                     if day >= 0 && day < today as i64 {
                         theme::TEXT_MUTE
                     } else {
@@ -231,7 +231,7 @@ impl App {
                             pos2(rect.left() + 4.0, y),
                             Align2::LEFT_TOP,
                             label,
-                            FontId::new(9.5, FontFamily::Proportional),
+                            FontId::new(crate::theme::fs(9.5), FontFamily::Proportional),
                             kind_color(e.kind),
                         );
                         y += 12.0;
@@ -247,7 +247,7 @@ impl App {
             RichText::new(
                 "Purple: our league game. Orange: playoff. Grey: friendly. R: reserves. F: friendly. H home, A away.",
             )
-            .size(11.0)
+            .size(crate::theme::fs(11.0))
             .color(theme::TEXT_MUTE),
         );
         ui.add_space(8.0);
@@ -346,7 +346,7 @@ impl App {
             }
             link(ui, Link::Club(a), name(a));
             if e.score.is_none() {
-                ui.label(RichText::new("not played").size(11.0).color(theme::TEXT_MUTE));
+                ui.label(RichText::new("not played").size(crate::theme::fs(11.0)).color(theme::TEXT_MUTE));
             }
         });
     }

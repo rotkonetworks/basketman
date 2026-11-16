@@ -235,7 +235,7 @@ impl App {
                             } else {
                                 self.world.day_label(m.day)
                             },
-                            FontId::new(11.5, egui::FontFamily::Monospace),
+                            FontId::new(crate::theme::fs(11.5), egui::FontFamily::Monospace),
                             if waiting {
                                 theme::WARN
                             } else {

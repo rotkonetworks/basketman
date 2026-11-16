@@ -22,7 +22,7 @@ pub(crate) fn mark(ui: &mut Ui, sigs: &[Signature]) {
     } else {
         format!("Sig {}", sigs.len())
     };
-    ui.label(RichText::new(text).size(10.5).strong().color(theme::ACCENT))
+    ui.label(RichText::new(text).size(crate::theme::fs(10.5)).strong().color(theme::ACCENT))
         .on_hover_text(format!("Signature: {}", names.join(", ")));
 }
 
