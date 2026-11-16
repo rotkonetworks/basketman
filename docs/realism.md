@@ -533,3 +533,48 @@ overtime rate (2.2%, 4% real), and the home foul margin.
 step (-5, -2, -2), except that fouls fall by two a game per step where the real EuroCup commits more fouls
 (22.4 against 20.4 in the EuroLeague), a sign that the lower-division foul and free-throw numbers are going the wrong way.
 
+
+
+## Finishing at the rim (the `stance` branch)
+
+The first reading above found open layups nearly automatic and everything just outside them too hard. A finish's
+launch error used to be an angle, so it vanished with the distance flown (a ball released half a metre from the rim
+cannot be thrown wide). The model in `engine/floor/finish.rs` and `engine/shot.rs`:
+
+* `Errors::at_ring`: a layup, floater or dunk has its error in metres **at the ring**, whatever the distance.
+* The hand he finishes with (`finish_hand`: the dominant hand from his own side, the far hand when his man is on
+  the near side and he has the touch). A hand that is not his own, across the body, or toward the man who is
+  contesting costs error; finishing and footwork take part of every cost off.
+* How he arrives (`finish_arrival`): the speed he came in at (`Stance::peak`, his fastest of the last second), the
+  angle across the board, finishing from behind the rim; one multiplier, replacing the old break-only sprint term.
+  The stance multiplier and the officials' disturbed shot (`FOULED_ERR`) are the other two factors, each applied
+  once, in `shot_errors`.
+* Dunks (`dunk_trouble`): a bump, a man who has lost his legs (balance) and a jump too far from the rim turn a dunk
+  into a miss or a foul.
+* The floater (`Style::Floater`, `takes_floater`): taken by a driver past a protected rim in place of the layup,
+  with its own, high-arc error model, a lower release and less sensitivity to the arm in front of it. Post players
+  turn into a short hook from 1.1 m, not a layup.
+* Help (`rim_rotation`): on a drive, on a gather and on a break the best-placed other defender who can get to the
+  rim in time steps into the lane; the contest, the block hands and `verticality` do the rest.
+* Shooting fouls were 20% to 40% too rare: `foul_chance` is raised by the same factor on every kind of shot,
+  and a defender moving into the shooter counts for less (`VERT_MOVING`).
+
+`basketman realism --games 1500 --seasons 0`, before and after (same worlds, same seeds):
+
+| metric | before | after | real target (band) |
+|---|---|---|---|
+| FG% within 3 ft | 81.7 | 69.6 | 69.7 (65 to 74) |
+| FG% 3 to 10 ft | 27.1 | 41.9 | 45.5 (41.5 to 49.5) |
+| share of FGA 0 to 3 ft / 3 to 10 ft | 17.6 / 26.7 | 14.4 / 29.3 | 23 / 21 |
+| FT rate (FTA/FGA) | 22.6 | 30.0 | 30 (26 to 34) |
+| FG% / 2P% | 42.1 / 47.4 | 43.0 / 49.1 | 47.3 / 55.0 |
+| points per 100 possessions | 97.9 | 101.4 | 113 (109 to 117) |
+| transition, points per possession with a shot | 1.56 | 1.49 | 1.19 (1.08 to 1.30) |
+| three-point % | 35.3 | 35.0 | 35.6 |
+
+Not reached: the league is still 4 points of FG% and 11 of offensive rating under the real one (the rest is in
+items 1, 3 and 8 above, not at the rim); fewer shots are taken within 3 ft (14%, real 23%) because drivers now float it
+from further out; a transition possession with a shot is worth 1.49 (the instrument counts only possessions with a
+shot or a fast-break event, so 1.19, Synergy's figure for every transition possession, is not the same quantity: per
+chance, including turnovers and misses without a shot, `lab transition` gives 1.10); layups from 1.3 to 2.2 m that were
+not floated are still made only 20% of the time (a swarmed rim).

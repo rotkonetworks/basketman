@@ -22,18 +22,18 @@ use super::*;
 /// What each m/s of speed above `FIN_SPEED_FROM` at the release adds to a
 /// finish's error (shrunk by finishing and footwork). Replaces the older
 /// break-only sprint term: a driver at full speed has the same problem.
-const FIN_SPEED: f32 = 0.18;
-const FIN_SPEED_FROM: f32 = 2.2;
+const FIN_SPEED: f32 = 0.30;
+const FIN_SPEED_FROM: f32 = 3.2;
 /// Coming across the face of the board, per m/s across the line to the rim.
-const FIN_ACROSS: f32 = 0.16;
+const FIN_ACROSS: f32 = 0.14;
 /// Finishing from behind the plane of the rim, at its largest.
-const FIN_BASELINE: f32 = 0.32;
+const FIN_BASELINE: f32 = 0.27;
 /// Going up with the hand he does not write with, with the hand that is
 /// across his body from the side he came, and with the hand toward a man
 /// who is at him.
-const FIN_OFFHAND: f32 = 0.36;
-const FIN_REVERSE: f32 = 0.16;
-const FIN_TOWARD: f32 = 0.27;
+const FIN_OFFHAND: f32 = 0.30;
+const FIN_REVERSE: f32 = 0.13;
+const FIN_TOWARD: f32 = 0.23;
 /// A dunk that is not clean: a bump, losing the legs, a jump that took him
 /// further from the rim than the dunk wants. All in multiples of the dunk's
 /// very small base error.
@@ -259,8 +259,8 @@ const RIM_HELP_RANGE: f32 = 6.0;
 const RIM_HELP_SLACK: f32 = 0.35;
 
 /// Distances from the rim, in metres, between which a floater is taken.
-const FLOATER_MIN: f32 = 1.3;
+const FLOATER_MIN: f32 = 1.6;
 const FLOATER_MAX: f32 = 3.2;
 /// The contest at which an average man gives up the layup for it.
-const FLOATER_AT: f32 = 0.55;
+const FLOATER_AT: f32 = 0.75;
 

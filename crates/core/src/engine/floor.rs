@@ -40,7 +40,7 @@ const GAME: f32 = 1.14;
 /// the base error shape does not carry.
 const MID_SCALE: f32 = 0.85;
 const THREE_SCALE: f32 = 0.93;
-const RIM_SCALE: f32 = 0.75;
+const RIM_SCALE: f32 = 0.68;
 /// What each point of rating above 10 takes off the error of a jump shot,
 /// of a finish at the rim, and of a free throw.
 const SKILL_SLOPE: f32 = 0.035;
@@ -52,7 +52,7 @@ const FT_SLOPE: f32 = 0.045;
 /// skill above 10 adds to that.
 const CONTEST_THREE: f32 = 0.45;
 const CONTEST_MID: f32 = 0.35;
-const CONTEST_RIM: f32 = 1.1;
+const CONTEST_RIM: f32 = 1.0;
 const DUNK_CONTEST: f32 = 1.5;
 const GUARD_SLOPE: f32 = 0.04;
 /// A dunk from the very top of his reach is shaky: what each metre short
@@ -219,7 +219,7 @@ const SET_FOR: f32 = 0.25;
 /// What a shooter's foul chance is multiplied by when the defender is
 /// standing and when he is moving into him (per m/s beyond 0.8).
 const VERT_SET: f32 = 0.95;
-const VERT_MOVING: f32 = 0.35;
+const VERT_MOVING: f32 = 0.2;
 /// Energy a defender spends taking a charge, per m/s of impact.
 const CHARGE_COST: f32 = 0.01;
 /// A defender who is not set and sells the contact anyway: the chance for a
@@ -5738,7 +5738,7 @@ impl Game {
         if closing < 0.8 {
             VERT_SET
         } else {
-            (1.0 + VERT_MOVING * (closing - 0.8)).min(1.8)
+            (1.0 + VERT_MOVING * (closing - 0.8)).min(1.5)
         }
     }
 
