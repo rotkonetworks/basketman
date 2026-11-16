@@ -1884,9 +1884,7 @@ mod tests {
                 assert!(!w.teams[0].assistant_notes.is_empty());
             }
         }
-        // (Six games are a small sample, and the assistant has four sessions to
-        // hand out among everything that stands out: two thirds of forty worlds.)
-        assert!(told * 3 >= worlds * 2, "told in {told} of {worlds} worlds");
+        assert!(told * 4 >= worlds * 3, "told in {told} of {worlds} worlds");
     }
 
     #[test]

@@ -131,8 +131,8 @@ fn fame_does_not_follow_current_ability() {
 
     // And the rest of the league: after real seasons, a player who is not
     // better than a good starter is not a name, unless he is an old star.
-    // (Several worlds, since which player lands just over a line moves with
-    // the random stream: what must hold is that it is rare and never large.)
+    // (Several worlds: which player lands near a line moves with the random
+    // stream, but not one of them may be a name.)
     let (mut below, mut named) = (0, 0);
     for seed in [6, 7, 8] {
         let mut w = World::generate(seed, 8);
@@ -152,7 +152,7 @@ fn fame_does_not_follow_current_ability() {
                     below += 1;
                     named += (pl.renown.fame >= 20.0) as u32;
                     assert!(
-                        pl.renown.fame < 30.0,
+                        pl.renown.fame < 20.0,
                         "{} ({:.1} overall, {}) has fame {:.0}",
                         pl.name,
                         pl.overall(),
@@ -163,7 +163,7 @@ fn fame_does_not_follow_current_ability() {
             }
         }
     }
-    assert!(named * 40 <= below, "{named} of {below} below-median players are names");
+    assert_eq!(named, 0, "{named} of {below} below-median players are names");
     let mut w = World::generate(6, 8);
     run(&mut w, 4);
     let mut ov: Vec<f32> = w
@@ -248,10 +248,9 @@ fn media_work_raises_fame_and_fans_and_costs_training() {
         fame(&worked),
         fame(&base)
     );
-    // Fans follow results as well as names, and eight games are a small
-    // sample: across several worlds the worked club's fan base is ahead
-    // more often than not (and never by losing ground to the other).
-    let mut ahead = (worked.fan_base(0) > base.fan_base(0)) as u32;
+    assert!(worked.fan_base(0) > base.fan_base(0));
+    // And in other worlds too: eight games are a small sample, so most of them.
+    let mut ahead = 1;
     for seed in [13, 14, 15, 16] {
         let mut b = blank(seed);
         b.take_charge(0);
@@ -266,7 +265,7 @@ fn media_work_raises_fame_and_fans_and_costs_training() {
         rounds(&mut w, 8);
         ahead += (w.fan_base(0) > b.fan_base(0)) as u32;
     }
-    assert!(ahead >= 3, "the worked club's fans are ahead in {ahead} of 5 worlds");
+    assert!(ahead >= 4, "the worked club's fans are ahead in {ahead} of 5 worlds");
     let (a, b) = (&worked.players[who as usize], &base.players[who as usize]);
     assert!(
         a.overall() < b.overall(),
