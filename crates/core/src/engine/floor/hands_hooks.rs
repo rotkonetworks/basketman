@@ -44,11 +44,16 @@ impl Game {
     /// quicker at a run. How far out it goes is what handling decides: a
     /// good handler keeps it close and low, and the weak hand sends it out.
     pub(super) fn bounce(&self, t: usize, k: usize) -> Bounce {
+        self.bounce_at(t, k, self.anim)
+    }
+
+    /// The same, `anim` seconds into the game (for the fine steps of a tick).
+    pub(super) fn bounce_at(&self, t: usize, k: usize, anim: f32) -> Bounce {
         let me = self.m[t][k].pos;
         let st = &self.st[t][k];
         let speed = me.dist(me + self.m[t][k].vel).min(7.0);
         let period = (BOUNCE_BASE - BOUNCE_RUN * speed).max(0.38);
-        let u = (self.anim / period).fract();
+        let u = (anim / period).fract();
         let (arm, sz, _) = self.arm_of(t, k);
         let top = (sz - 0.30).clamp(0.8, 1.2) + 0.0 * arm;
         let r = BALL_RADIUS;
@@ -210,12 +215,13 @@ impl Game {
                         let to_b = (ball - me).norm();
                         let i = if hands::right_of(body).dot(ball - me) >= 0.0 { RIGHT } else { LEFT };
                         let exposed = self.handler.state == Dribble::Live && self.bounce(o, holder.unwrap_or(0)).exposed;
-                        let g = if exposed {
-                            v3(ball.x, ball.y, ball_z.min(sh[i].z))
+                        let g = if let Some(e) = self.poke.tries[k].filter(|_| exposed) {
+                            // Going for the ball, with the aim his hands have.
+                            v3(ball.x + e.x, ball.y + e.y, (ball_z + e.z).clamp(0.2, sh[i].z))
                         } else {
                             hands::guard_goal(sh[i], to_b, i, arm)
                         };
-                        goal[i] = (g, if exposed { HandKind::Reach } else { HandKind::Guard });
+                        goal[i] = (g, if exposed && self.poke.tries[k].is_some() { HandKind::Reach } else { HandKind::Guard });
                         let j = 1 - i;
                         goal[j] = (hands::guard_goal(sh[j], to_b, j, arm), HandKind::Guard);
                     } else if let Some(h) = holder.filter(|&h| h != man && man < 5) {

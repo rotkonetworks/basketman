@@ -25,6 +25,7 @@ pub fn run(games: usize) {
     let mut kinds = [0u32; 7];
     let mut passes = 0u32;
     let mut outcomes = [0u32; 6];
+    let mut by_kind = [[0u32; 6]; 7];
     let mut tov = [0u32; 6];
     let mut stolen = 0u32;
     let mut hands = [0u32; 10];
@@ -65,6 +66,7 @@ pub fn run(games: usize) {
             passes += 1;
             kinds[p.kind as usize] += 1;
             outcomes[p.outcome as usize] += 1;
+            by_kind[p.kind as usize][p.outcome as usize] += 1;
         }
         for e in &rec.events {
             match &e.kind {
@@ -136,6 +138,12 @@ pub fn run(games: usize) {
         print!(" {n} {:.1}%", kinds[i] as f32 / passes.max(1) as f32 * 100.0);
     }
     println!();
+    for (i, n) in names.iter().enumerate() {
+        let t: u32 = by_kind[i].iter().sum();
+        if t > 0 {
+            println!("  {n:<9} n {t:>6}: caught {:.1} bobbled {:.1} tipped {:.1} stolen {:.1} out {:.1} missed {:.1}", by_kind[i][0] as f32 * 100.0 / t as f32, by_kind[i][1] as f32 * 100.0 / t as f32, by_kind[i][2] as f32 * 100.0 / t as f32, by_kind[i][3] as f32 * 100.0 / t as f32, by_kind[i][4] as f32 * 100.0 / t as f32, by_kind[i][5] as f32 * 100.0 / t as f32);
+        }
+    }
     let tt: u32 = tov.iter().sum();
     println!(
         "turnovers/100 {:.1} (bad pass {:.1}, stripped {:.1}, off foul {:.1}, clock {:.1}, pressed {:.1}, 3s {:.1}); steals/100 {:.1}",

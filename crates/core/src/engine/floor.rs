@@ -30,7 +30,9 @@ use crate::tactics::{Brief, DefenseScheme, OffenseSet, Press};
 
 mod finish;
 mod hands_hooks;
+mod dribbling;
 mod passing;
+use dribbling::Poke;
 use passing::{Scramble, Throw, Thrown};
 mod stance_hooks;
 
@@ -861,6 +863,8 @@ pub(super) struct Game {
     /// Both hands of each player (attack frame), and as they were a tick ago.
     hands: [[Hands; 5]; 2],
     hands_prev: [[Hands; 5]; 2],
+    /// Who goes for the dribbled ball this bounce.
+    poke: Poke,
 }
 
 impl Game {
@@ -940,6 +944,7 @@ impl Game {
             ofc: None,
             hands: [[Hands::NONE; 5]; 2],
             hands_prev: [[Hands::NONE; 5]; 2],
+            poke: Poke::NONE,
             m,
             frame: 0,
             play: Play::idle(),
@@ -1654,7 +1659,7 @@ impl Game {
         let end = if self.play.dead > 0.0 {
             None
         } else {
-            self.step_phase()
+            self.step_phase().or_else(|| self.dribble_tick())
         };
         self.record();
         if end.is_some() {
@@ -2364,9 +2369,16 @@ impl Game {
             // A man holding the ball up at the height of the glass cannot
             // take it through: his body stops against it.
             let m = &self.m[o][h];
-            self.play.ball = m.pos + m.vel * 0.08;
-            // The hands come down after a catch.
-            self.play.ball_h = (self.play.ball_h - 4.0 * DT).max(1.0);
+            if self.handler.who == Some((o, h)) && self.handler.state == crate::replay::Dribble::Live {
+                // The dribbled ball is out of his hand and back on a rhythm.
+                let b = self.bounce(o, h);
+                self.play.ball = b.at;
+                self.play.ball_h = b.z;
+            } else {
+                self.play.ball = m.pos + m.vel * 0.08;
+                // The hands come down after a catch.
+                self.play.ball_h = (self.play.ball_h - 4.0 * DT).max(1.0);
+            }
         } else if let Some((path, t)) = self.loose.as_mut() {
             *t += DT;
             let (p, z) = path.at(*t);
@@ -3274,6 +3286,13 @@ impl Game {
             self.play.task[k] = Task::Cut(to);
         }
 
+        // Overplayed on the ball side: backdoor, and the ball goes to him.
+        if let Some(j) = self.read_denial(h) {
+            let vision = 0.4 + (self.oe(h, Attr::Passing) + self.oe(h, Attr::Iq)) / 40.0 * 0.6;
+            if self.rng.chance(vision) && self.pass_risk(h, j) < 0.2 {
+                return self.pass(h, j, false);
+            }
+        }
         // He has been in the lane too long to wait: he goes up with it.
         if self.play.lane[h] > LANE_WARN {
             return self.gather(0.3, self.play.dribbled);
@@ -3443,6 +3462,63 @@ impl Game {
 
     // ---- passing ---------------------------------------------------------
 
+    /// The off-ball reads: a man whose defender is overplaying him on the ball
+    /// side goes backdoor to the basket. Returns the cutter, if one went.
+    fn read_denial(&mut self, h: usize) -> Option<usize> {
+        let ball = self.op(h);
+        let mut gone = None;
+        for j in 0..5 {
+            if j == h || !matches!(self.play.task[j], Task::Spot) || self.play.lane[j] > 0.5 {
+                continue;
+            }
+            let pj = self.op(j);
+            if pj.dist(HOOP) < 3.2 || pj.dist(HOOP) > 9.8 || pj.dist(ball) < 2.5 {
+                continue;
+            }
+            let dk = self.defender_of(j);
+            let q = self.dp(dk);
+            let toward = (ball - pj).norm();
+            let off = (q - pj).dot(toward);
+            let denied = off > 0.45 && q.dist(pj) < 1.7;
+            if denied && self.rng.chance((0.10 + 0.022 * self.oe(j, Attr::Iq)).clamp(0.05, 0.6)) {
+                let side = if pj.x >= 0.0 { 0.75 } else { -0.75 };
+                self.play.task[j] = Task::Cut(HOOP + v(side, 0.9));
+                self.play.stun[dk] = self.play.stun[dk].max(0.0);
+                gone = gone.or(Some(j));
+            }
+        }
+        gone
+    }
+
+    /// A drive pulls the defense in: the men without the ball move to where
+    /// a kick-out finds them, the corner for the man low on the side he is
+    /// going to, the wing for the one above.
+    fn relocate_for_drive(&mut self, h: usize) {
+        let p = self.op(h);
+        for k in 0..5 {
+            if k == h || !matches!(self.play.task[k], Task::Spot) {
+                continue;
+            }
+            let q = self.play.spots[k];
+            if q.dist(HOOP) < 4.5 || q.dist(p) > 7.5 {
+                continue;
+            }
+            let side = if q.x >= 0.0 { 1.0 } else { -1.0 };
+            let to = if q.y < 5.2 {
+                // Baseline: the corner.
+                v(side * 6.95, 1.0)
+            } else {
+                // Above the break: slide to the three-point line on his side
+                // of the drive.
+                let toward = if p.x * q.x >= 0.0 { 0.0 } else { 0.0 };
+                v(side * 6.1 + toward, q.y.clamp(4.2, 8.0))
+            };
+            if self.rng.chance(0.55 + 0.02 * self.oe(k, Attr::Iq)) {
+                self.play.spots[k] = to;
+            }
+        }
+    }
+
     /// Swing the ball to a neighbour, then cut through and trade places with
     /// the far side, the way a motion offense keeps the floor moving.
     fn swing(&mut self, h: usize) -> Option<End> {
@@ -3556,6 +3632,7 @@ impl Game {
     // ---- off the dribble -------------------------------------------------
 
     fn drive(&mut self, h: usize, bonus: f32) -> Option<End> {
+        self.relocate_for_drive(h);
         self.play.shoulder = None;
         self.play.hit = None;
         self.play.hunt = None;
@@ -3585,10 +3662,8 @@ impl Game {
             * self.off().draw_mult(self.off().on[h])
             / CALL_BASE;
         let guarded = q.dist(p) < 2.6;
+        let _ = strip;
         if guarded {
-            if r < strip {
-                return self.turnover(h, TurnoverKind::Stripped, Some(dk), 0.7);
-            }
             let o = self.play.o;
             if self.call(r < strip + foul, 1.0, FoulKind::ReachIn, (1 - o, dk), (o, h)) {
                 return self.floor_foul(dk, h, FoulKind::ReachIn);
@@ -3768,10 +3843,7 @@ impl Game {
         let loose = (0.014 + 0.03 * (crowd - 1.0).max(0.0))
             * (1.6 - self.oe(h, Attr::Handling) / 20.0 * 1.2)
             * (1.0 + 0.5 * self.def().aggression());
-        if self.rng.chance(loose) {
-            let (dk, _) = self.nearest_defender(p);
-            return self.turnover(h, TurnoverKind::Stripped, Some(dk), 0.7);
-        }
+        let _ = loose;
 
         let (kind, c, near) = self.look_seen(h);
         let value = self.ev(h, kind, c, near, true);
@@ -4821,7 +4893,7 @@ impl Game {
                 };
                 self.play.from = Some(from);
                 self.play.think =
-                    0.3 + self.rng.f32() * 0.25 + self.off().unfamiliar * self.rng.f32() * 0.5;
+                    0.12 + self.rng.f32() * 0.2 + self.off().unfamiliar * self.rng.f32() * 0.5;
                 if matches!(self.play.phase, Phase::Advance) && self.op(to).y < 10.6 {
                     self.play.phase = Phase::Set;
                 }

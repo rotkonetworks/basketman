@@ -11,8 +11,8 @@ use crate::replay::{Dribble, HandKind, PassKind, PassOutcome, TurnoverKind};
 
 /// Metres of aim error at no distance, and per metre thrown, for a chest
 /// pass by a passer of rating 10.
-const AIM_BASE: f32 = 0.04;
-const AIM_PER_M: f32 = 0.009;
+const AIM_BASE: f32 = 0.03;
+const AIM_PER_M: f32 = 0.007;
 /// Seconds before a defender sees the ball go, before his anticipation.
 const SEE_BASE: f32 = 0.16;
 const SEE_SKILL: f32 = 0.008;
@@ -48,8 +48,8 @@ pub(super) fn spec(kind: PassKind) -> Spec {
     match kind {
         PassKind::Chest => Spec { speed: 11.5, err: 1.0, wind: 0.16, z: 1.30 },
         PassKind::Bounce => Spec { speed: 10.0, err: 1.15, wind: 0.20, z: 0.95 },
-        PassKind::Overhead => Spec { speed: 12.5, err: 1.15, wind: 0.28, z: 1.95 },
-        PassKind::Lob => Spec { speed: 7.5, err: 1.35, wind: 0.30, z: 2.35 },
+        PassKind::Overhead => Spec { speed: 12.5, err: 1.08, wind: 0.28, z: 1.95 },
+        PassKind::Lob => Spec { speed: 7.5, err: 1.2, wind: 0.30, z: 2.35 },
         PassKind::Push => Spec { speed: 11.0, err: 1.35, wind: 0.10, z: 1.35 },
         PassKind::Handoff => Spec { speed: 4.0, err: 0.4, wind: 0.12, z: 1.20 },
         PassKind::Outlet => Spec { speed: 17.0, err: 1.4, wind: 0.24, z: 1.50 },
@@ -103,6 +103,8 @@ pub(super) struct Scramble {
     /// The defender (court index) whose hand tipped it, if one did.
     pub tipped_by: Option<usize>,
     pub kind: PassKind,
+    /// What the turnover is called if the other team ends up with it.
+    pub cause: TurnoverKind,
 }
 
 use crate::engine::ball::V3;
@@ -157,11 +159,26 @@ impl Game {
         let skill = self.pass_skill(h);
         let lead = (0.55 + 0.45 * skill).min(1.0);
         let mut at = m.pos;
+        // Where he is going: his velocity, or the way he has been sent when
+        // he has only just started.
+        let vel = match self.play.task[j] {
+            Task::Cut(to) if m.pos.dist(to) > 0.8 => {
+                let go = (to - m.pos).norm() * (self.cache.top[o * 5 + j] * 0.85);
+                if go.dot(go) > m.vel.dot(m.vel) { go } else { m.vel }
+            }
+            _ => m.vel,
+        };
         // Lead him by the time it takes, twice round (the time depends on
         // where he will be).
         for _ in 0..2 {
             let t = (from.dist(at) / speed).max(0.1) + 0.1;
-            at = m.pos + m.vel * (t * lead);
+            at = m.pos + vel * (t * lead);
+            if let Task::Cut(to) = self.play.task[j] {
+                // No further than where he is going.
+                if m.pos.dist(at) > m.pos.dist(to) {
+                    at = to;
+                }
+            }
         }
         v(at.x.clamp(-7.2, 7.2), at.y.clamp(0.3, LENGTH - 0.3))
     }
@@ -347,14 +364,14 @@ impl Game {
             consider(PassKind::Outlet, self, -0.01);
         }
         if passing >= 6.0 {
-            consider(PassKind::Bounce, self, 0.012);
+            consider(PassKind::Bounce, self, 0.02);
         }
         if passing >= 8.0 && d < 13.0 {
-            consider(PassKind::Overhead, self, 0.022);
+            consider(PassKind::Overhead, self, 0.04);
         }
         let pj = self.m[o][j].pos;
         if passing >= 9.0 && (pj.dist(HOOP) < 4.0 || d > 7.0) {
-            consider(PassKind::Lob, self, 0.01);
+            consider(PassKind::Lob, self, 0.035);
         }
         if live && passing >= 5.0 && d < 9.0 {
             consider(PassKind::Push, self, 0.0);
@@ -378,7 +395,7 @@ impl Game {
         let slot = self.off().on[h];
         let speed = hands::hand_speed(self.sides[o].eff(slot, Attr::Handling), self.sides[o].eff(slot, Attr::Passing));
         let _ = sh;
-        let at = self.play.t + wind.max(travel / speed) * 0.7 + 0.04;
+        let at = self.play.t + wind.max(travel / speed) * 0.5 + 0.02;
         let (wall, at_court) = (self.wall, crate::replay::to_court(rel.xy(), self.frame));
         if let Some(rec) = &mut self.rec {
             rec.passes.push(crate::replay::PassRec {
@@ -491,7 +508,7 @@ impl Game {
         let ex = shot::gauss(&mut self.rng) * sigma;
         let ey = shot::gauss(&mut self.rng) * sigma;
         let ez = shot::gauss(&mut self.rng) * sigma * 0.5;
-        let aim_err = v(aim.x + ex, aim.y + ey);
+        let aim_err = v((aim.x + ex).clamp(-7.35, 7.35), (aim.y + ey).clamp(0.2, LENGTH - 0.2));
         let plan = self.plan_pass(kind, rel, aim_err, (sp.z + ez).clamp(0.5, 2.9));
         // The defenders see it go: who goes for it, and where.
         let mut attempt = [None; 5];
@@ -570,13 +587,14 @@ impl Game {
             }
             // The receiver's.
             if ts >= (f.dur - 0.28).max(0.04) {
+                let kind = th.kind;
                 let mut best: Option<f32> = None;
                 for i in 0..2 {
                     let h0 = self.hands_prev[o][to].h[i].p;
                     let h1 = self.hands[o][to].h[i].p;
                     let hp = v3(h0.x + (h1.x - h0.x) * u, h0.y + (h1.y - h0.y) * u, h0.z + (h1.z - h0.z) * u);
                     let gap = V3 { x: hp.x - ball.x, y: hp.y - ball.y, z: hp.z - ball.z }.len();
-                    if gap <= CATCH && best.is_none_or(|g| gap < g) {
+                    if gap <= CATCH * if kind == PassKind::Handoff { 1.7 } else { 1.0 } && best.is_none_or(|g| gap < g) {
                         best = Some(gap);
                     }
                 }
@@ -669,7 +687,7 @@ impl Game {
         self.play.flight = None;
         self.play.thrown = None;
         self.play.def_touch = true;
-        self.play.scramble = Some(Scramble { passer: from, to, tipped_by: Some(dk), kind: th.kind });
+        self.play.scramble = Some(Scramble { passer: from, to, tipped_by: Some(dk), kind: th.kind, cause: TurnoverKind::BadPass });
         // A reach that missed the ball costs him his footing a little.
         self.st[1 - self.play.o][dk].balance = (self.st[1 - self.play.o][dk].balance - 0.05).max(0.2);
         self.play.ball = bp;
@@ -699,7 +717,7 @@ impl Game {
         let back = (self.m[o][from].pos - me).norm();
         let looking = (self.st[o][to].gaze.dot(back) * 0.5 + 0.5).clamp(0.0, 1.0);
         let run = self.m[o][to].vel.len();
-        let base = 0.992 + 0.001 * hands_skill;
+        let base = 0.995 + 0.0008 * hands_skill;
         let pen = 0.20 * (stretch - 0.85).max(0.0).powi(2)
             + 0.03 * (speed - 12.0).max(0.0) / 4.0
             + 0.02 * (1.0 - looking)
@@ -727,7 +745,7 @@ impl Game {
         np.fall_open(bp, bz, 1.2 + self.rng.f32() * 1.2, vel + kick);
         self.play.flight = None;
         self.play.thrown = None;
-        self.play.scramble = Some(Scramble { passer: from, to, tipped_by: None, kind: th.kind });
+        self.play.scramble = Some(Scramble { passer: from, to, tipped_by: None, kind: th.kind, cause: TurnoverKind::BadPass });
         self.play.ball = bp;
         self.play.ball_h = bz;
         self.go_live(np, 0.0, false)
@@ -776,7 +794,7 @@ impl Game {
         let path = f.path.unwrap_or_else(Path::new);
         self.play.flight = None;
         self.play.thrown = None;
-        self.play.scramble = Some(Scramble { passer: from, to, tipped_by: tipped, kind });
+        self.play.scramble = Some(Scramble { passer: from, to, tipped_by: tipped, kind, cause: TurnoverKind::BadPass });
         let (bp, bz) = path.at(t);
         self.note_pass(PassOutcome::Missed, 0.0, None);
         dbg_out("loose", t, f.dur, bp, bz);
@@ -809,7 +827,7 @@ impl Game {
             let dk = who - 5;
             self.steal_flew = 0.0;
             let tipped = sc.tipped_by.is_some();
-            let end = self.turnover(sc.passer, TurnoverKind::BadPass, Some(dk), 1.0);
+            let end = self.turnover(sc.passer, sc.cause, Some(dk), 1.0);
             let _ = tipped;
             return end;
         }
@@ -819,8 +837,8 @@ impl Game {
         self.play.think = 0.45 + self.rng.f32() * 0.2;
         self.play.dribbled = false;
         self.play.moves = 0;
-        self.play.assist = (who == sc.to).then_some((sc.passer, self.play.t));
-        self.play.from = Some(sc.passer);
+        self.play.assist = (who == sc.to && sc.passer != who).then_some((sc.passer, self.play.t));
+        self.play.from = (sc.passer != who).then_some(sc.passer);
         self.play.source = Source::CatchAndShoot;
         if self.play.brk {
             self.play.phase = Phase::Advance;
