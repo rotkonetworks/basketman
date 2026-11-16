@@ -484,6 +484,34 @@ impl Game {
         self.ofc.as_ref().is_some_and(|o| o.last.is_some())
     }
 
+    /// A whistle blew as a shot was being gathered and the ball then went dead
+    /// some other way before the foul was booked (a pass or a rebound that
+    /// left the floor, say): the call stands, so the foul is booked now, with
+    /// no free throws, and the ball is out as it was.
+    pub(super) fn book_orphan(&mut self) {
+        let Some(ofc) = self.ofc.as_mut() else { return };
+        let Some(idx) = ofc.last else { return };
+        let call = ofc.calls[idx].clone();
+        let Ruling::Foul { kind, by } = call.called else {
+            ofc.last = None;
+            return;
+        };
+        if by as usize == self.play.o {
+            ofc.last = None;
+            return;
+        }
+        let dk = (0..5).find(|&k| self.did(k) == call.who);
+        let h = (0..5).find(|&k| self.oid(k) == call.on);
+        match (dk, h) {
+            (Some(dk), Some(h)) => self.defensive_foul(dk, h, 0, kind),
+            _ => {
+                if let Some(o) = self.ofc.as_mut() {
+                    o.last = None;
+                }
+            }
+        }
+    }
+
     /// Is side `t`, on defense, fouling on purpose: a bench of its own that
     /// is behind by a few points in the last two minutes of the game, in the
     /// bonus or inside the last minute? The fewer the seconds, the more

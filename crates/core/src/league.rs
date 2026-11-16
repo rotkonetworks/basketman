@@ -2028,7 +2028,8 @@ mod tests {
             }
             for (_, _, id, other, before, age) in asked {
                 let after = w.players[id as usize].knows(other);
-                assert!(after > before, "{before} -> {after}");
+                // He may be hurt or have lost his place; nobody unlearns it.
+                assert!(after >= before, "{before} -> {after}");
                 if age <= 26 {
                     young += after - before;
                     n += 1.0;

@@ -1020,6 +1020,7 @@ impl Game {
                     (idle && self.play.t - self.play.frozen > 45.0).then_some(End::Dead)
                 })?;
                 let o = self.play.o;
+                self.book_orphan();
                 self.possessions[o] += 1;
                 let pace = self.sides[o].tactics.pace as f32 * 0.7
                     + self.sides[1 - o].tactics.pace as f32 * 0.3

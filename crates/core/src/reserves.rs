@@ -369,9 +369,10 @@ mod tests {
             )
         };
         // How many reserve games he gets in five weeks is down to the fixtures
-        // of one club, so look at several worlds.
+        // of one club, and to whether he is fit and still out of the rotation,
+        // so look at several worlds (eight: the claims are per world).
         let (mut idle_sum, mut played_sum, mut games_sum) = (0.0, 0.0, 0);
-        for seed in 4..8 {
+        for seed in 4..12 {
             let (idle, none) = run(seed, false);
             let (played, games) = run(seed, true);
             assert_eq!(none, 0);
@@ -379,10 +380,10 @@ mod tests {
             idle_sum += idle;
             played_sum += played;
         }
-        assert!(games_sum >= 8, "{games_sum} reserve games in four worlds");
+        assert!(games_sum >= 16, "{games_sum} reserve games in eight worlds");
         assert!(
-            played_sum / 4.0 > 0.8 && played_sum - idle_sum > 0.6,
-            "idle {idle_sum}, reserves {played_sum} (sums over four worlds)"
+            played_sum / 8.0 > 0.8 && played_sum - idle_sum > 1.2,
+            "idle {idle_sum}, reserves {played_sum} (sums over eight worlds)"
         );
     }
 
