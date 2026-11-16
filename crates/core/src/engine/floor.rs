@@ -33,6 +33,7 @@ mod hands_hooks;
 mod dribbling;
 mod passing;
 use dribbling::Poke;
+use hands_hooks::HandK;
 use passing::{Scramble, Throw, Thrown};
 mod stance_hooks;
 
@@ -865,6 +866,10 @@ pub(super) struct Game {
     hands_prev: [[Hands; 5]; 2],
     /// Who goes for the dribbled ball this bounce.
     poke: Poke,
+    /// Passes read this tick: (tick, risk) by passer and receiver.
+    risk_memo: std::cell::Cell<[Option<(u32, f32)>; 25]>,
+    /// Arms and hand speeds of the ten.
+    hand_k: [HandK; 10],
 }
 
 impl Game {
@@ -945,6 +950,8 @@ impl Game {
             hands: [[Hands::NONE; 5]; 2],
             hands_prev: [[Hands::NONE; 5]; 2],
             poke: Poke::NONE,
+            risk_memo: std::cell::Cell::new([None; 25]),
+            hand_k: [HandK::NONE; 10],
             m,
             frame: 0,
             play: Play::idle(),
@@ -3205,6 +3212,19 @@ impl Game {
     /// The chance a pass from `h` to `j` is picked off or fumbled, as the
     /// passer reads it from the hands around the lane.
     fn pass_risk(&self, h: usize, j: usize) -> f32 {
+        if let Some((tick, r)) = self.risk_memo.get()[h * 5 + j]
+            && tick == self.ticks
+        {
+            return r;
+        }
+        let r = self.pass_risk_fresh(h, j);
+        let mut m = self.risk_memo.get();
+        m[h * 5 + j] = Some((self.ticks, r));
+        self.risk_memo.set(m);
+        r
+    }
+
+    fn pass_risk_fresh(&self, h: usize, j: usize) -> f32 {
         let kind = self.pass_kind(h, j);
         // A man who has been in the lane for most of his three seconds is
         // not a man to throw it to: he has to leave.

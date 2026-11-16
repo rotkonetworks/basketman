@@ -14,6 +14,21 @@ const BOUNCE_RUN: f32 = 0.025;
 /// Where in the bounce the ball is at the floor (the rest is the way up).
 const BOUNCE_DOWN: f32 = 0.42;
 
+/// What a man's arms are, and how fast his hands go.
+#[derive(Copy, Clone)]
+pub(super) struct HandK {
+    pub slot: usize,
+    pub arm: f32,
+    pub shoulder_z: f32,
+    pub half_width: f32,
+    pub speed: f32,
+    pub side: bool,
+}
+
+impl HandK {
+    pub const NONE: HandK = HandK { slot: usize::MAX, arm: 1.0, shoulder_z: 1.7, half_width: 0.2, speed: 8.0, side: false };
+}
+
 /// What the ball is doing in a dribbling man's hand this tick.
 #[derive(Copy, Clone)]
 pub(super) struct Bounce {
@@ -27,10 +42,30 @@ impl Game {
     /// The reach numbers of a man: the arm (shoulder to the middle of the
     /// hand), the shoulder's height standing, and half his shoulder width.
     pub(super) fn arm_of(&self, t: usize, k: usize) -> (f32, f32, f32) {
-        let pl = &self.sides[t].slots[self.sides[t].on[k]].p;
-        let reach = pl.body.standing_reach_cm / 100.0;
-        let arm = (ARM_SHARE * reach).max(0.6) + 0.5 * (pl.body.wingspan_cm - pl.body.height_cm).max(0.0) / 100.0 * 0.3;
-        (arm, reach - arm, pl.body.shoulder_width_cm / 200.0)
+        let c = &self.hand_k[t * 5 + k];
+        if c.slot == self.sides[t].on[k] {
+            return (c.arm, c.shoulder_z, c.half_width);
+        }
+        Self::arm_fresh(&self.sides[t].slots[self.sides[t].on[k]].p.body)
+    }
+
+    fn arm_fresh(body: &crate::player::Body) -> (f32, f32, f32) {
+        let reach = body.standing_reach_cm / 100.0;
+        let arm = (ARM_SHARE * reach).max(0.6) + 0.5 * (body.wingspan_cm - body.height_cm).max(0.0) / 100.0 * 0.3;
+        (arm, reach - arm, body.shoulder_width_cm / 200.0)
+    }
+
+    /// The numbers that do not change from tick to tick, kept for twenty.
+    fn refresh_hand_k(&mut self) {
+        for t in 0..2 {
+            for k in 0..5 {
+                let slot = self.sides[t].on[k];
+                let (arm, shoulder_z, half_width) = Self::arm_fresh(&self.sides[t].slots[slot].p.body);
+                let quick = self.sides[t].eff(slot, if t == self.play.o { Attr::Handling } else { Attr::Steal });
+                let speed = hands::hand_speed(quick, self.sides[t].eff(slot, Attr::Handling));
+                self.hand_k[t * 5 + k] = HandK { slot, arm, shoulder_z, half_width, speed, side: t == self.play.o };
+            }
+        }
     }
 
     /// Where shoulder `i` of man `k` of side `t` is now.
@@ -95,12 +130,15 @@ impl Game {
         let holder = self.play.holder;
         let flight = self.play.flight;
         self.hands_prev = self.hands;
+        if self.ticks.is_multiple_of(20)
+            || (0..10).any(|i| self.hand_k[i].slot != self.sides[i / 5].on[i % 5] || self.hand_k[i].side != (i / 5 == o))
+        {
+            self.refresh_hand_k();
+        }
         for t in 0..2 {
             for k in 0..5 {
                 let (arm, _, _) = self.arm_of(t, k);
-                let slot = self.sides[t].on[k];
-                let quick = self.sides[t].eff(slot, if t == o { Attr::Handling } else { Attr::Steal });
-                let speed = hands::hand_speed(quick, self.sides[t].eff(slot, Attr::Handling));
+                let speed = self.hand_k[t * 5 + k].speed;
                 let me = self.m[t][k].pos;
                 let body = self.st[t][k].body;
                 let lift = self.lift_at(t, k, 0.0);

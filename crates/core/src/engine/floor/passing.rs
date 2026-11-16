@@ -251,6 +251,14 @@ impl Game {
         let hand = [self.hands[t][k].h[RIGHT].p, self.hands[t][k].h[LEFT].p];
         let start = see_at.max(now);
         let total = dur + OVERTIME;
+        // Far from the whole of its line: nothing to reach.
+        {
+            let a = path.at(0.0).0;
+            let b = path.at(total).0;
+            if q.dist(q.project(a, b)) > arm + 1.4 {
+                return None;
+            }
+        }
         let mut tau = start + 0.02;
         while tau < total {
             let (bp, bz) = path.at(tau);
@@ -267,7 +275,7 @@ impl Game {
                     }
                 }
             }
-            tau += 0.04;
+            tau += 0.06;
         }
         None
     }
@@ -291,26 +299,38 @@ impl Game {
                 safe *= 1.0 - self.try_odds(dk) * 0.45;
             }
         }
+        // The ball's path, sampled once: 0.03 s apart.
+        let mut smp = [(0.0f32, 0.0f32, 0.0f32); 64];
+        let mut n = 0;
+        while n < 64 && (n as f32) * 0.03 < plan.dur {
+            let (bp, bz) = plan.path.at(n as f32 * 0.03);
+            smp[n] = (bp.x, bp.y, bz);
+            n += 1;
+        }
         // A hand that is in the way: out in the lane, or up in front of him.
         let d = 1 - self.play.o;
+        let (la, lb) = (v(smp[0].0, smp[0].1), plan.aim);
+        let reach2 = (HIT + 0.06) * (HIT + 0.06);
         for dk in 0..5 {
-            let mut hit = false;
+            let q = self.dp(dk);
+            // Nowhere near the line of the ball: nothing to read.
+            if q.dist(q.project(la, lb)) > 3.2 {
+                continue;
+            }
             let vel = self.m[d][dk].vel;
-            for i in 0..2 {
+            let mut hit = false;
+            'hands: for i in 0..2 {
                 let hp = self.hands[d][dk].h[i].p;
-                let mut tau = 0.0;
-                while tau < plan.dur {
-                    let (bp, bz) = plan.path.at(tau);
+                for (s, &(bx, by, bz)) in smp[..n].iter().enumerate() {
                     // He has moved by the time the ball is there.
-                    let s = (tau + 0.25) * 0.6;
-                    let dx = hp.x + vel.x * s - bp.x;
-                    let dy = hp.y + vel.y * s - bp.y;
+                    let m = (s as f32 * 0.03 + 0.25) * 0.6;
+                    let dx = hp.x + vel.x * m - bx;
+                    let dy = hp.y + vel.y * m - by;
                     let dz = hp.z - bz;
-                    if dx * dx + dy * dy + dz * dz < (HIT + 0.06) * (HIT + 0.06) {
+                    if dx * dx + dy * dy + dz * dz < reach2 {
                         hit = true;
-                        break;
+                        break 'hands;
                     }
-                    tau += 0.02;
                 }
             }
             if hit {
@@ -318,33 +338,24 @@ impl Game {
             } else {
                 // Close to the ball's line: he steps into it, and a hand or a
                 // leg comes with him.
-                let q = self.dp(dk);
-                let mut dmin = f32::MAX;
-                let mut tau = 0.0;
-                while tau < plan.dur {
-                    let (bp, bz) = plan.path.at(tau);
+                let mut dmin2 = f32::MAX;
+                for (s, &(bx, by, bz)) in smp[..n].iter().enumerate().step_by(2) {
                     if bz < 2.4 {
-                        let near = q + vel * ((tau + 0.25) * 0.4);
-                        dmin = dmin.min(near.dist(bp));
+                        let m = (s as f32 * 0.03 + 0.25) * 0.4;
+                        let (dx, dy) = (q.x + vel.x * m - bx, q.y + vel.y * m - by);
+                        dmin2 = dmin2.min(dx * dx + dy * dy);
                     }
-                    tau += 0.05;
                 }
-                let k = (1.0 - dmin / CLOSE_LANE).clamp(0.0, 1.0);
+                let k = (1.0 - dmin2.sqrt() / CLOSE_LANE).clamp(0.0, 1.0);
                 safe *= 1.0 - 0.55 * k * k;
             }
         }
         // Through the glass is no way to throw it.
-        {
-            let mut tau = 0.0;
-            let mut last = plan.path.at(0.0);
-            while tau < plan.dur {
-                tau += 0.03;
-                let (bp, bz) = plan.path.at(tau);
-                if last.0.y >= BOARD_Y && bp.y < BOARD_Y && bp.x.abs() < BOARD_HALF && bz > BOARD_LOW && bz < BOARD_HIGH {
-                    safe *= 0.2;
-                    break;
-                }
-                last = (bp, bz);
+        for s in 1..n {
+            let (last, now) = (smp[s - 1], smp[s]);
+            if last.1 >= BOARD_Y && now.1 < BOARD_Y && now.0.abs() < BOARD_HALF && now.2 > BOARD_LOW && now.2 < BOARD_HIGH {
+                safe *= 0.2;
+                break;
             }
         }
         let mut risk = 1.0 - safe;
@@ -367,6 +378,10 @@ impl Game {
             return PassKind::Handoff;
         }
         let mut best = (PassKind::Chest, self.lane_risk(h, j, PassKind::Chest));
+        // An open lane: a chest pass, and no need to look further.
+        if best.1 < 0.035 && !live && d <= 13.0 {
+            return PassKind::Chest;
+        }
         let mut consider = |kind: PassKind, game: &Self, extra: f32| {
             let r = game.lane_risk(h, j, kind) + extra;
             if r < best.1 {
@@ -376,6 +391,7 @@ impl Game {
         if d > 13.0 {
             consider(PassKind::Outlet, self, -0.01);
         }
+
         if passing >= 6.0 {
             consider(PassKind::Bounce, self, 0.02);
         }
