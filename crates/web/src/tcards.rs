@@ -66,10 +66,9 @@ pub(crate) fn glyph(painter: &egui::Painter, rect: Rect, c: Choice, sample: Offe
                 match &m {
                     Mark::Cut { who, path } => line(path, *who, accent),
                     Mark::Dribble { who, path } => line(path, *who, Color32::from_rgb(0xE0, 0x7A, 0x1F)),
-                    Mark::Screen { who, at: p, .. } => {
+                    Mark::Screen { at: p, .. } => {
                         let b = at(*p);
                         painter.line_segment([b - vec2(4.0, 0.0), b + vec2(4.0, 0.0)], Stroke::new(3.0, accent));
-                        let _ = who;
                     }
                     Mark::Pass { from, to, option } => {
                         mini_arrow(painter, at(spots[*from]), at(spots[*to]), if *option { GREY } else { theme::TEXT }, true)
@@ -530,7 +529,7 @@ impl App {
             } else {
                 "The same possessions with each defense"
             }));
-            for (label, p, fam, current, o, d, count) in &rows {
+            for (label, p, fam, current, o, d, _) in &rows {
                 ui.horizontal(|ui| {
                     ui.allocate_ui_with_layout(vec2(118.0, 20.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
                         let text = RichText::new(*label).size(13.0);
@@ -548,7 +547,6 @@ impl App {
                         pick = Some((*o, *d));
                     }
                 });
-                let _ = count;
             }
             ui.label(dim(format!(
                 "{} possessions each. Small samples: gaps under about 0.15 a possession are noise. A system the squad barely knows is played worse, which is part of its number.",

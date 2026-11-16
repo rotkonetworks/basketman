@@ -10,7 +10,7 @@
 use crate::court::{Vec2, v};
 use crate::league::{TeamId, World};
 use crate::player::{Attr, Player};
-use crate::tactics::{BOARD_ROLES, DefenseScheme, OffenseSet, Press, Tactics};
+use crate::tactics::{DefenseScheme, OffenseSet, Press, Tactics};
 
 /// A three-point shooter, for counting how many a team has.
 const SHOOTER: f32 = 11.0;
@@ -1016,8 +1016,7 @@ pub fn propose(world: &World, team: TeamId, slot: usize, deep: bool) -> Proposal
     };
     let off_ppp = ppp(Focus::Attack);
     let def_ppp = ppp(Focus::Defend);
-    if let Some(p) = &off_ppp {
-        let _ = p;
+    if off_ppp.is_some() {
         tested = 3 * Setup::for_slot(world, team, slot, Focus::Attack).possessions;
     }
     let mean_of = |x: &Option<Vec<f32>>| x.as_ref().map_or(0.0, |v| v.iter().sum::<f32>() / v.len() as f32);
@@ -1174,11 +1173,6 @@ pub fn propose(world: &World, team: TeamId, slot: usize, deep: bool) -> Proposal
 /// The whole rotation, for things that ask about depth.
 fn starters_all<'a>(t: &Tactics, players: &'a [Player]) -> Vec<&'a Player> {
     t.rotation.iter().map(|s| &players[s.player as usize]).collect()
-}
-
-/// Short summary of the board's roles, for text surfaces.
-pub fn role_names() -> [&'static str; 5] {
-    BOARD_ROLES
 }
 
 #[cfg(test)]

@@ -4,10 +4,7 @@
 use basketman_core::command::Command;
 use basketman_core::fit::{Choice, Group, Knob};
 use basketman_core::tactics::{DefenseScheme, OffenseSet};
-use eframe::egui::{
-    self, Align, Align2, Color32, FontId, Layout, Order, Rect, RichText, Sense, Ui, UiBuilder,
-    pos2, vec2,
-};
+use eframe::egui::{self, Align, Color32, Layout, Order, Rect, RichText, Sense, Ui, pos2, vec2};
 
 use crate::app::App;
 use crate::pages::dim;
@@ -107,8 +104,6 @@ impl App {
     }
 
     fn centre_panel(&mut self, ui: &mut Ui, bd: &Backdrop, rect: Rect, narrow: bool) {
-        let ctx = ui.ctx().clone();
-        let _ = ctx;
         panel(ui, rect, "tactics_centre", |ui| {
             let w = ui.available_width();
             self.board_toolbar(ui, narrow);
@@ -426,7 +421,6 @@ impl App {
                         });
                     });
             });
-        let _ = (FontId::default(), Align2::CENTER_CENTER, Sense::hover(), UiBuilder::new());
         if next {
             self.room.tour = Some(step + 1);
         } else if back {
