@@ -871,11 +871,9 @@ impl Game {
         Gate::Go
     }
 
-    /// A side may use its challenge: one in hand, and a timeout to risk.
+    /// A side may use its challenge: it has exactly one a game, won or lost.
     pub(super) fn can_challenge(&self, side: usize) -> bool {
-        self.ofc
-            .as_ref()
-            .is_some_and(|o| o.left[side] > 0 && self.sides[side].timeouts > 0)
+        self.ofc.as_ref().is_some_and(|o| o.left[side] > 0)
     }
 
     /// No challenge: the call stands. A fouled-out player leaves now.
@@ -1051,12 +1049,11 @@ impl Game {
         let stays_close = r < close * (1.3 - q).clamp(0.2, 1.2);
         let r2 = self.ofc.as_mut().expect("officiated").rng.f32();
         let overturned = wrong && !stays_close && r2 >= slip;
-        // Costs: a lost challenge costs the timeout and the challenge.
+        // One challenge a game, used up whatever the film shows. A lost
+        // one also costs a timeout, if there is one left to lose.
         let ofc = self.ofc.as_mut().expect("officiated");
-        if overturned {
-            // Kept, as in the NBA.
-        } else {
-            ofc.left[side] = ofc.left[side].saturating_sub(1);
+        ofc.left[side] = 0;
+        if !overturned {
             let t = &mut self.sides[side].timeouts;
             *t = t.saturating_sub(1);
         }
@@ -1114,9 +1111,24 @@ impl Game {
                             line.tpa += 1;
                         }
                     }
-                    // No free throws: the ball goes to the other side.
+                    // No free throws. A basket that went in is a dead ball for
+                    // the other side. A miss is a loose ball the defense gets:
+                    // the defender nearest the basket is credited the board.
                     self.cancel_line();
-                    self.ofc.as_mut().expect("officiated").forced = Some(End::Dead);
+                    let end = if made {
+                        End::Dead
+                    } else {
+                        let dk = (0..5)
+                            .min_by(|&a, &b| {
+                                self.dp(a).dist(HOOP).total_cmp(&self.dp(b).dist(HOOP))
+                            })
+                            .unwrap_or(0);
+                        self.dline(dk).drb += 1;
+                        let who = self.did(dk);
+                        self.event(EventKind::Rebound { who, offensive: false });
+                        End::Live(dk)
+                    };
+                    self.ofc.as_mut().expect("officiated").forced = Some(end);
                 } else if shots > 0 {
                     // A bonus foul with no shot: back to a throw-in.
                     self.cancel_line();

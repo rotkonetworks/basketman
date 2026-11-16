@@ -108,6 +108,13 @@ fn truth_and_call_are_both_recorded() {
         );
         let o = r.officiating.as_ref().expect("officiated");
         whistles += rec.calls.iter().filter(|c| matches!(c.called, Ruling::Foul { .. })).count();
+        // A foul the film put right (a charge that was a block, or the
+        // reverse) is booked as an event of its own.
+        whistles += rec
+            .calls
+            .iter()
+            .filter(|c| c.review.is_some_and(|r| r.overturned) && matches!(c.truth, Ruling::Foul { .. }))
+            .count();
         events += rec.events.iter().filter(|e| matches!(e.kind, EventKind::Foul { .. })).count();
         differ += rec.calls.iter().filter(|c| c.verdict().is_wrong()).count();
         assert_eq!(o.wrong() as usize, rec.calls.iter().filter(|c| c.verdict().is_wrong()).count());
@@ -200,11 +207,10 @@ fn a_bench_has_one_challenge_and_a_no_call_cannot_be_challenged() {
         used += reviews.len();
         // Only a whistle was ever reviewed.
         assert!(reviews.iter().all(|c| c.reviewable && c.called != Ruling::Nothing));
-        // The human side (home, team 0) loses its challenge when it loses
-        // one: nothing is heard after a failure.
-        let mine: Vec<_> = reviews.iter().filter(|c| c.review.unwrap().by == 0).collect();
-        if let Some(n) = mine.iter().position(|c| !c.review.unwrap().overturned) {
-            assert_eq!(n + 1, mine.len(), "a lost challenge ends them (seed {seed})");
+        // One challenge a game, won or lost: no side is ever heard twice.
+        for side in 0..2u8 {
+            let n = reviews.iter().filter(|c| c.review.unwrap().by == side).count();
+            assert!(n <= 1, "side {side} challenged {n} times (seed {seed})");
         }
         // And a side never asks twice for the same call.
         let mut at: Vec<f32> = reviews.iter().map(|c| c.time).collect();

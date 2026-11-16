@@ -467,6 +467,10 @@ pub struct Officials {
     /// What the league office has done, newest last: (season, text).
     #[serde(default)]
     pub notices: Vec<(u16, String)>,
+    /// A league without referees: the engine's old whistle, no calls, no
+    /// challenges. For measuring what officiating does.
+    #[serde(default)]
+    pub off: bool,
 }
 
 /// A bell-shaped draw in `mean ± spread` (sum of three uniforms).
@@ -499,6 +503,7 @@ impl Officials {
             rng: Some(Rng::new(seed ^ 0x0FF1_C1A1_5EED)),
             salt: mix(seed, 0x0FF1),
             notices: Vec::new(),
+            off: false,
         };
         o.top_up(teams, true);
         o
@@ -735,6 +740,9 @@ impl World {
 
     /// The engine's crew for a game, with the home hall's volume.
     pub fn crew_for(&self, key: GameKey) -> Option<Crew> {
+        if self.officials.off {
+            return None;
+        }
         let ids = self.crew_of(key)?;
         let mut crew = self.officials.crew(ids);
         if let GameKey::League(i) = key {

@@ -107,6 +107,7 @@ fn main() {
             Some("roles") => lab::roles(games.unwrap_or(60)),
             Some("shots") => lab::shots(games.unwrap_or(60)),
             Some("stats") => lab::stats(games.unwrap_or(400)),
+            Some("league") => lab::league(games.unwrap_or(300)),
             Some("launch") => lab::launch(),
             Some("exploit") => lab::exploit(games.unwrap_or(200)),
             Some("diag") => lab::diag(games.unwrap_or(12)),
@@ -124,6 +125,11 @@ fn main() {
             }
             Some("fouls") => lab::fouls(games.unwrap_or(200)),
             Some("officials") => lab_officials::run(games.unwrap_or(600)),
+            Some("survival") => {
+                let first = std::env::args().nth(4).and_then(|s| s.parse().ok()).unwrap_or(100);
+                let with = std::env::args().nth(5).as_deref() != Some("without");
+                lab_officials::survival(games.unwrap_or(96), first, with)
+            }
             Some("physics") => {
                 lab::physics(games.unwrap_or(300));
                 lab::physics_post(games.unwrap_or(300));

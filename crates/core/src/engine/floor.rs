@@ -841,19 +841,19 @@ impl Game {
                 } else {
                     self.rules.overtime_secs
                 } as f32;
-                // Two timeouts for the first half, three for the second,
-                // one for each overtime; none carry over.
+                // Per half and per overtime (`Rules::timeouts`); none carry over.
                 let timeouts = if self.period == 0 {
-                    Some(2)
+                    Some(self.rules.timeouts[0])
                 } else if self.period == self.rules.periods / 2 {
-                    Some(3)
+                    Some(self.rules.timeouts[1])
                 } else if self.period >= self.rules.periods {
-                    Some(1)
+                    Some(self.rules.timeouts[2])
                 } else {
                     None
                 };
                 for side in &mut self.sides {
                     side.team_fouls = 0;
+                    side.stopped_at = self.elapsed;
                     if let Some(n) = timeouts {
                         side.timeouts = n;
                     }
@@ -1011,10 +1011,12 @@ impl Game {
                 && if s.coached {
                     s.timeout_wanted
                 } else {
-                    s.unanswered >= 9
+                    s.wants_timeout(&self.sides[1 - t], self.elapsed, self.regulation)
                 }
         })?;
         self.sides[t].timeouts -= 1;
+        self.sides[t].called += 1;
+        self.sides[t].stopped_at = self.elapsed;
         self.sides[t].timeout_wanted = false;
         for (u, side) in self.sides.iter_mut().enumerate() {
             side.rest(u == t);
@@ -1038,7 +1040,9 @@ impl Game {
         }
         let margin = s.score as i32 - self.sides[1 - t].score as i32;
         let late = self.elapsed > self.regulation * 0.7;
-        if margin > -7 && !(margin >= 12 && late) {
+        let left = self.regulation - self.elapsed;
+        let close_late = left > 0.0 && left <= 120.0 && (-6..=0).contains(&margin);
+        if margin > -7 && !(margin >= 12 && late) && !close_late {
             return;
         }
         let coach = s.coach.min(20) as f32 / 20.0;
@@ -1080,6 +1084,10 @@ impl Game {
                 o.pace = (o.pace + 4).min(18);
                 o.three_bias = (o.three_bias + 3).min(18);
             }
+        } else if close_late {
+            // Level or just behind with the clock running out: pressure.
+            o.press = Press::FullCourt;
+            o.pace = (o.pace + 3).min(18);
         } else {
             // Ahead late: take the air out of the ball.
             o.pace = o.pace.saturating_sub(4).max(4);

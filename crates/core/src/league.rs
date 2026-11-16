@@ -601,6 +601,10 @@ impl World {
             around,
             log_len: self.log.len(),
             round: self.round,
+            stop: Some(Stoppage::Tipoff),
+            talked: (0, 0),
+            stop_times: (0.0, 0.0),
+            deferred: Vec::new(),
         })
     }
 
@@ -640,7 +644,7 @@ impl World {
             while live.steps < *at && !live.game.is_over() {
                 live.step();
             }
-            live.input(input.clone());
+            live.replay_input(input.clone());
         }
         while !live.game.is_over() {
             live.step();
@@ -969,6 +973,104 @@ pub struct LiveRound {
     pub around: Vec<crate::live_feed::Other>,
     log_len: usize,
     round: usize,
+    /// Why play is stopped right now; `None` while it is live.
+    stop: Option<Stoppage>,
+    /// Team talks and words to a player used in this stoppage.
+    talked: (u8, u8),
+    /// Replay time of the stoppage before this one and of this one.
+    stop_times: (f32, f32),
+    /// Inputs of an old log that were not legal in live play, kept for the
+    /// next stoppage (replay only).
+    deferred: Vec<LiveInput>,
+}
+
+/// Why play is stopped. The coach can change tactics only when it is: the
+/// rest of the time he may only call a timeout, queue a substitution and
+/// switch the assistant's substitutions on or off.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Stoppage {
+    /// Before the opening tip.
+    Tipoff,
+    /// A timeout, called by this side.
+    Timeout(usize),
+    /// The end of a period; `half` is half-time, `period` the one just
+    /// played (1-based). After the last one, level, overtime is next.
+    Break { period: u8, half: bool },
+    /// A call went against this side's bench: it may challenge, and that is
+    /// all it may do. Tactics, substitutions, timeouts and talk wait.
+    Review,
+    /// The game is over.
+    Final,
+}
+
+impl Stoppage {
+    /// Team talks and words to a single player the coach has in it.
+    pub fn talks(self) -> (u8, u8) {
+        match self {
+            Stoppage::Tipoff => (1, 2),
+            Stoppage::Timeout(_) => (1, 1),
+            Stoppage::Break { half: true, .. } => (2, 4),
+            Stoppage::Break { .. } => (1, 2),
+            Stoppage::Review | Stoppage::Final => (0, 0),
+        }
+    }
+
+    /// How long the stoppage lasts in the game's own time, in seconds: it
+    /// only says how much there is to do, nothing runs out.
+    pub fn seconds(self) -> u32 {
+        match self {
+            Stoppage::Tipoff => 300,
+            Stoppage::Timeout(_) => 60,
+            Stoppage::Break { half: true, .. } => 600,
+            Stoppage::Break { .. } => 120,
+            Stoppage::Review | Stoppage::Final => 0,
+        }
+    }
+}
+
+/// Why `LiveRound::try_input` did nothing.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// Tactics, instructions and talk are for timeouts and breaks.
+    PlayIsLive,
+    /// The game is over.
+    GameOver,
+    /// No timeouts left.
+    NoTimeouts,
+    /// This stoppage's team talks are used.
+    TeamTalkUsed,
+    /// This stoppage's words to a player are used.
+    WordsUsed,
+    /// Not a player of this team.
+    NotOnTheTeam,
+    /// A call is waiting for the bench's decision: only the challenge may
+    /// be done now.
+    ReviewOnly,
+    /// There is no call to challenge now (or the challenge is spent).
+    NothingToChallenge,
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Refusal::PlayIsLive => {
+                "Play is live. Tactics, instructions and talk are for a timeout, a break or \
+                 before the tip. Call a timeout (taken at the next dead ball) first."
+            }
+            Refusal::GameOver => "The game is over.",
+            Refusal::NoTimeouts => "No timeouts left.",
+            Refusal::TeamTalkUsed => "You have given the team talk for this stoppage.",
+            Refusal::WordsUsed => "You have used the words to players for this stoppage.",
+            Refusal::NotOnTheTeam => "That player is not on your team.",
+            Refusal::ReviewOnly => {
+                "A call is under review: challenge it or let it stand. Nothing else can be done now."
+            }
+            Refusal::NothingToChallenge => {
+                "There is no call to challenge: the challenge is asked for at the stoppage after a \
+                 call against you, once per game."
+            }
+        })
+    }
 }
 
 /// Something the coach does during a live game.
@@ -993,9 +1095,27 @@ pub enum LiveInput {
         orders: Orders,
         familiarity: f32,
     },
-    /// Ask for a call to be reviewed. Only meaningful in the stoppage a
-    /// `Pause::Review` opened; at any other time it does nothing.
+    /// Ask for a call to be reviewed. Legal only in the stoppage a
+    /// `Pause::Review` opened (see `LiveRound::try_input`).
     Challenge,
+    /// What one player is told to do with the ball.
+    Brief {
+        player: PlayerId,
+        brief: crate::tactics::Brief,
+    },
+}
+
+impl LiveInput {
+    /// Allowed while play is live: the rest waits for a stoppage.
+    pub fn allowed_in_play(&self) -> bool {
+        matches!(
+            self,
+            LiveInput::Timeout
+                | LiveInput::AutoSubs(_)
+                | LiveInput::Swap { .. }
+                | LiveInput::CancelSwap(_)
+        )
+    }
 }
 
 impl LiveRound {
@@ -1008,15 +1128,133 @@ impl LiveRound {
     /// Advance the game, see `LiveMatch::step`.
     pub fn step(&mut self) -> Option<Pause> {
         self.steps += 1;
-        self.game.step()
+        self.stop = None;
+        let pause = self.game.step();
+        if let Some(p) = pause {
+            let stop = match p {
+                Pause::Timeout(side) => Stoppage::Timeout(side),
+                Pause::Final => Stoppage::Final,
+                Pause::Review(_) => Stoppage::Review,
+                Pause::PeriodEnd => {
+                    let period = self.game.result().periods.len().min(255) as u8;
+                    let half = period as u32 * 2 == self.game.rules().periods as u32;
+                    Stoppage::Break { period, half }
+                }
+            };
+            self.stop = Some(stop);
+            // A review is a pause inside play, not a stoppage of its own: it
+            // gives no talks and leaves the waiting inputs waiting.
+            if stop != Stoppage::Review {
+                self.talked = (0, 0);
+                self.stop_times = (self.stop_times.1, self.game.time());
+                for input in std::mem::take(&mut self.deferred) {
+                    let _ = self.try_input(input);
+                }
+            }
+        }
+        pause
     }
 
-    /// Do `input` for the user's side and record it. A shout returns how
-    /// each player took it; everything else returns nothing.
+    /// Why play is stopped, or `None` while it is live.
+    pub fn stoppage(&self) -> Option<Stoppage> {
+        self.stop
+    }
+
+    /// Replay time of the stoppage before the current one, to count what
+    /// has happened since.
+    pub fn previous_stop(&self) -> f32 {
+        self.stop_times.0
+    }
+
+    /// Team talks and words to a player still left in this stoppage.
+    pub fn talks_left(&self) -> (u8, u8) {
+        let all = self.stop.map_or((0, 0), Stoppage::talks);
+        (
+            all.0.saturating_sub(self.talked.0),
+            all.1.saturating_sub(self.talked.1),
+        )
+    }
+
+    /// Whether `input` may be done now, and if not, why.
+    pub fn check(&self, input: &LiveInput) -> Result<(), Refusal> {
+        if self.stop == Some(Stoppage::Final) || self.game.is_over() {
+            return Err(Refusal::GameOver);
+        }
+        if self.stop == Some(Stoppage::Review) && *input != LiveInput::Challenge {
+            return Err(Refusal::ReviewOnly);
+        }
+        if *input == LiveInput::Challenge
+            && !(self.stop == Some(Stoppage::Review) && self.game.review().is_some())
+        {
+            return Err(Refusal::NothingToChallenge);
+        }
+        if let LiveInput::Timeout = input
+            && self.game.timeouts_left(self.side) == 0
+            && !self.game.timeout_wanted(self.side)
+        {
+            return Err(Refusal::NoTimeouts);
+        }
+        if self.stop.is_none() && !input.allowed_in_play() {
+            return Err(Refusal::PlayIsLive);
+        }
+        if let LiveInput::Shout { target, .. } = input {
+            let left = self.talks_left();
+            match target {
+                None if left.0 == 0 => return Err(Refusal::TeamTalkUsed),
+                Some(_) if left.1 == 0 => return Err(Refusal::WordsUsed),
+                _ => {}
+            }
+        }
+        let known = |id: &PlayerId| {
+            self.game
+                .players(self.side)
+                .iter()
+                .any(|p| p.id == *id)
+        };
+        match input {
+            LiveInput::Shout { target: Some(id), .. } | LiveInput::Brief { player: id, .. }
+                if !known(id) =>
+            {
+                Err(Refusal::NotOnTheTeam)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Do `input` for the user's side and record it, or say why not (and
+    /// record nothing). A shout returns how each player took it; everything
+    /// else returns nothing.
+    pub fn try_input(&mut self, input: LiveInput) -> Result<Vec<(PlayerId, Reaction)>, Refusal> {
+        self.check(&input)?;
+        Ok(self.do_input(input))
+    }
+
+    /// Like `try_input`, and nothing happens if it is refused.
     pub fn input(&mut self, input: LiveInput) -> Vec<(PlayerId, Reaction)> {
+        self.try_input(input).unwrap_or_default()
+    }
+
+    /// Replay of a logged input. A log written before tactics were for
+    /// stoppages only may hold inputs that are illegal in live play: those
+    /// wait, in order, for the next stoppage. Whatever is still illegal
+    /// then is dropped. The same on every machine.
+    pub(crate) fn replay_input(&mut self, input: LiveInput) {
+        match self.check(&input) {
+            Ok(()) => {
+                self.do_input(input);
+            }
+            Err(Refusal::PlayIsLive) => self.deferred.push(input),
+            Err(_) => {}
+        }
+    }
+
+    fn do_input(&mut self, input: LiveInput) -> Vec<(PlayerId, Reaction)> {
         let side = self.side;
         let mut said = Vec::new();
         match input.clone() {
+            LiveInput::Brief { player, brief } => {
+                self.game.set_brief(side, player, brief);
+            }
             LiveInput::Timeout => self.game.call_timeout(side),
             LiveInput::AutoSubs(on) => self.game.set_auto_subs(side, on),
             LiveInput::Swap { off, on } => {
@@ -1024,7 +1262,14 @@ impl LiveRound {
                 self.game.swap(side, off, on);
             }
             LiveInput::CancelSwap(n) => self.game.cancel_swap(side, n),
-            LiveInput::Shout { shout, target } => said = self.game.shout(side, shout, target),
+            LiveInput::Shout { shout, target } => {
+                if target.is_some() {
+                    self.talked.1 += 1;
+                } else {
+                    self.talked.0 += 1;
+                }
+                said = self.game.shout(side, shout, target)
+            }
             LiveInput::Orders {
                 orders,
                 familiarity,
@@ -1293,11 +1538,13 @@ mod tests {
         let mut live = w.kickoff(0).unwrap();
         let side = live.side;
         live.input(LiveInput::AutoSubs(false));
-        let (mut timeouts, mut steps, mut sent) = (0, 0u32, 0);
+        let (mut timeouts, mut breaks, mut steps, mut sent) = (0, 0, 0u32, 0);
+        let mut talks = 0;
         while !live.game.is_over() {
             steps += 1;
             if steps == 500 {
-                // Bench player for the first man on the floor.
+                // Bench player for the first man on the floor, and a
+                // timeout: both wait for the next dead ball.
                 let players = live.game.players(side);
                 let off = players.iter().find(|p| p.on_court).unwrap().id;
                 let on = players.iter().find(|p| !p.on_court).unwrap().id;
@@ -1305,30 +1552,48 @@ mod tests {
                 assert_eq!(live.game.queued(side), vec![(off, on)]);
                 sent = on;
                 live.input(LiveInput::Timeout);
-                let said = live.input(LiveInput::Shout {
-                    shout: Shout::DemandMore,
-                    target: None,
-                });
-                assert_eq!(said.len(), 5);
+                // Tactics and talk are refused while play is live.
                 let mut orders = live.game.orders(side);
                 orders.pace = 18;
-                live.input(LiveInput::Orders {
-                    orders,
-                    familiarity: 0.5,
-                });
+                let before = live.inputs.len();
+                assert_eq!(
+                    live.try_input(LiveInput::Orders {
+                        orders,
+                        familiarity: 0.5
+                    }),
+                    Err(Refusal::PlayIsLive)
+                );
+                assert!(live.input(LiveInput::Shout { shout: Shout::DemandMore, target: None }).is_empty());
+                assert_eq!(live.inputs.len(), before, "a refused input is not logged");
             }
-            if steps.is_multiple_of(3000) {
-                live.input(LiveInput::Shout {
-                    shout: Shout::Focus,
-                    target: None,
-                });
-            }
-            if live.step() == Some(Pause::Timeout(side)) {
-                timeouts += 1;
-                assert_eq!(live.game.orders(side).pace, 18);
+            match live.step() {
+                Some(Pause::Timeout(s)) if s == side => {
+                    timeouts += 1;
+                    let said = live.input(LiveInput::Shout {
+                        shout: Shout::DemandMore,
+                        target: None,
+                    });
+                    assert_eq!(said.len(), 5);
+                    talks += 1;
+                    let mut orders = live.game.orders(side);
+                    orders.pace = 18;
+                    live.try_input(LiveInput::Orders {
+                        orders,
+                        familiarity: 0.5,
+                    })
+                    .expect("orders are for a timeout");
+                    assert_eq!(live.game.orders(side).pace, 18);
+                }
+                Some(Pause::PeriodEnd) => {
+                    breaks += 1;
+                    assert!(!live.input(LiveInput::Shout { shout: Shout::Focus, target: None }).is_empty());
+                    talks += 1;
+                }
+                _ => {}
             }
         }
         assert_eq!(timeouts, 1);
+        assert!(breaks >= 3);
         assert_eq!(live.game.orders(side), {
             let mut o = Orders::of(w.teams[0].tactics());
             o.pace = 18;
@@ -1336,10 +1601,7 @@ mod tests {
         });
         let events = &live.game.recording().events;
         let count = |f: &dyn Fn(&EventKind) -> bool| events.iter().filter(|e| f(&e.kind)).count();
-        assert_eq!(
-            count(&|k| matches!(k, EventKind::Shout { .. })),
-            1 + steps as usize / 3000
-        );
+        assert_eq!(count(&|k| matches!(k, EventKind::Shout { .. })), talks);
         assert!(count(&|k| matches!(k, EventKind::Substitution { .. })) >= 1);
         // The man sent on played; with the assistant off nobody else came
         // in unless a foul-out forced it.
@@ -1352,6 +1614,192 @@ mod tests {
             "{used} used, {out} fouled out"
         );
         w.full_time(live);
+    }
+
+    /// Step to the next stoppage (or the end).
+    fn to_stop(live: &mut LiveRound) -> Option<Pause> {
+        while !live.game.is_over() {
+            if let Some(p) = live.step() {
+                return Some(p);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn tactics_and_talk_wait_for_a_stoppage() {
+        use crate::engine::{Pause, Shout};
+        use crate::tactics::Brief;
+
+        let mut w = World::generate(3, 8);
+        let mut live = w.kickoff(0).unwrap();
+        let side = live.side;
+        let me = live.game.five(side);
+        // Before the tip everything may be changed, within the talk.
+        assert_eq!(live.stoppage(), Some(Stoppage::Tipoff));
+        let mut o = live.game.orders(side);
+        o.pace = 15;
+        assert!(live.try_input(LiveInput::Orders { orders: o, familiarity: 1.0 }).is_ok());
+        assert!(live.try_input(LiveInput::Brief { player: me[0], brief: Brief::Shoot }).is_ok());
+        assert_eq!(live.game.brief(side, me[0]), Some(Brief::Shoot));
+        assert!(live.try_input(LiveInput::Shout { shout: Shout::Focus, target: None }).is_ok());
+        assert_eq!(live.talks_left(), (0, 2));
+        assert_eq!(
+            live.try_input(LiveInput::Shout { shout: Shout::Praise, target: None }),
+            Err(Refusal::TeamTalkUsed)
+        );
+
+        // Live play: only a timeout, substitutions and the assistant.
+        for _ in 0..50 {
+            assert_eq!(live.step(), None);
+        }
+        assert_eq!(live.stoppage(), None);
+        let refused = |live: &mut LiveRound, i: LiveInput| live.try_input(i) == Err(Refusal::PlayIsLive);
+        assert!(refused(&mut live, LiveInput::Orders { orders: o, familiarity: 1.0 }));
+        assert!(refused(&mut live, LiveInput::Brief { player: me[1], brief: Brief::Pass }));
+        assert!(refused(&mut live, LiveInput::Shout { shout: Shout::Focus, target: Some(me[1]) }));
+        assert_eq!(live.game.brief(side, me[1]), Some(Brief::Free));
+        assert!(live.try_input(LiveInput::AutoSubs(false)).is_ok());
+        let bench = live.game.players(side).into_iter().find(|p| !p.on_court).unwrap().id;
+        assert!(live.try_input(LiveInput::Swap { off: me[2], on: bench }).is_ok());
+        assert!(live.try_input(LiveInput::CancelSwap(0)).is_ok());
+        assert!(live.try_input(LiveInput::Timeout).is_ok());
+
+        // The timeout comes at a dead ball and opens everything again.
+        loop {
+            match to_stop(&mut live) {
+                Some(Pause::Timeout(s)) if s == side => break,
+                Some(Pause::Final) | None => panic!("no timeout"),
+                _ => {}
+            }
+        }
+        assert_eq!(live.stoppage(), Some(Stoppage::Timeout(side)));
+        assert_eq!(live.talks_left(), (1, 1));
+        assert_eq!(live.game.timeouts_left(side), live.game.rules().timeouts[0] - 1);
+        assert!(live.try_input(LiveInput::Brief { player: me[1], brief: Brief::Pass }).is_ok());
+        assert!(live.try_input(LiveInput::Orders { orders: o, familiarity: 1.0 }).is_ok());
+        assert!(live.try_input(LiveInput::Shout { shout: Shout::Encourage, target: Some(me[1]) }).is_ok());
+        assert_eq!(
+            live.try_input(LiveInput::Shout { shout: Shout::Praise, target: Some(me[2]) }),
+            Err(Refusal::WordsUsed)
+        );
+        assert!(live.try_input(LiveInput::Shout { shout: Shout::Encourage, target: None }).is_ok());
+        assert_eq!(
+            live.try_input(LiveInput::Shout { shout: Shout::Encourage, target: None }),
+            Err(Refusal::TeamTalkUsed)
+        );
+        assert_eq!(
+            live.try_input(LiveInput::Brief { player: 9999, brief: Brief::Pass }),
+            Err(Refusal::NotOnTheTeam)
+        );
+        // Play again, and the allowance is renewed at the next stop.
+        live.step();
+        assert_eq!(live.stoppage(), None);
+        assert_eq!(live.talks_left(), (0, 0));
+
+        // Half-time gives the fuller talk.
+        let mut half = None;
+        while let Some(p) = to_stop(&mut live) {
+            if let Some(s @ Stoppage::Break { half: true, .. }) = live.stoppage() {
+                half = Some(s);
+                break;
+            }
+            assert_ne!(p, Pause::Final);
+        }
+        assert_eq!(half.map(Stoppage::talks), Some((2, 4)));
+        assert_eq!(live.talks_left(), (2, 4));
+        // At the end nothing is changed.
+        while to_stop(&mut live) != Some(Pause::Final) {}
+        assert_eq!(live.try_input(LiveInput::Timeout), Err(Refusal::GameOver));
+    }
+
+    /// A log written when anything could be done in live play replays: the
+    /// inputs that are not legal then wait for the next stoppage.
+    #[test]
+    fn an_old_log_with_inputs_in_live_play_replays_without_trouble() {
+        use crate::engine::{Orders, Shout};
+        let old = |w: &World| {
+            let mut o = Orders::of(w.teams[0].tactics());
+            o.pace = 19;
+            vec![
+                (120, LiveInput::Shout { shout: Shout::DemandMore, target: None }),
+                (
+                    150,
+                    LiveInput::Orders { orders: o, familiarity: 0.5 },
+                ),
+                (3000, LiveInput::Timeout),
+                (3100, LiveInput::Brief { player: 0, brief: crate::tactics::Brief::Attack }),
+            ]
+        };
+        let mut a = World::generate(3, 8);
+        let mut b = World::generate(3, 8);
+        a.watch = Some(0);
+        b.watch = Some(0);
+        let inputs = old(&a);
+        a.apply(Command::PlayLive { inputs: inputs.clone() }).unwrap();
+        b.apply(Command::PlayLive { inputs }).unwrap();
+        // The same on every replay.
+        assert_eq!(a.table(), b.table());
+        assert_eq!(
+            a.fixtures[0].result.as_ref().unwrap().score,
+            b.fixtures[0].result.as_ref().unwrap().score
+        );
+
+        // The deferred ones are done at the first stoppage, in order.
+        let mut w = World::generate(3, 8);
+        let mut live = w.kickoff(0).unwrap();
+        let side = live.side;
+        while live.steps < 150 {
+            live.step();
+        }
+        let mut o = live.game.orders(side);
+        o.pace = 19;
+        live.replay_input(LiveInput::Orders { orders: o, familiarity: 0.5 });
+        assert_ne!(live.game.orders(side).pace, 19, "not in live play");
+        assert_eq!(live.deferred.len(), 1);
+        to_stop(&mut live);
+        assert!(live.deferred.is_empty());
+        assert_eq!(live.game.orders(side).pace, 19, "done at the stoppage");
+    }
+
+    #[test]
+    fn a_bench_without_a_person_changes_things_only_when_play_is_stopped() {
+        use crate::replay::EventKind;
+        let w = World::generate(5, 8);
+        let (mut adjusts, mut timeouts, mut games) = (0, 0, 0);
+        for seed in 0..24u64 {
+            let (a, b) = (seed as usize % 8, (seed as usize + 3) % 8);
+            let (home, away) = w.lineups_for(a, b, None);
+            let (_, rec) = simulate_recorded(&home, &away, &w.rules, &mut Rng::new(seed));
+            games += 1;
+            let mut left = [w.rules.timeouts[0] + w.rules.timeouts[1]; 2];
+            for (i, e) in rec.events.iter().enumerate() {
+                match &e.kind {
+                    EventKind::Adjust { .. } => {
+                        adjusts += 1;
+                        let before = &rec.events[i - 1].kind;
+                        assert!(
+                            matches!(
+                                before,
+                                EventKind::Timeout { .. }
+                                    | EventKind::PeriodStart
+                                    | EventKind::Adjust { .. }
+                            ),
+                            "game {seed}: a change of system in live play, after {before:?}"
+                        );
+                    }
+                    EventKind::Timeout { side } => {
+                        timeouts += 1;
+                        let l = &mut left[*side as usize];
+                        assert!(*l > 0 || e.period >= 4, "more timeouts than allowed");
+                        *l = l.saturating_sub(1);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert!(adjusts >= 5, "{adjusts} changes in {games} games");
+        assert!(timeouts >= games / 2, "{timeouts} timeouts in {games} games");
     }
 
     #[test]

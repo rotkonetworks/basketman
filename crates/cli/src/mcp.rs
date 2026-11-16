@@ -161,7 +161,7 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "live_step",
             op: "live_step",
-            description: "Advance the live game. With seconds=N, play about N seconds of replay time (stops earlier at a timeout, the end of a period or full time); without it, play to the next such pause. Returns the new state and why it paused. Substitutions, timeouts and new orders take effect at the next dead ball.",
+            description: "Advance the live game. With seconds=N, play about N seconds of replay time (stops earlier at either team's timeout, the end of a period or full time); without it, play to the next such pause. Returns the new state, why it paused, and `play` (live or stopped, what you may do now). Changes made at a stop take effect when you step on; substitutions and timeouts asked for in live play, at the next dead ball.",
             schema: || obj(json!({"seconds": {"type": "number", "minimum": 0}}), &[]),
         },
         Tool {
@@ -173,7 +173,7 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "live_input",
             op: "live_input",
-            description: "Do something as the coach. `input` is one of: \"Timeout\" (asks for one at the next dead ball; again to wave it off), {\"AutoSubs\": false}, {\"Swap\": {\"off\": id on court, \"on\": id on bench}} (turns the assistant's substitutions off until you give them back with {\"AutoSubs\": true}), {\"CancelSwap\": index}, {\"Shout\": {\"shout\": \"Encourage|DemandMore|CalmDown|Focus|Praise\", \"target\": id or null}}, {\"Orders\": {\"orders\": {offense, defense, press, pace, three_bias, crash_boards, aggression}}} (how well the squad knows the new system is worked out by the game from your playbook).",
+            description: "Do something as the coach. The rule: tactics change only when play is stopped. Live play (`play.state` is \"live\" in live_state) allows only \"Timeout\" (asks for one at the next dead ball; again to wave it off; each side has 2 in the first half, 3 in the second and 1 per overtime), {\"AutoSubs\": bool}, {\"Swap\": {\"off\": id on court, \"on\": id on bench}} (made at the next dead ball; turns the assistant's substitutions off until you give them back with {\"AutoSubs\": true}) and {\"CancelSwap\": index}. Anything else answers `play_is_live`. Stopped (`play.state` is \"stopped\": before the tip, in either team's timeout, between periods, at half-time) you may also send {\"Orders\": {\"orders\": {offense, defense, press, pace, three_bias, crash_boards, aggression}}} (how well the squad knows the new system is worked out by the game from your playbook), {\"Brief\": {\"player\": id, \"brief\": \"Free|Shoot|Pass|Attack\"}} (what one player does with the ball) and talk: {\"Shout\": {\"shout\": \"Encourage|DemandMore|CalmDown|Focus|Praise\", \"target\": id or null}}, a team talk when target is null, a word to one player otherwise. `play.talks_left` says how many of each are left in this stoppage (timeout 1 team talk and 1 word, break 1 and 2, half-time 2 and 4, before the tip 1 and 2); more answers `talk_used`. To make a change in the game, call a Timeout, live_step to the pause, change what you want, and step on.",
             schema: || {
                 obj(
                     json!({"input": {"description": "A LiveInput."}}),

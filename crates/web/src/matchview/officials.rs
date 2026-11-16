@@ -373,11 +373,11 @@ impl App {
             }
         });
         let small = if compact {
-            "A lost challenge costs a timeout.".to_string()
+            "One challenge a game. A lost one costs a timeout. C or Space.".to_string()
         } else {
             format!(
-                "A lost challenge costs a timeout. Challenges left: {}, timeouts: {}.",
-                p.left, p.timeouts
+                "One challenge a game; a lost one costs a timeout. Timeouts: {}. Keys: C challenges, Space lets it stand.",
+                p.timeouts
             )
         };
         ui.add(egui::Label::new(RichText::new(small).size(12.0).color(theme::TEXT_DIM)).wrap());
@@ -478,7 +478,7 @@ fn opinion_words(o: Opinion) -> &'static str {
 }
 
 fn prompt_can_challenge(p: &ReviewPrompt) -> bool {
-    p.left > 0 && p.timeouts > 0
+    p.left > 0
 }
 
 #[cfg(test)]
@@ -602,7 +602,7 @@ mod tests {
     }
 
     #[test]
-    fn the_prompt_cannot_be_challenged_without_a_challenge_and_a_timeout() {
+    fn the_prompt_can_be_challenged_while_the_one_challenge_is_in_hand() {
         let mut p = ReviewPrompt {
             side: 0,
             what: What::Foul,
@@ -617,7 +617,10 @@ mod tests {
             timeouts: 2,
         };
         assert!(prompt_can_challenge(&p));
+        // No timeout left: it can still be used, there is just nothing more to lose.
         p.timeouts = 0;
+        assert!(prompt_can_challenge(&p));
+        p.left = 0;
         assert!(!prompt_can_challenge(&p));
         assert_eq!(opinion_words(Opinion::LooksWrong), "Looked clean to me.");
     }

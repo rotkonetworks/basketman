@@ -46,6 +46,16 @@ pub struct Rules {
     pub foul_limit: u16,
     /// Team fouls per period before every further foul means two free throws.
     pub bonus_after: u16,
+    /// Timeouts per side: first half, second half, each overtime. None carry
+    /// over. A person on the bench can change tactics only in a timeout or
+    /// a break, so they are worth having; the other bench plays by the same
+    /// rule.
+    #[serde(default = "default_timeouts")]
+    pub timeouts: [u8; 3],
+}
+
+fn default_timeouts() -> [u8; 3] {
+    [2, 3, 1]
 }
 
 impl Rules {
@@ -57,6 +67,7 @@ impl Rules {
             shot_clock: 24,
             foul_limit: 5,
             bonus_after: 4,
+            timeouts: default_timeouts(),
         }
     }
 
@@ -68,6 +79,7 @@ impl Rules {
             shot_clock: 24,
             foul_limit: 6,
             bonus_after: 4,
+            timeouts: default_timeouts(),
         }
     }
 }
@@ -216,6 +228,10 @@ struct Side {
     queue: Vec<(usize, usize)>,
     timeouts: u8,
     timeout_wanted: bool,
+    /// Game seconds at the side's last stoppage (a timeout or a break).
+    stopped_at: f32,
+    /// Timeouts this bench called.
+    called: u8,
     /// Points the opponent has scored since this side last did.
     unanswered: u16,
     /// 0..=1, how worn the coach's voice is: shouting all night stops
@@ -284,6 +300,8 @@ impl Side {
             queue: Vec::new(),
             timeouts: 0,
             timeout_wanted: false,
+            stopped_at: 0.0,
+            called: 0,
             unanswered: 0,
             voice: 0.0,
             orders: None,
@@ -395,29 +413,69 @@ impl Side {
     /// Being on court already is worth a bonus so stints last a few minutes.
     fn substitute(&mut self, elapsed: f32, regulation: f32, foul_limit: u16) {
         if !self.auto_subs && !self.on.is_empty() {
-            for (off, on) in std::mem::take(&mut self.queue) {
-                let k = self.on.iter().position(|&i| i == off);
-                if let Some(k) = k
-                    && !self.on.contains(&on)
-                    && self.slots[on].line.pf < foul_limit
-                {
-                    self.on[k] = on;
-                }
-            }
+            self.apply_queue(foul_limit);
             let slots = &self.slots;
             self.on
                 .sort_by_key(|&i| (slots[i].pos, slots[i].p.body.height_cm as u32));
             return;
         }
+        // Before the tip the coach may already have queued swaps: they
+        // are made in the starting five.
+        let queued = if self.on.is_empty() && !self.auto_subs {
+            std::mem::take(&mut self.queue)
+        } else {
+            Vec::new()
+        };
         self.queue.clear();
+        self.on = self.picked(elapsed, regulation, foul_limit);
+        self.queue = queued;
+        if !self.queue.is_empty() {
+            self.apply_queue(foul_limit);
+        }
+        let slots = &self.slots;
+        self.on
+            .sort_by_key(|&i| (slots[i].pos, slots[i].p.body.height_cm as u32));
+    }
+
+    /// Who is on the floor: before the first dead ball, who will start,
+    /// with the swaps queued so far.
+    fn slots_on(&self, regulation: f32) -> Vec<usize> {
+        if !self.on.is_empty() {
+            return self.on.clone();
+        }
+        let mut me = self.picked(0.0, regulation, u16::MAX);
+        for &(off, on) in &self.queue {
+            if let Some(k) = me.iter().position(|&i| i == off)
+                && !me.contains(&on)
+            {
+                me[k] = on;
+            }
+        }
+        let slots = &self.slots;
+        me.sort_by_key(|&i| (slots[i].pos, slots[i].p.body.height_cm as u32));
+        me
+    }
+
+    /// The five furthest behind their minutes target, as slot indices.
+    fn picked(&self, elapsed: f32, regulation: f32, foul_limit: u16) -> Vec<usize> {
         let mut need: Vec<(f32, usize)> = (0..self.slots.len())
             .map(|i| (self.need(i, elapsed, regulation, foul_limit), i))
             .collect();
         need.sort_by(|a, b| b.0.total_cmp(&a.0));
-        self.on = need.iter().take(5).map(|n| n.1).collect();
-        let slots = &self.slots;
-        self.on
-            .sort_by_key(|&i| (slots[i].pos, slots[i].p.body.height_cm as u32));
+        need.iter().take(5).map(|n| n.1).collect()
+    }
+
+    /// Make the queued swaps in `on`.
+    fn apply_queue(&mut self, foul_limit: u16) {
+        for (off, on) in std::mem::take(&mut self.queue) {
+            let k = self.on.iter().position(|&i| i == off);
+            if let Some(k) = k
+                && !self.on.contains(&on)
+                && self.slots[on].line.pf < foul_limit
+            {
+                self.on[k] = on;
+            }
+        }
     }
 
     /// Replace the player at court index `k` (fouled out) with the best
@@ -465,6 +523,32 @@ impl Side {
             s.focus -= s.focus.clamp(-fade, fade);
         }
         self.voice = (self.voice - dur / 400.0).max(0.0);
+    }
+
+    /// Does a bench without a person on it want a timeout at this dead
+    /// ball? It can change its system only in a timeout or a break, so it
+    /// asks for one to stop a run, to change a defense that is being beaten,
+    /// and late in a close game. It keeps its last one for the end.
+    fn wants_timeout(&self, other: &Side, elapsed: f32, regulation: f32) -> bool {
+        if self.timeouts == 0 {
+            return false;
+        }
+        if self.unanswered >= 9 {
+            return true;
+        }
+        if self.coach < 6 || elapsed - self.stopped_at < 60.0 {
+            return false;
+        }
+        let margin = self.score as i32 - other.score as i32;
+        let left = regulation - elapsed;
+        let late = left > 0.0 && left <= 120.0;
+        if late && (-6..=0).contains(&margin) {
+            return true;
+        }
+        margin <= -7
+            && self.adjusted < 3
+            && elapsed - self.stopped_at >= 180.0
+            && (self.timeouts > 1 || left <= regulation * 0.25)
     }
 
     /// Sixty seconds on the bench: legs back, heads cleared.
@@ -772,6 +856,7 @@ impl LiveMatch {
 
     pub fn players(&self, side: usize) -> Vec<LivePlayer> {
         let s = &self.game.sides[side];
+        let on = s.slots_on(self.regulation());
         s.slots
             .iter()
             .enumerate()
@@ -780,7 +865,7 @@ impl LiveMatch {
                 line.secs = (slot.played + 0.5) as u32;
                 LivePlayer {
                     id: slot.p.id,
-                    on_court: s.on.contains(&i),
+                    on_court: on.contains(&i),
                     energy: 1.0 - slot.fatigue,
                     line,
                     drive: slot.drive,
@@ -789,6 +874,13 @@ impl LiveMatch {
                 }
             })
             .collect()
+    }
+
+    /// The five on the floor, point guard to centre: the man at each place
+    /// guards the opponent's at the same place when they play man to man.
+    pub fn five(&self, side: usize) -> Vec<PlayerId> {
+        let s = &self.game.sides[side];
+        s.slots_on(self.regulation()).iter().map(|&i| s.slots[i].p.id).collect()
     }
 
     /// How tightly the crew is calling this game, 0.85 to 1.15.
@@ -810,6 +902,46 @@ impl LiveMatch {
         s.timeout_wanted = !s.timeout_wanted && s.timeouts > 0;
     }
 
+    pub fn rules(&self) -> &Rules {
+        &self.game.rules
+    }
+
+    fn regulation(&self) -> f32 {
+        (self.game.rules.periods as u32 * self.game.rules.period_secs) as f32
+    }
+
+    /// How many timeouts this bench has taken.
+    pub fn timeouts_called(&self, side: usize) -> u8 {
+        self.game.sides[side].called
+    }
+
+    /// What `player` has been told to do with the ball.
+    pub fn brief(&self, side: usize, player: PlayerId) -> Option<crate::tactics::Brief> {
+        let s = &self.game.sides[side];
+        s.slots.iter().find(|x| x.p.id == player).map(|x| x.brief)
+    }
+
+    /// Change one player's instruction with the ball, from the next
+    /// possession. False if he is not on the roster.
+    pub(crate) fn set_brief(
+        &mut self,
+        side: usize,
+        player: PlayerId,
+        brief: crate::tactics::Brief,
+    ) -> bool {
+        match self.game.sides[side]
+            .slots
+            .iter_mut()
+            .find(|x| x.p.id == player)
+        {
+            Some(slot) => {
+                slot.brief = brief;
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn team_fouls(&self, side: usize) -> u16 {
         self.game.sides[side].team_fouls
     }
@@ -826,12 +958,14 @@ impl LiveMatch {
     /// swap makes no sense (not on the floor, already on it, fouled out).
     pub(crate) fn swap(&mut self, side: usize, off: PlayerId, on: PlayerId) -> bool {
         let limit = self.game.rules.foul_limit;
+        let regulation = self.regulation();
         let s = &mut self.game.sides[side];
         let slot = |id: PlayerId| s.slots.iter().position(|x| x.p.id == id);
         let (Some(off), Some(on)) = (slot(off), slot(on)) else {
             return false;
         };
-        if !s.on.contains(&off) || s.on.contains(&on) || s.slots[on].line.pf >= limit {
+        let now = s.slots_on(regulation);
+        if !now.contains(&off) || now.contains(&on) || s.slots[on].line.pf >= limit {
             return false;
         }
         s.queue.retain(|&(a, b)| a != off && b != on);

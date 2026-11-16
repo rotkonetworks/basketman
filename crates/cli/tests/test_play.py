@@ -304,18 +304,38 @@ def main():
         check(0 < mine["count"] < shots["count"] and all(s["side"] == "yours" and s["period"] == 1 for s in mine["shots"]), "shot filters")
         _, err = p.try_call("live_feeds", part="nonsense")
         check(err and err.kind == "bad_request", "unknown part refused")
+        if p.call("live_state")["play"]["state"] != "live":
+            p.call("live_step", seconds=3)
         st = p.call("live_input", input="Timeout")
         check(st["timeout_wanted"], "timeout requested")
+        check(st["play"]["state"] == "live" and "Shout" not in st["play"]["may"] and "Orders" not in st["play"]["may"],
+              "live play offers only timeouts, swaps and the assistant")
+        o = st["orders"]["yours"]
+        _, err = p.try_call("live_input", input={"Shout": {"shout": "Encourage", "target": None}})
+        check(err and err.kind == "play_is_live", "talk is refused in live play")
+        _, err = p.try_call("live_input", input={"Orders": {"orders": dict(o, pace=17), "familiarity": 1.0}})
+        check(err and err.kind == "play_is_live", "orders are refused in live play")
         on = [q for q in st["players"]["yours"] if q["on_court"]][0]["id"]
         bench = [q for q in st["players"]["yours"] if not q["on_court"]][0]["id"]
         _, err = p.try_call("live_input", input={"Swap": {"off": bench, "on": on}})
         check(err and err.kind == "refused", "a bad swap is refused")
         st = p.call("live_input", input={"Swap": {"off": on, "on": bench}})
         check(st["queued_swaps"], "swap queued")
+        # The timeout (or any other stop) opens the changes.
+        for _ in range(40):
+            st = p.call("live_step")
+            if st["play"]["state"] != "live" or st["over"]:
+                break
+        check(st["play"]["state"] == "stopped" and "Orders" in st["play"]["may"], "stopped at a dead ball")
+        check(st["play"]["talks_left"]["team"] >= 1, "a team talk is left")
         st = p.call("live_input", input={"Shout": {"shout": "Encourage", "target": None}})
         check(len(st["reactions"]) == 5, "shout reactions")
+        _, err = p.try_call("live_input", input={"Shout": {"shout": "Praise", "target": None}})
+        check(err and err.kind == "talk_used", "one team talk a stoppage")
         o = st["orders"]["yours"]
         st = p.call("live_input", input={"Orders": {"orders": dict(o, pace=17), "familiarity": 1.0}})
+        check(st["orders"]["yours"]["pace"] == 17, "orders change in a stoppage")
+        st = p.call("live_input", input={"Brief": {"player": on, "brief": "Pass"}})
         paused = None
         for _ in range(40):
             st = p.call("live_step")
@@ -329,6 +349,43 @@ def main():
               "live inputs logged")
         _, err = p.try_call("live_state")
         check(err and err.kind == "no_live_match", "no live match after finish")
+
+        # --- officials and the challenge -------------------------------------
+        ov = p.call("view", what="officials")
+        check(len(ov["referees"]) >= 16 and ov["referees"][0]["known_for"] is not None, "view officials lists the referees")
+        check(ov["next_game"] is None or len(ov["next_game"]["crew"]) == 3, "the next game has a crew of three")
+        reviewed = None
+        for _ in range(6):
+            to_match_day(p)
+            st = p.call("kickoff")
+            crew = st["officials"]["crew"]
+            check(len(crew) == 3 and st["officials"]["challenges_left"] == 1, "a crew of three and one challenge")
+            check(st["officials"]["review"] is None, "nothing to challenge before play")
+            _, err = p.try_call("live_input", input="Challenge")
+            check(err and err.kind == "refused", "a challenge with no call under review is refused")
+            st = p.call("live_step")
+            for _ in range(400):
+                if st["paused"] == "review" or st["over"]:
+                    break
+                st = p.call("live_step")
+            if st["paused"] == "review":
+                rv = st["officials"]["review"]
+                check(rv and rv["call"] and rv["assistant"] and st["play"]["stopped_for"] == "review", "a review is described")
+                check(st["play"]["may"] == ["Challenge"], "only the challenge may be done in a review")
+                _, err = p.try_call("live_input", input="Timeout")
+                check(err and err.kind == "review_only", "a timeout is refused during a review")
+                _, err = p.try_call("live_input", input={"Orders": {"orders": dict(o, pace=17), "familiarity": 1.0}})
+                check(err and err.kind == "review_only", "orders are refused during a review")
+                st = p.call("live_input", input="Challenge")
+                check(st["officials"]["challenges_left"] == 0 and st["officials"]["challenged"], "the one challenge is spent")
+                _, err = p.try_call("live_input", input="Challenge")
+                check(err and err.kind == "refused", "it cannot be used twice")
+                reviewed = True
+            r = p.call("live_finish")
+            check(r["played"], "the game is booked")
+            if reviewed:
+                break
+        check(reviewed, "a review came up in six live games")
 
         # --- save and load --------------------------------------------------
         path = os.path.join(tempfile.mkdtemp(), "career.bin")

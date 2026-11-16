@@ -263,6 +263,9 @@ pub struct Coach {
     elapsed: u32,
     /// Times the rules fired, for the caller to report.
     pub fired: Vec<(u32, usize)>,
+    /// Changes of system and words that fired in live play: tactics wait
+    /// for a stoppage, so they are done at the next one.
+    pending: Vec<LiveInput>,
 }
 
 /// Per-look facts about the game.
@@ -287,6 +290,7 @@ impl Coach {
             restore_auto: false,
             elapsed: 0,
             fired: Vec::new(),
+            pending: Vec::new(),
         }
     }
 
@@ -304,6 +308,11 @@ impl Coach {
             && s == live.side
         {
             self.run = 0;
+        }
+        if pause.is_some() {
+            for input in std::mem::take(&mut self.pending) {
+                live.input(input);
+            }
         }
         if pause.is_some() || self.steps.is_multiple_of(LOOK_EVERY) {
             self.look(team, live);
@@ -450,6 +459,15 @@ impl Coach {
         }
     }
 
+    /// Tactics and talk are for stoppages: in live play they wait for the next.
+    fn say_or_wait(&mut self, live: &mut LiveRound, input: LiveInput) {
+        if live.stoppage().is_some() {
+            live.input(input);
+        } else {
+            self.pending.push(input);
+        }
+    }
+
     fn act(&mut self, a: &Action, trigger: Option<PlayerId>, team: &Team, live: &mut LiveRound) {
         let side = live.side;
         match a {
@@ -496,10 +514,13 @@ impl Coach {
                 };
                 if o != base {
                     let familiarity = team.familiarity_with(o.offense, o.defense, o.press);
-                    live.input(LiveInput::Orders {
-                        orders: o,
-                        familiarity,
-                    });
+                    self.say_or_wait(
+                        live,
+                        LiveInput::Orders {
+                            orders: o,
+                            familiarity,
+                        },
+                    );
                 }
             }
             Action::Shout { shout, target } => {
@@ -510,10 +531,13 @@ impl Coach {
                     },
                     None => None,
                 };
-                live.input(LiveInput::Shout {
-                    shout: *shout,
-                    target,
-                });
+                self.say_or_wait(
+                    live,
+                    LiveInput::Shout {
+                        shout: *shout,
+                        target,
+                    },
+                );
             }
             Action::AutoSubs(on) => {
                 self.restore_auto = false;

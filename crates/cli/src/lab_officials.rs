@@ -214,3 +214,59 @@ pub fn run(games: usize) {
     );
     let _ = kinds;
 }
+
+/// `basketman lab survival [worlds] [first seed] [with|without]`: how often a
+/// manager of club 1 of a twelve-club league is still in the job after two
+/// seasons, with and without officials. The league plays itself; the manager
+/// only advances.
+pub fn survival(worlds: usize, first: u64, with: bool) {
+    use basketman_core::command::Command;
+    use basketman_core::inbox::Stop;
+    let workers = 6;
+    let lasted: Vec<(u64, u16)> = std::thread::scope(|s| {
+        let hs: Vec<_> = (0..workers)
+            .map(|k| {
+                s.spawn(move || {
+                    let mut out = Vec::new();
+                    for i in (k..worlds).step_by(workers) {
+                        let seed = first + i as u64;
+                        let mut w = World::generate(seed, 12);
+                        w.officials.off = !with;
+                        w.apply(Command::TakeCharge(1)).unwrap();
+                        let mut seasons = 0;
+                        let mut guard = 0u32;
+                        while w.season < 12 && guard < 1_000_000 {
+                            guard += 1;
+                            if w.watch.is_none() {
+                                break;
+                            }
+                            match w.apply(Command::Advance).unwrap().stop.unwrap() {
+                                Stop::MatchDay => {
+                                    w.apply(Command::PlayRound).unwrap();
+                                }
+                                Stop::Mail => {}
+                                Stop::Draft => {
+                                    let _ = w.apply(Command::DraftAuto { all: true });
+                                }
+                            }
+                            seasons = w.season;
+                            if seasons >= 2 {
+                                break;
+                            }
+                        }
+                        out.push((seed, seasons));
+                    }
+                    out
+                })
+            })
+            .collect();
+        hs.into_iter().flat_map(|h| h.join().expect("worker")).collect()
+    });
+    let k = lasted.iter().filter(|x| x.1 >= 2).count();
+    println!(
+        "{} officials: the manager lasted two seasons in {k} of {} worlds ({:.1}%)",
+        if with { "with" } else { "without" },
+        lasted.len(),
+        100.0 * k as f32 / lasted.len().max(1) as f32
+    );
+}
