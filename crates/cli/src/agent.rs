@@ -403,6 +403,27 @@ impl Session {
                     .map(|v| to_json(&v))
                     .map_err(|e| AgentError::new("refused", e));
             }
+            "officials" => {
+                let me = w.watch;
+                let person = |r: &basketman_core::officials::Referee| {
+                    json!({"id": r.id, "name": r.name, "age": r.age, "known_for": r.tags(),
+                           "accuracy": r.accuracy, "strictness": r.strictness, "consistency": r.consistency,
+                           "home_lean": r.home_lean, "composure": r.composure,
+                           "season": {"games": r.season.games, "fouls_per_game": r.season.fouls_per_game(),
+                                      "home_balance": r.season.home_balance(), "overturned": r.season.overturned,
+                                      "reviewed": r.season.reviewed},
+                           "warned": r.warned})
+                };
+                let next = me.and_then(|me| {
+                    let i = w.fixtures.iter().position(|f| {
+                        f.round == w.round && f.result.is_none() && (f.home == me || f.away == me)
+                    })?;
+                    let ids = w.crew_of(basketman_core::officials::GameKey::League(i))?;
+                    Some(json!({"fixture": i, "crew": w.referees_of(ids).iter().map(|r| person(r)).collect::<Vec<_>>()}))
+                });
+                let pool: Vec<Value> = w.officials.pool.iter().filter(|r| r.active).map(person).collect();
+                return Ok(json!({"next_game": next, "referees": pool, "office": w.officials.notices}));
+            }
             "club_profile" => {
                 let t = match get_u64(a, "club")? {
                     Some(t) => t as usize,
