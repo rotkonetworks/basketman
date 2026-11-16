@@ -289,6 +289,7 @@ impl World {
         self.preseason_days = PRESEASON_DAYS;
         self.day = 0;
         self.scouting.assignments.clear();
+        self.travel.clear();
         self.date_fixtures();
         self.arrange_friendlies();
     }

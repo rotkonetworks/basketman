@@ -418,3 +418,180 @@ fn clubs_nobody_manages_prepare_in_a_simple_way() {
     assert!(mean > 0.1 && mean < 0.4, "{mean}");
     assert!(full > 0 && full < n, "some clubs read the opponent right, some not");
 }
+
+/// Home win share and margin over `seeds` careers of twelve clubs, one
+/// manager at club 0 who plays his rounds, with the toll of travel on or
+/// off. Returns (games, home wins, margin sum).
+fn career_home_court(seeds: std::ops::RangeInclusive<u64>, travel: bool) -> (usize, usize, i64) {
+    let seeds: Vec<u64> = seeds.collect();
+    let parts: Vec<(usize, usize, i64)> = std::thread::scope(|s| {
+        let hs: Vec<_> = seeds
+            .iter()
+            .map(|&seed| {
+                s.spawn(move || {
+                    crate::travel::TRAVEL_OFF.with(|c| c.set(!travel));
+                    let mut w = World::new_career(seed, 12);
+                    w.apply(Command::TakeCharge(0)).unwrap();
+                    let mut guard = 0;
+                    while !w.season_over() {
+                        guard += 1;
+                        assert!(guard < 4000);
+                        if w.match_today() {
+                            w.apply(Command::PlayRound).unwrap();
+                        } else {
+                            w.apply(Command::Advance).unwrap();
+                        }
+                    }
+                    let (mut g, mut wins, mut m) = (0, 0, 0i64);
+                    for f in w.fixtures.iter().filter(|f| !f.playoff) {
+                        let r = f.result.as_ref().unwrap();
+                        g += 1;
+                        wins += (r.score[0] > r.score[1]) as usize;
+                        m += r.score[0] as i64 - r.score[1] as i64;
+                    }
+                    (g, wins, m)
+                })
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    parts.into_iter().fold((0, 0, 0), |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2))
+}
+
+#[test]
+#[ignore]
+fn measure_career_home_court() {
+    for travel in [false, true] {
+        let (g, wins, m) = career_home_court(1..=24, travel);
+        eprintln!(
+            "CAREER HOME COURT travel {travel}: {g} games, home win {:.1}%, home margin {:+.2}",
+            wins as f32 / g as f32 * 100.0,
+            m as f32 / g as f32
+        );
+    }
+}
+
+#[test]
+fn clubs_have_places_and_trips_have_lengths() {
+    use crate::travel::{TripKind, distance_km};
+    // Helsinki to Tallinn and Espoo, to Bergen.
+    assert!(distance_km(0, 6) > 60 && distance_km(0, 6) < 130, "{}", distance_km(0, 6));
+    assert_eq!(TripKind::of(distance_km(0, 6)), TripKind::Short);
+    assert_eq!(distance_km(0, 16), distance_km(16, 0));
+    assert!(distance_km(0, 16) < 20);
+    let bergen = distance_km(0, 12);
+    assert!(bergen > 900 && bergen < 1300, "{bergen}");
+    assert_eq!(TripKind::of(bergen), TripKind::Long);
+    // Tampere is a bus ride from Helsinki.
+    assert_eq!(TripKind::of(distance_km(0, 1)), TripKind::Medium);
+    for a in 0..20 {
+        for b in 0..20 {
+            assert_eq!(distance_km(a, b), distance_km(b, a));
+        }
+    }
+}
+
+#[test]
+fn a_long_trip_tires_the_visitors_and_takes_the_day_before() {
+    // Find a league game in a managed career whose away club has a long
+    // trip: its squad arrives with less match fitness than before, the
+    // home squad does not, and the day before is lost to the trip.
+    let mut w = World::new_career(2, 20);
+    w.apply(Command::TakeCharge(0)).unwrap();
+    while w.day < crate::calendar::PRESEASON_DAYS + 2 {
+        w.apply(Command::Continue).unwrap();
+    }
+    let i = w
+        .fixtures
+        .iter()
+        .position(|f| f.round == 0 && f.home != 0 && f.away != 0 && crate::travel::distance_km(f.away, f.home) >= crate::travel::LONG_KM)
+        .expect("a long trip in round 0 of twenty clubs");
+    let (home, away, day) = (w.fixtures[i].home, w.fixtures[i].away, w.fixtures[i].day);
+    let cond = |w: &World, t: usize| w.teams[t].roster.iter().map(|&p| w.players[p as usize].condition).sum::<f32>();
+    // Rested squads: it is the trip that costs.
+    for t in [home, away] {
+        for &p in &w.teams[t].roster.clone() {
+            w.players[p as usize].condition = 1.0;
+        }
+    }
+    let (h0, a0) = (cond(&w, home), cond(&w, away));
+    assert_eq!(w.travel_day_lost(away, day), Some(((day - 1) % 7) as usize));
+    assert_eq!(w.travel_day_lost(home, day), None);
+    w.travel_for(&[i]);
+    let (dh, da) = (h0 - cond(&w, home), a0 - cond(&w, away));
+    assert!(dh.abs() < 1e-3, "the home side did not travel: {dh}");
+    let per_man = da / 12.0;
+    assert!(per_man > 0.02 && per_man < 0.04, "a long trip costs a little: {per_man}");
+    // A preparation session on the travel day does not count.
+    use crate::training::Session;
+    let lost = w.travel_day_lost(away, day).unwrap();
+    let mut s = w.teams[away].schedule.clone();
+    s.sessions = [Session::Rest; 10];
+    s.sessions[lost * 2] = Session::MatchPrep;
+    s.sessions[(lost * 2 + 2) % 10] = Session::MatchPrep;
+    w.teams[away].schedule = s;
+    assert_eq!(w.prep_sessions(away, day), 1);
+    // The week's training: the lost day was a rest day.
+    let week = w.week_schedule(away);
+    assert_eq!(week.sessions[lost * 2], Session::Rest);
+    assert_eq!(w.week_schedule(away).sessions[lost * 2], Session::MatchPrep, "the lost day is used up: the next week is whole");
+}
+
+#[test]
+fn home_stands_help_and_road_trips_cost_more() {
+    let mut w = World::new_career(2, 20);
+    w.apply(Command::TakeCharge(0)).unwrap();
+    let (a, b) = (3usize, 12usize);
+    let ra = |w: &World, t: usize| w.teams[t].roster.iter().map(|&p| w.players[p as usize].condition).sum::<f32>() / 12.0;
+    // Two away games in a row cost the second more than the first.
+    w.fixtures.push(crate::league::Fixture { round: 0, home: b, away: a, result: None, playoff: false, day: 40, division: 0 });
+    w.fixtures.push(crate::league::Fixture { round: 0, home: b, away: a, result: None, playoff: false, day: 47, division: 0 });
+    let n = w.fixtures.len();
+    for &p in &w.teams[a].roster.clone() {
+        w.players[p as usize].condition = 1.0;
+    }
+    w.travel_for(&[n - 2]);
+    let first = 1.0 - ra(&w, a);
+    for &p in &w.teams[a].roster.clone() {
+        w.players[p as usize].condition = 1.0;
+    }
+    w.travel_for(&[n - 1]);
+    let second = 1.0 - ra(&w, a);
+    assert!(second > first * 1.3, "first {first}, second {second}");
+    // A home game after a home game gives something back.
+    for &p in &w.teams[b].roster.clone() {
+        w.players[p as usize].condition = 0.9;
+    }
+    let before = ra(&w, b);
+    w.fixtures.push(crate::league::Fixture { round: 0, home: b, away: a, result: None, playoff: false, day: 54, division: 0 });
+    let n = w.fixtures.len();
+    w.travel_for(&[n - 1]);
+    assert!(ra(&w, b) > before, "a home stand rests the squad");
+}
+
+#[test]
+fn travel_only_applies_in_a_managed_calendar() {
+    let mut w = World::new_career(2, 20);
+    let i = w.fixtures.iter().position(|f| crate::travel::distance_km(f.away, f.home) >= crate::travel::LONG_KM).unwrap();
+    let before: Vec<f32> = w.players.iter().map(|p| p.condition).collect();
+    w.travel_for(&[i]);
+    let after: Vec<f32> = w.players.iter().map(|p| p.condition).collect();
+    assert_eq!(before, after, "nobody in charge: no travel");
+}
+
+#[test]
+fn home_court_stays_realistic_with_travel() {
+    // Aggregate over 12 careers of twelve clubs: home teams win a bit
+    // more than half their games and by a few points, with or without
+    // the toll of travel, and the toll adds only a little.
+    let (g0, w0, m0) = career_home_court(1..=12, false);
+    let (g1, w1, m1) = career_home_court(1..=12, true);
+    let (win0, win1) = (w0 as f32 / g0 as f32, w1 as f32 / g1 as f32);
+    let (mar0, mar1) = (m0 as f32 / g0 as f32, m1 as f32 / g1 as f32);
+    eprintln!("home court, travel off: {:.1}% {:+.2}; on: {:.1}% {:+.2}", win0 * 100.0, mar0, win1 * 100.0, mar1);
+    for (win, mar) in [(win0, mar0), (win1, mar1)] {
+        assert!((0.50..=0.62).contains(&win), "home win share {win}");
+        assert!((0.5..=3.5).contains(&mar), "home margin {mar}");
+    }
+    assert!(mar1 - mar0 < 1.0, "travel adds {}", mar1 - mar0);
+}

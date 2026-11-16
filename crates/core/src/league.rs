@@ -249,9 +249,12 @@ pub struct World {
     /// The manager's reputation, jobs and offers; see `career.rs`.
     #[serde(default)]
     pub career: crate::career::Career,
+    /// Where each club has been lately; see `travel.rs`.
+    #[serde(default)]
+    pub travel: Vec<crate::travel::TeamTravel>,
 }
 
-const CITIES: [&str; 20] = [
+pub(crate) const CITIES: [&str; 20] = [
     "Helsinki", "Tampere", "Turku", "Oulu", "Lahti", "Kuopio", "Tallinn", "Riga", "Kaunas",
     "Vilnius", "Gdansk", "Malmo", "Bergen", "Aarhus", "Rostock", "Tartu", "Espoo", "Vantaa",
     "Pori", "Joensuu",
@@ -410,6 +413,7 @@ impl World {
             round_seeds: Vec::new(),
             club: Default::default(),
             career: Default::default(),
+            travel: Vec::new(),
         };
         world.fixtures = schedule_tiers(&world.teams);
         world.date_fixtures();
@@ -627,6 +631,7 @@ impl World {
             })
             .collect();
         let seeds: Vec<u64> = played.iter().map(|_| self.rng.next_u64()).collect();
+        self.travel_for(&played);
         self.round_seeds
             .extend(played.iter().copied().zip(seeds.iter().copied()));
         (played, seeds)
@@ -821,7 +826,10 @@ impl World {
         }
         // Media work and events take some of the week's training.
         let media = self.media_factors();
+        // A day lost to a long trip was spent resting.
+        let weeks: Vec<Schedule> = (0..self.teams.len()).map(|t| self.week_schedule(t)).collect();
         for team in &mut self.teams {
+            let week = &weeks[team.id];
             let gym = self
                 .econ
                 .books
@@ -836,12 +844,12 @@ impl World {
                     continue;
                 }
                 let keen = (0.9 + 0.2 * player.morale) * media[p as usize];
-                train_week(player, &team.schedule, &mut self.rng, teaching * keen, wear);
+                train_week(player, week, &mut self.rng, teaching * keen, wear);
             }
             train_playbook(
                 &mut team.playbook,
                 team.active,
-                team.schedule.familiarity_gain() * team.office.drilling(),
+                week.familiarity_gain() * team.office.drilling(),
             );
         }
         before
