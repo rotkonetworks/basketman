@@ -11,26 +11,6 @@ use crate::court::{BALL_RADIUS, BOARD_HALF, BOARD_HIGH, BOARD_LOW, BOARD_Y, GRAV
 use crate::replay::Style;
 use crate::rng::Rng;
 
-/// Calibration knobs from the environment while fitting (`TUNE=NAME=1.2,...`).
-pub(super) fn tune(name: &str, default: f32) -> f32 {
-    use std::sync::OnceLock;
-    static T: OnceLock<Vec<(String, f32)>> = OnceLock::new();
-    let t = T.get_or_init(|| {
-        std::env::var("TUNE")
-            .ok()
-            .map(|s| {
-                s.split(',')
-                    .filter_map(|kv| {
-                        let (k, v) = kv.split_once('=')?;
-                        Some((k.to_string(), v.parse().ok()?))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    });
-    t.iter().find(|(k, _)| k == name).map_or(default, |x| x.1)
-}
-
 /// The glass gives back this much of the speed into it; a shooter who banks
 /// it knows.
 const BOARD_E: f32 = 0.66;
@@ -154,13 +134,6 @@ impl Errors {
         }
     }
 
-    pub fn scaled(self, k: f32) -> Errors {
-        Errors {
-            dir: self.dir * k,
-            speed: self.speed * k,
-            elev: self.elev * k,
-        }
-    }
 }
 
 /// An approximately normal draw, sum of six uniforms.
@@ -210,6 +183,36 @@ pub fn make_rate(from: (f32, f32, f32), style: Style, e: (f32, f32), n: usize, s
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::court::HOOP;
+
+    /// The same shooter, the same error at the ring, only the distance
+    /// changes: closer is easier, and a smaller error is better.
+    #[test]
+    fn closer_is_easier_and_a_steadier_hand_is_better() {
+        let from = |d: f32| (0.0, HOOP.y + d, 3.0);
+        let rate = |d: f32, k: f32| {
+            let e = Errors::at_rim(d, (0.05 + 0.004 * d) * k, (0.10 + 0.003 * d) * k);
+            let mut rng = Rng::new(3);
+            let f = from(d);
+            let (v, _) = ideal(v3(f.0, f.1, f.2), Style::Jumper);
+            let mut made = 0;
+            for _ in 0..3000 {
+                let vel = perturb(v, e, &mut rng);
+                if ball::fly(Ball { p: v3(f.0, f.1, f.2), v: vel }, &[]).made {
+                    made += 1;
+                }
+            }
+            made as f32 / 3000.0
+        };
+        let by_distance: Vec<f32> = [2.5, 4.0, 5.5, 7.0, 9.0].iter().map(|&d| rate(d, 1.0)).collect();
+        for w in by_distance.windows(2) {
+            assert!(w[0] > w[1], "{by_distance:?}");
+        }
+        for d in [3.0, 5.0, 7.0] {
+            let (steady, shaky) = (rate(d, 0.7), rate(d, 1.4));
+            assert!(steady > shaky + 0.1, "{d}: {steady} {shaky}");
+        }
+    }
 
     #[test]
     fn the_ideal_launch_goes_in_from_everywhere() {

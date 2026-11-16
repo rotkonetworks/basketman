@@ -33,12 +33,15 @@ const SLIP_IRON: f32 = 0.10;
 const SLIP_BOARD: f32 = 0.05;
 const SLIP_FLOOR: f32 = 0.12;
 /// What the net leaves of the ball's speed as it comes through.
-const NET_XY: f32 = 0.30;
+const NET_XY: f32 = 0.15;
 const NET_Z: f32 = 0.55;
 /// Longest a flight is followed, seconds.
 const MAX_T: f32 = 9.0;
 /// The most iron-and-glass contacts a flight has before it is let fall.
 const MAX_CONTACTS: u32 = 18;
+/// Arcs after which the iron and glass are let go and the ball is simply let
+/// fall (the path has room for a few more arcs for the floor).
+const MAX_ARCS_USED: usize = 52;
 
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct V3 {
@@ -233,8 +236,14 @@ fn overlap(p: V3, scoring: bool) -> Option<(Surface, V3)> {
 /// A ball cannot start inside iron or glass: a hand that would put it there
 /// (a man under the rim) lifts it over the ring first.
 pub fn clear_start(mut p: V3) -> V3 {
-    for _ in 0..40 {
-        if overlap(p, true).is_none() {
+    for _ in 0..60 {
+        let dx = p.x - HOOP.x;
+        let dy = p.y - HOOP.y;
+        // Inside the ring and its net, below the iron, is no place to start.
+        let in_net = (dx * dx + dy * dy).sqrt() < RING_RADIUS + BALL_RADIUS
+            && p.z > RIM_HEIGHT - 0.45
+            && p.z < RIM_HEIGHT + BALL_RADIUS + IRON;
+        if overlap(p, true).is_none() && !in_net {
             break;
         }
         p.z += 0.03;
@@ -260,7 +269,7 @@ pub fn fly(ball: Ball, hands: &[Hand]) -> Flown {
         blocked: None,
     };
     let mut contacts = 0u32;
-    let mut entered: Option<f32> = None;
+    let mut over: Option<f32> = None;
     let mut scoring = true;
     let mut rolled = false;
     while t < MAX_T {
@@ -294,17 +303,14 @@ pub fn fly(ball: Ball, hands: &[Hand]) -> Flown {
                     out.z = out.z.min(1.5);
                     flown.blocked = Some((hand.who, t));
                     flown.touch.get_or_insert((t, b.p.xy(), b.p.z));
-                    push(&mut path, &seg, t);
+                    push(&mut path, &seg, t, b.p);
                     b.v = out;
                     seg = (b, t);
                     scoring = true;
-                    entered = None;
+                    over = None;
                     break;
                 }
             }
-        }
-        if b.p.z >= RIM_HEIGHT {
-            entered = None;
         }
         let mut next = b.after(h);
         if let Some((_, _)) = overlap(next.p, scoring) {
@@ -330,6 +336,10 @@ pub fn fly(ball: Ball, hands: &[Hand]) -> Flown {
                     Surface::Glass => (E_BOARD, SLIP_BOARD),
                     Surface::Floor => (E_FLOOR, SLIP_FLOOR),
                 };
+                // A ball laid on a surface (not dropped) neither bounces nor
+                // is slowed along it: it slides and rolls on.
+                let k = (-vn / 1.5).min(1.0);
+                let (e, slip) = (e * k, slip * k);
                 let normal = n * vn;
                 let along = nb.v - normal;
                 nb.v = along * (1.0 - slip) - normal * e;
@@ -344,7 +354,7 @@ pub fn fly(ball: Ball, hands: &[Hand]) -> Flown {
             match surface {
                 Surface::Floor => {
                     nb.p.z = nb.p.z.max(BALL_RADIUS);
-                    push(&mut path, &seg, t);
+                    push(&mut path, &seg, t, nb.p);
                     seg = (nb, t);
                     b = nb;
                     // Out of bounds it is dead where it lands.
@@ -367,48 +377,57 @@ pub fn fly(ball: Ball, hands: &[Hand]) -> Flown {
                     continue;
                 }
                 s => {
-                    contacts += 1;
+                    if vn < -0.5 {
+                        contacts += 1;
+                    }
                     if s == Surface::Iron {
                         flown.iron += 1;
                     } else {
                         flown.glass += 1;
                     }
                     flown.touch.get_or_insert((t, nb.p.xy(), nb.p.z));
-                    push(&mut path, &seg, t);
-                    seg = (nb, t);
+                    // A ball rolling on the iron touches it every step: the
+                    // arcs are cut only now and then (the path departs from
+                    // the physics by millimetres in between).
+                    if vn < -0.5 || t - seg.1 >= 0.025 {
+                        push(&mut path, &seg, t, nb.p);
+                        seg = (nb, t);
+                    }
                     b = nb;
-                    if contacts >= MAX_CONTACTS {
+                    if contacts >= MAX_CONTACTS || path.arcs().len() > MAX_ARCS_USED {
                         scoring = false;
                     }
                     continue;
                 }
             }
         }
-        // Down through the ring?
-        let above = b.p.z >= RIM_HEIGHT;
-        let d_after = {
-            let dx = next.p.x - HOOP.x;
-            let dy = next.p.y - HOOP.y;
+        // Down through the ring? It was over the ring, inside it, at about
+        // the height of the iron a moment ago, and is now well below it,
+        // inside, going down.
+        let d_now = {
+            let dx = b.p.x - HOOP.x;
+            let dy = b.p.y - HOOP.y;
             (dx * dx + dy * dy).sqrt()
         };
-        if above && next.p.z < RIM_HEIGHT && b.v.z < 0.0 && d_after < RING_RADIUS - IRON && entered.is_none() {
-            entered = Some(t + h);
+        if b.p.z >= RIM_HEIGHT - 0.01 {
+            over = if d_now < RING_RADIUS { Some(t) } else { None };
         }
         t += h;
-        if let Some(at) = entered
+        if let Some(at) = over
             && !flown.made
-            && next.p.z < RIM_HEIGHT - 0.2
+            && next.p.z < RIM_HEIGHT
+            && next.v.z < 0.0
+            && t - at < 0.3
         {
             let dx = next.p.x - HOOP.x;
             let dy = next.p.y - HOOP.y;
-            if (dx * dx + dy * dy).sqrt() < RING_RADIUS {
+            if (dx * dx + dy * dy).sqrt() < RING_RADIUS - IRON {
                 flown.made = true;
                 flown.ring_at = at;
                 // The net takes the speed off it.
-                push(&mut path, &seg, t);
+                push(&mut path, &seg, t, next.p);
                 next.v = v3(next.v.x * NET_XY, next.v.y * NET_XY, next.v.z * NET_Z);
                 seg = (next, t);
-                scoring = false;
                 b = next;
                 continue;
             }
@@ -417,7 +436,7 @@ pub fn fly(ball: Ball, hands: &[Hand]) -> Flown {
     }
     if !rolled {
         // Followed long enough, or never came down: end where it is.
-        push(&mut path, &seg, t);
+        push(&mut path, &seg, t, b.p);
     }
     // A ball that stops out of bounds is brought back to the line.
     let (end, _) = path.end();
@@ -436,14 +455,15 @@ pub fn fly(ball: Ball, hands: &[Hand]) -> Flown {
     flown
 }
 
-/// Close the arc that ran from `seg` to time `t`.
-fn push(path: &mut Path, seg: &(Ball, f32), t: f32) {
+/// Close the arc that ran from `seg` to time `t` and ended at `end`: the arc
+/// is the parabola from where it started to where the ball really is.
+fn push(path: &mut Path, seg: &(Ball, f32), t: f32, end: V3) {
     let dur = (t - seg.1).max(1e-4);
     path.push(Arc {
         p0: seg.0.p.xy(),
-        p1: seg.0.p.xy() + seg.0.v.xy() * dur,
+        p1: end.xy(),
         z0: seg.0.p.z,
-        vz: seg.0.v.z,
+        vz: (end.z - seg.0.p.z) / dur + 0.5 * GRAVITY * dur,
         dur,
         g: GRAVITY,
     });
@@ -638,3 +658,5 @@ mod tests {
         v(x, y)
     }
 }
+
+

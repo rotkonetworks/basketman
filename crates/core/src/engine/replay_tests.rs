@@ -96,37 +96,36 @@ fn every_make_goes_through_the_ring_and_no_miss_does() {
             let EventKind::Shot { made, .. } = &e.kind else {
                 continue;
             };
-            let i = rec.frame_at(e.time);
-            // The shot is over within a few seconds; look for the ring.
+            // The ball's own recorded path, a few milliseconds at a time (the
+            // 10 Hz frames are too coarse to see a rattle-in): does it cross
+            // the height of the ring going down, inside it?
             let rim = rims[e.offense as usize];
             let mut through = false;
-            let mut inside_miss = false;
-            let end = rec.frame_at(e.time + 4.0).min(rec.frames.len() - 1);
-            for w in rec.frames[i..=end].windows(2) {
-                if w[1].cut {
-                    break;
-                }
-                let a = (w[0].ball, w[0].ball_height);
-                let b = (w[1].ball, w[1].ball_height);
-                if let Some(at) = crossing(a, b, RIM_HEIGHT) {
-                    // Interpolation is straight, the ball is not: leave a margin.
-                    if at.dist(rim) < RIM_RADIUS {
-                        through = true;
-                    } else if at.dist(rim) < RIM_RADIUS - 0.1 {
-                        inside_miss = true;
+            let mut last: Option<(Vec2, f32)> = None;
+            let mut t = e.time;
+            while t < e.time + 6.0 {
+                let Some(now) = rec.ball_at(t) else {
+                    if t > e.time + 0.3 {
+                        break;
                     }
+                    t += 0.002;
+                    continue;
+                };
+                if let Some(before) = last
+                    && let Some(at) = crossing(before, now, RIM_HEIGHT)
+                    && at.dist(rim) < RIM_RADIUS
+                {
+                    through = true;
                 }
+                last = Some(now);
+                t += 0.002;
             }
             if *made {
                 makes += 1;
-                assert!(
-                    through,
-                    "a make at {} did not pass through the ring",
-                    e.time
-                );
+                assert!(through, "a make at {} did not pass through the ring", e.time);
             } else {
                 misses += 1;
-                assert!(!inside_miss);
+                assert!(!through, "a miss at {} passed through the ring", e.time);
             }
         }
     }
@@ -363,6 +362,78 @@ fn a_ball_is_only_taken_where_a_hand_can_reach_it() {
         }
     }
     assert!(taken > 1000, "{taken} takes");
+}
+
+
+
+
+
+
+/// The recorded path of every shot is the ball's own: chains of arcs that
+/// join up, a make is a descent through the ring and nothing else is, and
+/// nothing ever passes into the iron, the glass or the floor.
+#[test]
+fn the_recorded_ball_path_is_the_physical_one() {
+    use super::ball::{IRON, RING_RADIUS};
+    let rims = rims();
+    let (mut makes, mut misses, mut contacts) = (0, 0, 0);
+    for rec in games(6) {
+        assert!(!rec.ball_arcs.is_empty());
+        // Sorted, and each arc starts where the one before it was cut short.
+        for w in rec.ball_arcs.windows(2) {
+            assert!(w[1].t0 >= w[0].t0 - 1e-3, "arcs out of order");
+        }
+        for e in &rec.events {
+            let EventKind::Shot { made, blocked_by, .. } = &e.kind else {
+                continue;
+            };
+            let rim = rims[e.offense as usize];
+            // Sample the recorded path finely from the release for 6 s.
+            let mut t = e.time;
+            let mut last: Option<(Vec2, f32)> = None;
+            let mut down_through = false;
+            let mut iron_dive = false;
+            while t < e.time + 6.0 {
+                let Some((p, z)) = rec.ball_at(t) else {
+                    // The ball was taken by a hand: the flight is over.
+                    if t > e.time + 0.2 {
+                        break;
+                    }
+                    t += 0.002;
+                    continue;
+                };
+                assert!(z >= BALL_RADIUS - 0.01, "under the floor: {z}");
+                // Never inside the iron: nearest point of the ring.
+                let d = p.dist(rim);
+                let ring = ((d - RING_RADIUS).powi(2) + (z - RIM_HEIGHT).powi(2)).sqrt();
+                if d > 1e-3 && ring < BALL_RADIUS + IRON - 0.02 {
+                    iron_dive = true;
+                }
+                if let Some((q, y)) = last {
+                    if y > RIM_HEIGHT - 0.2 && z <= RIM_HEIGHT - 0.2 && q.dist(rim) < RING_RADIUS && p.dist(rim) < RING_RADIUS {
+                        down_through = true;
+                    }
+                    // Per 2 ms the ball does not jump.
+                    assert!(q.dist(p) < 0.08 && (y - z).abs() < 0.08, "ball jumps in a step at {t}");
+                    if y > BALL_RADIUS + 0.05 && z <= BALL_RADIUS + 0.05 {
+                        contacts += 1;
+                    }
+                }
+                last = Some((p, z));
+                t += 0.002;
+            }
+            assert!(!iron_dive, "ball inside the iron");
+            if *made {
+                makes += 1;
+                assert!(down_through, "a make at {} did not go down through the ring", e.time);
+            } else {
+                misses += 1;
+                assert!(!down_through, "a miss at {} went down through the ring", e.time);
+            }
+            let _ = blocked_by;
+        }
+    }
+    assert!(makes > 100 && misses > 100 && contacts > 50, "{makes} {misses} {contacts}");
 }
 
 
