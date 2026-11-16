@@ -45,6 +45,7 @@ mod stance_hooks;
 /// worth in contest on his next look.
 const SHOT_HEAT: f32 = 0.16;
 const HEAT_CONTEST: f32 = 0.55;
+const HEAT_REAL: f32 = 0.45;
 /// A pass the passer reads as likelier than this to be lost is not thrown.
 const SWING_RISK_MAX: f32 = 0.22;
 const GAME: f32 = 1.14;
@@ -4414,6 +4415,9 @@ impl Game {
         let _ = off_dribble;
         let p = self.op(h);
         let (kind, c, near) = self.look(h);
+        // The defense has had its eye on a man who has been shooting: help
+        // comes sooner and hands are closer, for his shots as for his looks.
+        let c = (c + HEAT_REAL * self.heat_of(h)).min(1.4);
         let edge = self.play.edge;
         let c = c * edge;
         self.play.edge = 1.0;
