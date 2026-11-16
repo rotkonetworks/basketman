@@ -286,6 +286,12 @@ def main():
         check(st["time"] > 0 and st["steps"] > 0, "stepped")
         check(isinstance(st["assistant_notes"], list), "live state carries the assistant's notes")
         st = p.call("live_step", seconds=600)
+        # A stop (the other bench's timeout, say) ends a step early: play on
+        # until ten minutes of the game have gone by.
+        for _ in range(10):
+            if st["time"] >= 600 or st["over"]:
+                break
+            st = p.call("live_step", seconds=600 - st["time"])
         feeds = p.call("live_feeds")
         sc = feeds["scores"]
         check(len(sc["games"]) >= 2 and sc["games"][0]["yours"], "other games of the day are listed, ours first")
