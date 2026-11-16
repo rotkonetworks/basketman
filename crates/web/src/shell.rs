@@ -25,16 +25,30 @@ pub(crate) enum Tier {
     Medium,
     /// A bottom bar and one panel at a time.
     Narrow,
+    /// A phone held sideways: short and wide. A slim rail on the left, a
+    /// thin strip of pages on top, the rest is content.
+    Side,
+}
+
+impl Tier {
+    /// A phone in either hand: touch sizes, and pages that scroll sideways
+    /// rather than squeeze.
+    pub(crate) fn phone(self) -> bool {
+        matches!(self, Tier::Narrow | Tier::Side)
+    }
 }
 
 /// Window width in points above which the layout is wide.
 const WIDE_FROM: f32 = 1100.0;
-/// Below this width, or this height (a phone on its side), it is narrow.
+/// Below this width it is narrow.
 const MEDIUM_FROM: f32 = 700.0;
-const MIN_HEIGHT: f32 = 480.0;
+/// Shorter than this, and wider than tall, it is a phone on its side.
+const SIDE_BELOW: f32 = 500.0;
 
 pub(crate) fn tier_for(size: egui::Vec2) -> Tier {
-    if size.x < MEDIUM_FROM || size.y < MIN_HEIGHT {
+    if size.y < SIDE_BELOW && size.x > size.y {
+        Tier::Side
+    } else if size.x < MEDIUM_FROM {
         Tier::Narrow
     } else if size.x < WIDE_FROM {
         Tier::Medium
@@ -159,12 +173,14 @@ pub(crate) struct Shell {
     pub stage: crate::scenes::Stage,
     /// The size class of the last frame, to notice a change.
     pub last_tier: Option<Tier>,
+    /// A phone on its side, on the match: the rail is out over the court.
+    pub rail_open: bool,
 }
 
 pub(crate) const BAR_TOP: f32 = 52.0;
 const SPECTRUM_H: f32 = 3.0;
 
-fn reset_id() -> egui::Id {
+pub(crate) fn reset_id() -> egui::Id {
     egui::Id::unique("basketman-reset-scroll")
 }
 
@@ -308,7 +324,13 @@ pub(crate) fn panel_with(
 /// A row of tabs inside a panel. Returns the tab picked.
 pub(crate) fn tab_row(ui: &mut Ui, tabs: &[&str], current: usize, narrow: bool) -> Option<usize> {
     let mut hit = None;
-    let h = if narrow { 40.0 } else { 30.0 };
+    let h = if narrow {
+        40.0
+    } else if theme::side() {
+        36.0
+    } else {
+        30.0
+    };
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::hover());
     let each = rect.width() / tabs.len().max(1) as f32;
     for (i, label) in tabs.iter().enumerate() {
@@ -328,7 +350,7 @@ pub(crate) fn tab_row(ui: &mut Ui, tabs: &[&str], current: usize, narrow: bool) 
             r.center(),
             Align2::CENTER_CENTER,
             *label,
-            FontId::new(if narrow { 13.0 } else { 12.5 }, theme::semibold()),
+            FontId::new(if narrow || theme::side() { 13.0 } else { 12.5 }, theme::semibold()),
             if on { theme::BG } else { theme::TEXT_DIM },
         );
         if resp.clicked() {
@@ -377,7 +399,7 @@ pub(crate) fn is_fullscreen(ctx: &egui::Context) -> bool {
 }
 
 /// 1,075,205 as 1.08M, for a phone.
-fn short_money(v: i64) -> String {
+pub(crate) fn short_money(v: i64) -> String {
     let a = v.abs() as f64;
     let s = if a >= 1e6 {
         format!("{:.2}M", a / 1e6)
@@ -472,7 +494,16 @@ impl App {
             self.tab = Tab::Film;
         }
         if self.sh.last_tier != Some(tier) {
+            // Turning the phone: what was open stays open.
+            if let Some(was) = self.sh.last_tier {
+                self.sh.hud.carry(was, tier);
+            }
             self.sh.last_tier = Some(tier);
+        }
+        theme::set_side(tier == Tier::Side);
+        if tier == Tier::Side {
+            self.shell_side(ui, screen);
+            return;
         }
         {
             // Big enough to touch on a phone.
@@ -498,9 +529,9 @@ impl App {
         let rail_w = match tier {
             Tier::Wide => 104.0,
             Tier::Medium => 74.0,
-            Tier::Narrow => 0.0,
+            Tier::Narrow | Tier::Side => 0.0,
         };
-        let short = screen.height() < MIN_HEIGHT;
+        let short = screen.height() < 480.0;
         let bottom_h = match (narrow, short) {
             (false, _) => 0.0,
             (true, true) => 44.0,
@@ -551,14 +582,14 @@ impl App {
         }
         self.top_bar(ui, top, tier, portrait_bar);
         match tier {
-            Tier::Narrow => self.bottom_bar(ui, bottom),
+            Tier::Narrow | Tier::Side => self.bottom_bar(ui, bottom),
             _ => self.rail(ui, rail, tier),
         }
         self.take_link(ui.ctx());
     }
 
     /// 1 to 6 open the groups, Alt+Left goes back, F11 is full screen.
-    fn shell_keys(&mut self, ctx: &egui::Context) {
+    pub(crate) fn shell_keys(&mut self, ctx: &egui::Context) {
         if ctx.egui_wants_keyboard_input() || self.search.open {
             return;
         }
@@ -740,7 +771,7 @@ impl App {
         let name_w = match tier {
             Tier::Wide => 190.0,
             Tier::Medium => 150.0,
-            Tier::Narrow => (left_room - 52.0).clamp(80.0, 190.0),
+            Tier::Narrow | Tier::Side => (left_room - 52.0).clamp(80.0, 190.0),
         };
         l.allocate_ui_with_layout(vec2(name_w, 40.0), Layout::top_down(Align::Min), |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
@@ -1059,8 +1090,14 @@ mod tests {
         assert_eq!(tier_for(vec2(1024.0, 768.0)), Tier::Medium);
         assert_eq!(tier_for(vec2(390.0, 844.0)), Tier::Narrow);
         assert_eq!(tier_for(vec2(430.0, 932.0)), Tier::Narrow);
-        // A phone on its side is narrow however wide it is.
-        assert_eq!(tier_for(vec2(800.0, 380.0)), Tier::Narrow);
+        // A phone on its side is its own layout, however wide it is.
+        assert_eq!(tier_for(vec2(800.0, 380.0)), Tier::Side);
+        assert_eq!(tier_for(vec2(844.0, 390.0)), Tier::Side);
+        assert_eq!(tier_for(vec2(932.0, 430.0)), Tier::Side);
+        assert_eq!(tier_for(vec2(667.0, 375.0)), Tier::Side);
+        assert_eq!(tier_for(vec2(1100.0, 499.0)), Tier::Side);
+        assert_eq!(tier_for(vec2(1100.0, 500.0)), Tier::Wide);
+        assert_eq!(tier_for(vec2(360.0, 480.0)), Tier::Narrow);
         assert_eq!(tier_for(vec2(1100.0, 700.0)), Tier::Wide);
         assert_eq!(tier_for(vec2(1099.0, 700.0)), Tier::Medium);
         assert_eq!(tier_for(vec2(700.0, 600.0)), Tier::Medium);

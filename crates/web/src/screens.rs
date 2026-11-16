@@ -62,7 +62,8 @@ impl App {
     pub(crate) fn screen(&mut self, ui: &mut Ui, stage: Rect, tier: Tier) {
         let full = ui.ctx().content_rect();
         let bd = self.inset_backdrop();
-        let narrow = tier == Tier::Narrow;
+        let narrow = tier.phone();
+        let side = tier == Tier::Side;
         let g = if narrow { 8.0 } else { 12.0 };
         let tab = self.tab;
         // The match paints its own place: the court.
@@ -80,6 +81,15 @@ impl App {
             Tab::Squad => self.screen_squad(ui, &bd, stage, tier, g, full),
             Tab::Player => self.screen_player(ui, &bd, stage, tier, g, full),
             Tab::Tactics => self.screen_tactics(ui, &bd, stage, tier, g, full),
+            Tab::Training | Tab::Reserves if side => {
+                // No room for the floor: the page has all of it.
+                self.sh
+                    .stage
+                    .hall(ui, Kind::Data, &self.world, self.team, full, full);
+                let salt = if tab == Tab::Training { "training" } else { "reserves" };
+                let min_w = Self::narrow_min(tab, tier);
+                panel_wide(ui, stage, salt, min_w, |ui| self.page_body(ui, &bd, tab));
+            }
             Tab::Training | Tab::Reserves => {
                 // A panel on the left and the practice floor beside it.
                 let (scene, rest) = match tier {
@@ -87,6 +97,7 @@ impl App {
                         let c = cols(stage, &[-1.0, 700.0_f32.min(stage.width() * 0.6)], g);
                         (c[0], c[1])
                     }
+                    Tier::Side => unreachable!("handled above"),
                     _ => {
                         let h = if narrow {
                             (stage.height() * 0.28).max(140.0)
@@ -124,7 +135,7 @@ impl App {
                 } else {
                     "reserves"
                 };
-                let min_w = if narrow { Self::narrow_min(tab) } else { 0.0 };
+                let min_w = if narrow { Self::narrow_min(tab, tier) } else { 0.0 };
                 panel_wide(ui, rest, salt, min_w, |ui| self.page_body(ui, &bd, tab));
             }
             Tab::Film => {
@@ -132,7 +143,7 @@ impl App {
                     .stage
                     .hall(ui, Kind::Data, &self.world, self.team, full, full);
                 let min_w = if narrow {
-                    Self::narrow_min(Tab::Film)
+                    Self::narrow_min(Tab::Film, tier)
                 } else {
                     0.0
                 };
@@ -150,9 +161,9 @@ impl App {
                 let detail = matches!(tab, Tab::Club | Tab::Game | Tab::Compare);
                 let rect = stage;
                 let salt = tab.label();
-                let min_w = if narrow { Self::narrow_min(tab) } else { 0.0 };
+                let min_w = if narrow { Self::narrow_min(tab, tier) } else { 0.0 };
                 panel_wide(ui, rect, salt, min_w, |ui| {
-                    if narrow && detail {
+                    if tier == Tier::Narrow && detail {
                         self.back_button(ui);
                     }
                     self.page_body(ui, &bd, tab)
@@ -162,7 +173,13 @@ impl App {
     }
 
     /// How wide a page wants to be on a phone before it scrolls sideways.
-    pub(crate) fn narrow_min(tab: Tab) -> f32 {
+    pub(crate) fn narrow_min(tab: Tab, tier: Tier) -> f32 {
+        // Sideways there is more room: less need to scroll.
+        let cap = if tier == Tier::Side { 520.0 } else { f32::MAX };
+        Self::narrow_want(tab).min(cap)
+    }
+
+    fn narrow_want(tab: Tab) -> f32 {
         match tab {
             Tab::Staff
             | Tab::Scouting
@@ -246,8 +263,8 @@ impl App {
                     panel(ui, stage, "mail_list", |ui| self.mail_or_agenda(ui, bd, &shown));
                 }
             }
-            Tier::Medium => {
-                let c = cols(stage, &[330.0, -1.0], g);
+            Tier::Medium | Tier::Side => {
+                let c = cols(stage, &[if tier == Tier::Side { 300.0 } else { 330.0 }, -1.0], g);
                 panel(ui, c[0], "mail_list", |ui| self.mail_or_agenda(ui, bd, &shown));
                 panel(ui, c[1], "mail_read", |ui| self.mail_pane(ui, bd, &shown));
             }
@@ -311,7 +328,7 @@ impl App {
                 panel(ui, c[1], "results", |ui| self.results(ui, bd));
                 self.league_more(ui, bd, c[2], &more, false);
             }
-            Tier::Medium => {
+            Tier::Medium | Tier::Side => {
                 let c = cols(stage, &[-1.0, -1.0], g);
                 panel(ui, c[0], "standings", |ui| self.standings(ui, bd));
                 let mut tabs = vec!["Fixtures"];
@@ -469,8 +486,8 @@ impl App {
             .stage
             .hall(ui, Kind::Data, &self.world, self.team, full, full);
         let _ = (tier, g);
-        let min_w = if tier == Tier::Narrow {
-            Self::narrow_min(Tab::Finances)
+        let min_w = if tier.phone() {
+            Self::narrow_min(Tab::Finances, tier)
         } else {
             0.0
         };
@@ -491,18 +508,18 @@ impl App {
         let mine = self
             .profile
             .is_some_and(|p| self.world.teams[self.team].roster.contains(&p));
-        let narrow = tier == Tier::Narrow;
+        let narrow = tier.phone();
         if narrow || !mine {
             self.sh
                 .stage
                 .hall(ui, Kind::Data, &self.world, self.team, full, full);
             let min_w = if narrow {
-                Self::narrow_min(Tab::Player)
+                Self::narrow_min(Tab::Player, tier)
             } else {
                 0.0
             };
             panel_wide(ui, stage, "player", min_w, |ui| {
-                if narrow {
+                if tier == Tier::Narrow {
                     self.back_button(ui);
                 }
                 self.profile(ui, bd)
@@ -574,7 +591,23 @@ impl App {
             });
             return;
         }
+        if tier == Tier::Side {
+            // List on the left, the player on the right; no scene.
+            self.sh
+                .stage
+                .hall(ui, Kind::Data, &self.world, self.team, full, full);
+            let c = cols(stage, &[-1.0, -1.0], g);
+            panel_with(ui, c[0], "squad_list", false, |ui| self.squad_roster(ui, &order, true));
+            let pick = self.sh.pick;
+            panel(ui, c[1], "squad_detail", |ui| {
+                if let Some(p) = pick {
+                    self.squad_detail(ui, bd, p, true);
+                }
+            });
+            return;
+        }
         let (scene, roster_r, detail_r) = match tier {
+            Tier::Side => unreachable!("handled above"),
             Tier::Wide => {
                 let c = cols(stage, &[430.0, -1.0, 390.0], g);
                 (c[1], c[0], c[2])
