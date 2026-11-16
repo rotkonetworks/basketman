@@ -3,8 +3,7 @@
 //! and tables) are the ones in the other files; this only decides where they
 //! are put and which of them share a panel.
 
-use basketman_core::command::Command;
-use eframe::egui::{self, Align, Layout, Rect, Ui, pos2, vec2};
+use eframe::egui::{self, Rect, Ui, pos2, vec2};
 
 use crate::app::{App, Tab};
 use crate::scenes::Kind;
@@ -519,135 +518,7 @@ impl App {
         g: f32,
         full: Rect,
     ) {
-        let slot = self.tactics_prepare();
-        let narrow = tier == Tier::Narrow;
-        // Where the half court is seen, and where the panels go.
-        let (scene, left, right) = match tier {
-            Tier::Wide => {
-                let c = cols(stage, &[320.0, -1.0, 450.0], g);
-                (c[1], Some(c[0]), c[2])
-            }
-            Tier::Medium => {
-                let (top, rest) = split_top(stage, stage.height() * 0.44, g);
-                let c = cols(rest, &[300.0, -1.0], g);
-                (top, Some(c[0]), c[1])
-            }
-            Tier::Narrow => {
-                let (top, rest) = phone_split(stage, (stage.height() * 0.42).min(340.0), g);
-                (top, None, rest)
-            }
-        };
-        let tactics = self.world.teams[self.team].playbook[slot].tactics.clone();
-        let cast = tactics.cast(&self.world.players);
-        let board = tactics.layout();
-        let selected = self.room.selected;
-        let drawing = self.room.drawing;
-        // The strip of controls over the picture.
-        let strip_h = if narrow { 40.0 } else { 34.0 };
-        let strip = Rect::from_min_size(
-            pos2(scene.left() + 8.0, scene.top() + 6.0),
-            vec2(
-                (scene.width() - 16.0).min(if narrow { 360.0 } else { 520.0 }),
-                strip_h,
-            ),
-        );
-        let free = Rect::from_min_max(pos2(scene.left(), strip.bottom() + 4.0), scene.max);
-        let out = self.sh.stage.tactics(
-            ui,
-            &self.world,
-            self.team,
-            &board,
-            &cast,
-            selected,
-            drawing,
-            full,
-            scene,
-            free,
-        );
-        if let Some(i) = out.picked
-            && cast[i].is_some()
-        {
-            self.room.selected = cast[i];
-        }
-        if out.board != board {
-            let mut t = tactics.clone();
-            t.draw(out.board);
-            let _ = self.world.apply(Command::SetTactics { slot, tactics: t });
-        }
-        // Controls.
-        crate::shell::glass(ui, strip, 12, true);
-        let mut row = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(strip.shrink2(vec2(8.0, 3.0)))
-                .layout(Layout::left_to_right(Align::Center)),
-        );
-        row.set_clip_rect(strip);
-        let mut drawing_now = self.room.drawing;
-        row.selectable_value(&mut drawing_now, false, "Move");
-        row.selectable_value(&mut drawing_now, true, "Draw runs");
-        let some_runs = board.runs.iter().any(Option::is_some);
-        let mut clear = false;
-        if row
-            .add_enabled(some_runs, egui::Button::new("Clear"))
-            .clicked()
-        {
-            clear = true;
-        }
-        if !narrow {
-            row.label(
-                theme::mono("drag a player on the floor")
-                    .size(11.0)
-                    .color(theme::TEXT_MUTE),
-            );
-        }
-        self.room.drawing = drawing_now;
-        if clear {
-            let mut b = board.clone();
-            b.runs = [None; 5];
-            let mut t = tactics.clone();
-            t.draw(b);
-            let _ = self.world.apply(Command::SetTactics { slot, tactics: t });
-        }
-
-        if let Some(l) = left {
-            panel(ui, l, "tactics_left", |ui| {
-                self.playbook(ui, bd);
-                ui.add_space(8.0);
-                self.instructions(ui, bd);
-            });
-        }
-        let mut tabs = vec!["Squad", "Board", "Drill"];
-        if narrow {
-            tabs.insert(0, "Plays");
-        }
-        let cur = self.sh.tactics_tab.min(tabs.len() - 1);
-        let mut pick = None;
-        panel_with(ui, right, "tactics_right", false, |ui| {
-            pick = tab_row(ui, &tabs, cur, narrow);
-            egui::ScrollArea::vertical()
-                .id_salt(("tactics_body", tabs[cur]))
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    match tabs[cur] {
-                        "Plays" => {
-                            self.playbook(ui, bd);
-                            ui.add_space(8.0);
-                            self.instructions(ui, bd);
-                        }
-                        "Squad" => {
-                            self.squad_card(ui, bd);
-                            ui.add_space(8.0);
-                            self.selected_card(ui, bd);
-                        }
-                        "Board" => self.board_card(ui, bd, slot),
-                        _ => self.rehearsal_card(ui, bd),
-                    }
-                });
-        });
-        if let Some(p) = pick {
-            self.sh.tactics_tab = p;
-        }
+        self.tactics_screen(ui, bd, stage, tier, g, full);
     }
 
     // ---- squad -----------------------------------------------------------
