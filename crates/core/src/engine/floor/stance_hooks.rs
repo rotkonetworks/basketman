@@ -403,7 +403,7 @@ impl Game {
         }
     }
 
-    fn nearest_defender_of(&self, t: usize, p: Vec2) -> (usize, f32) {
+    pub(super) fn nearest_defender_of(&self, t: usize, p: Vec2) -> (usize, f32) {
         let mut best = (0, f32::MAX);
         for dk in 0..5 {
             let d = self.m[1 - t][dk].pos.dist(p);
@@ -426,6 +426,7 @@ impl Game {
             pose.moving = self.face_court(m.vel);
         }
         pose.speed_dm = (speed * 10.0).round().min(255.0) as u8;
+        self.hands_pose(t, k, pose);
         pose.foot = st.foot;
         pose.planted = st.planted;
         pose.balance = (st.balance * 100.0).round() as u8;

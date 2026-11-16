@@ -17,6 +17,7 @@ pub mod contact;
 mod defense;
 mod flight;
 mod floor;
+mod hands;
 mod offense;
 mod shot;
 mod stance;

@@ -177,6 +177,26 @@ pub fn roll_footwork(id: PlayerId, attrs: &Attributes, body: &Body) -> f32 {
         .clamp(1.0, 20.0)
 }
 
+/// How good the weak hand is, 1..=20: his handling, less a gap that is a
+/// pure function of his id (some men are two-handed, most are not). Draws
+/// nothing from the generation stream.
+pub fn roll_off_hand(id: PlayerId, attrs: &Attributes) -> f32 {
+    let noise = (crate::scouting::skew(id, 0x0FF4_A7D5) + crate::scouting::skew(id, 0x6B1D_0C33)) * 0.5;
+    (attrs[Attr::Handling] - 4.5 + noise * 7.0).clamp(1.0, 20.0)
+}
+
+impl Player {
+    /// The weak hand's rating, from the stored number or, for a player
+    /// that was never given one, from his id.
+    pub fn off_hand_skill(&self) -> f32 {
+        if self.off_hand >= 0.5 {
+            self.off_hand
+        } else {
+            roll_off_hand(self.id, &self.attrs)
+        }
+    }
+}
+
 /// Saves from before Footwork hold twenty numbers: the missing one reads as
 /// zero, which no real attribute is, and `World::repair_new_fields` fills it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -414,6 +434,11 @@ pub struct Player {
     /// made before signatures existed, until they are repaired on load.
     #[serde(default)]
     pub signatures_rolled: bool,
+    /// Innate: how well the weak hand handles, passes and finishes, 1..=20
+    /// (0 in a save from before it existed; `World::repair_new_fields`
+    /// fills it, and `off_hand_skill` reads it either way).
+    #[serde(default)]
+    pub off_hand: f32,
 }
 
 impl Player {

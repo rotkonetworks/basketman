@@ -701,6 +701,58 @@ pub enum Footwork {
     JumpStop,
 }
 
+/// What a hand is doing. Recorded per hand and drawn as recorded.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HandKind {
+    /// Hanging at the side, or an old recording.
+    #[default]
+    Rest,
+    /// Ready: up in front, elbow bent, between the ball and the man.
+    Guard,
+    /// Pushing the dribbling ball down and taking it back.
+    Dribble,
+    /// Holding the ball.
+    Hold,
+    /// Reaching for the ball (a poke, a strip, a swipe at a ball in the air).
+    Reach,
+    /// Up in a shooter's face.
+    Up,
+    /// Out in a passing lane.
+    Lane,
+    /// A target shown to the passer.
+    Target,
+    /// Taking a pass.
+    Catch,
+    /// Releasing a pass.
+    Throw,
+}
+
+/// One hand: where it is, relative to the body's centre in court
+/// coordinates (centimetres, height above the floor) and what it is doing.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandRec {
+    pub dx: i16,
+    pub dy: i16,
+    pub z: u16,
+    pub kind: HandKind,
+}
+
+/// The kinds of pass.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PassKind {
+    #[default]
+    Chest,
+    Bounce,
+    Overhead,
+    Lob,
+    /// One hand, off the dribble or round a man.
+    Push,
+    /// Handed to a man next to him.
+    Handoff,
+    /// Long and flat: an outlet or a throw-in.
+    Outlet,
+}
+
 /// Where the ball handler is in his dribble.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Dribble {
@@ -764,6 +816,9 @@ pub struct Pose {
     /// Dribbling hand: 1 right, -1 left, 0 none.
     #[serde(default)]
     pub hand: i8,
+    /// The two hands, right then left.
+    #[serde(default)]
+    pub hands: [HandRec; 2],
 }
 
 impl Default for Pose {
@@ -785,6 +840,7 @@ impl Default for Pose {
             balance: 100,
             dribble: Dribble::None,
             hand: 0,
+            hands: [HandRec::default(); 2],
         }
     }
 }
@@ -891,6 +947,9 @@ pub struct PassRec {
     pub to: u8,
     pub at: Vec2,
     pub inbound: bool,
+    /// How it was thrown.
+    #[serde(default)]
+    pub kind: PassKind,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

@@ -1072,6 +1072,9 @@ impl World {
             if p.attrs[Attr::Footwork] < 0.5 {
                 p.attrs[Attr::Footwork] = crate::player::roll_footwork(p.id, &p.attrs, &p.body);
             }
+            if p.off_hand < 0.5 {
+                p.off_hand = crate::player::roll_off_hand(p.id, &p.attrs);
+            }
             if !p.signatures_rolled {
                 p.assign_signatures();
             }

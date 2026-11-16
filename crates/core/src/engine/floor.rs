@@ -8,6 +8,7 @@ use super::ball::{self, Ball, Flown, Hand, v3};
 use super::contact::{self, Bulk, Touch};
 use super::defense::{self, View, is_zone};
 use super::flight::{self, Path};
+use super::hands::Hands;
 use super::offense;
 use super::shot::{self, Errors};
 use super::stance::{self, Handler, Skill, Stance};
@@ -28,6 +29,7 @@ use crate::rng::Rng;
 use crate::tactics::{Brief, DefenseScheme, OffenseSet, Press};
 
 mod finish;
+mod hands_hooks;
 mod stance_hooks;
 
 // ---- the shot's error model -------------------------------------------
@@ -841,6 +843,8 @@ pub(super) struct Game {
     restart_cut: bool,
     /// The officials, if a crew was assigned: what they see and call.
     ofc: Option<Ofc>,
+    /// Both hands of each player (attack frame).
+    hands: [[Hands; 5]; 2],
 }
 
 impl Game {
@@ -918,6 +922,7 @@ impl Game {
             steal_flew: 0.0,
             restart_cut: false,
             ofc: None,
+            hands: [[Hands::NONE; 5]; 2],
             m,
             frame: 0,
             play: Play::idle(),
@@ -998,6 +1003,14 @@ impl Game {
                         }
                     }
                     self.handler.flip();
+                    for side in &mut self.hands {
+                        for hs in side {
+                            for h in &mut hs.h {
+                                h.p.x = -h.p.x;
+                                h.p.y = -h.p.y;
+                            }
+                        }
+                    }
                     self.frame = o;
                     if let Some((path, _)) = self.loose.as_mut() {
                         *path = path.flipped();
@@ -1604,6 +1617,7 @@ impl Game {
         self.watch_stuck();
         self.move_ball();
         self.pick_up();
+        self.hands_tick();
         if let Some(rec) = &mut self.rec {
             for (t, side) in self.sides.iter().enumerate() {
                 rec.fatigue[t] += side.on.iter().map(|&i| side.slots[i].fatigue).sum::<f32>() / 5.0;
@@ -3483,6 +3497,7 @@ impl Game {
                 to: j as u8,
                 at: crate::replay::to_court(a, self.play.o),
                 inbound: self.play.inbound,
+                kind: crate::replay::PassKind::Chest,
             });
         }
         if !safe {

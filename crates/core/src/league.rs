@@ -1469,7 +1469,9 @@ pub(crate) fn generate_player(
         renown: Default::default(),
         signatures: Vec::new(),
         signatures_rolled: false,
+        off_hand: 0.0,
     };
+    player.off_hand = crate::player::roll_off_hand(id, &player.attrs);
     let overall = player.overall();
     let upside = match age {
         ..=23 => rng.f32() * 4.0,
