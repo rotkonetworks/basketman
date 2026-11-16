@@ -2386,6 +2386,8 @@ pub fn league(games: usize) {
         calm as f32 / g * 100.0
     );
     println!("games by number of timeouts (0..7+): {by_timeouts:?}");
+}
+
 /// Make rates of the launch model at fixed spots, by size of error at the
 /// ring: the table the shooting errors are fitted from. `LAUNCH="lat,depth"`
 /// sets the unit error in metres: lat0,lat per m,depth0,depth per m.
