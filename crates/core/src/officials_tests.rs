@@ -150,7 +150,10 @@ fn a_better_crew_errs_less_over_many_games() {
 #[test]
 fn a_wrong_call_that_is_overturned_is_corrected_in_the_box_score() {
     let (mut overturned, mut lost) = (0, 0);
-    for seed in 0..12 {
+    // A bench has one challenge a game and wins it a few times in a hundred
+    // games: twelve games were too few to count on a win, so the book is
+    // checked in every game of thirty-six and the win is asked of the lot.
+    for seed in 0..36 {
         let (r, rec, _) = live_game(seed, true);
         for side in 0..2 {
             // The book adds up.
@@ -184,16 +187,14 @@ fn a_wrong_call_that_is_overturned_is_corrected_in_the_box_score() {
                 }
             }
         }
-        let overturned_wrong_kind = rec
-            .calls
-            .iter()
-            .filter(|c| c.review.is_some_and(|r| r.overturned) && matches!(c.truth, Ruling::Foul { .. }))
-            .count();
+        // The true foul of a call put right (a charge that was a block) is an
+        // event of its own, so it is among the fouls logged already; what is
+        // taken off is the foul that was called.
         let sheet: i32 = r.boxes.iter().flatten().map(|(_, l)| l.pf as i32).sum();
         let logged: i32 = expect.values().sum();
-        assert_eq!(sheet, logged + overturned_wrong_kind as i32, "seed {seed}");
+        assert_eq!(sheet, logged, "seed {seed}");
     }
-    assert!(overturned > 0, "no challenge succeeded in twelve games");
+    assert!(overturned > 0, "no challenge succeeded in thirty-six games");
     let _ = lost;
 }
 

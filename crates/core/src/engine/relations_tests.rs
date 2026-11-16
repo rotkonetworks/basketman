@@ -198,7 +198,12 @@ fn contested_shots_go_in_less_and_closer_ones_more() {
             let al = lineup(&w.teams[b], &w.players);
             let (_, rec) = simulate_recorded(&hl, &al, &Rules::fiba(), &mut Rng::new(seed * 77 + g as u64));
             for e in &rec.events {
-                if let EventKind::Shot { kind, made, contest, .. } = &e.kind {
+                if let EventKind::Shot { kind, made, contest, fouled, .. } = &e.kind {
+                    // A miss that drew the whistle is a trip to the line, not
+                    // a field goal attempt (the box score does not count it).
+                    if *fouled && !*made {
+                        continue;
+                    }
                     let k = match kind {
                         crate::court::ShotKind::Rim => 0,
                         crate::court::ShotKind::Mid => 1,
