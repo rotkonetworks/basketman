@@ -231,6 +231,32 @@ pub(crate) fn command_of(live: &LiveRound, s: &SuggestedInput) -> Command {
     }
 }
 
+/// What a note's button does right now: in live play only a timeout or a
+/// substitution can be asked for, so a change of defense or a word becomes
+/// a timeout to make it in; inside a stoppage it is done directly. The
+/// last is whether it can be done at all.
+pub(crate) fn action_of(live: &LiveRound, s: &basketman_core::observations::Suggestion) -> (String, Command, bool) {
+    let stopped = matches!(live.stoppage(), Some(st) if st != basketman_core::league::Stoppage::Final);
+    match &s.input {
+        SuggestedInput::Defense(_) | SuggestedInput::Shout { .. } if !stopped => {
+            let wanted = live.game.timeout_wanted(live.side);
+            let left = live.game.timeouts_left(live.side);
+            let label = if wanted {
+                "Timeout called".to_string()
+            } else {
+                format!("Call a timeout to change it ({left} left)")
+            };
+            (label, Command::Timeout, !wanted && left > 0)
+        }
+        SuggestedInput::Timeout => (
+            s.label.clone(),
+            Command::Timeout,
+            !live.game.timeout_wanted(live.side) && live.game.timeouts_left(live.side) > 0,
+        ),
+        input => (s.label.clone(), command_of(live, input), true),
+    }
+}
+
 /// The commands that need nothing from the game.
 fn command_of_kind(s: &SuggestedInput) -> Option<Command> {
     Some(match s {
@@ -335,12 +361,13 @@ impl Feeds {
                 if let (Some(s), Some(cmds), Some(live)) =
                     (&note.suggestion, commands.as_deref_mut(), c.live)
                 {
-                    let ok = !stale && !live.game.is_over();
+                    let (label, command, can) = action_of(live, s);
+                    let ok = !stale && !live.game.is_over() && can;
                     if ui
-                        .add_enabled(ok, egui::Button::new(&s.label).small())
+                        .add_enabled(ok, egui::Button::new(label).small())
                         .clicked()
                     {
-                        cmds.push(command_of(live, &s.input));
+                        cmds.push(command);
                     }
                 }
             });
@@ -1125,6 +1152,33 @@ mod tests {
         }
         // Left of the basket for the shooter is left on the page.
         assert!(h.at(-3.0, 5.0).x < h.at(3.0, 5.0).x);
+    }
+
+    /// In live play a note about the defense can only ask for a timeout; at
+    /// a stoppage the same note changes the defense.
+    #[test]
+    fn a_note_about_tactics_asks_for_a_timeout_in_live_play() {
+        use basketman_core::league::World;
+        use basketman_core::observations::Suggestion;
+        use basketman_core::tactics::DefenseScheme;
+        let mut w = World::generate(3, 8);
+        let mut live = w.kickoff(0).unwrap();
+        let s = Suggestion {
+            label: "Go zone".into(),
+            input: SuggestedInput::Defense(DefenseScheme::Zone23),
+        };
+        // Before the tip: direct.
+        let (_, cmd, ok) = action_of(&live, &s);
+        assert!(matches!(cmd, Command::Orders(_)) && ok);
+        for _ in 0..40 {
+            live.step();
+        }
+        assert_eq!(live.stoppage(), None);
+        let (label, cmd, ok) = action_of(&live, &s);
+        assert!(matches!(cmd, Command::Timeout) && ok, "{label}");
+        live.input(basketman_core::league::LiveInput::Timeout);
+        let (label, _, ok) = action_of(&live, &s);
+        assert!(!ok && label == "Timeout called");
     }
 
     #[test]

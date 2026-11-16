@@ -196,8 +196,6 @@ impl App {
     /// the pointer over it shows it on the board.
     pub(crate) fn choice_card(&mut self, ui: &mut Ui, c: Choice, width: f32, compact: bool) {
         let t = self.slot_tactics();
-        let on = c.is_on(&t);
-        let fit = c.fit(&t, &self.world.players);
         let slot = &self.world.teams[self.team].playbook[self.slot];
         let fam = match c {
             Choice::Offense(o) => Some(slot.familiarity_with(o, t.defense, t.press)),
@@ -205,6 +203,25 @@ impl App {
             Choice::Press(p) => Some(slot.familiarity_with(t.offense, t.defense, p)),
             Choice::Knob(..) => None,
         };
+        if self.choice_card_for(ui, c, width, compact, &t, fam) {
+            self.apply_choice(c);
+        }
+    }
+
+    /// The card for `c` against tactics `t` (the playbook's, or what a live
+    /// game is running) and the squad's familiarity `fam` with it. Returns
+    /// true when "Use this" is clicked.
+    pub(crate) fn choice_card_for(
+        &mut self,
+        ui: &mut Ui,
+        c: Choice,
+        width: f32,
+        compact: bool,
+        t: &Tactics,
+        fam: Option<f32>,
+    ) -> bool {
+        let on = c.is_on(t);
+        let fit = c.fit(t, &self.world.players);
         let opp = next_opponent(&self.world, self.team).map(|o| scout(&self.world, o));
         let vs = opp.as_ref().and_then(|o| match c {
             Choice::Offense(x) if x.good_vs().contains(&o.defense) => Some((
@@ -312,10 +329,8 @@ impl App {
         if ui.rect_contains_pointer(out.response.rect) && !on {
             self.room.hover_next = Some(c);
         }
-        if use_it {
-            self.apply_choice(c);
-        }
         ui.add_space(6.0);
+        use_it
     }
 
     /// The cards of one group, with the group's name over them.
