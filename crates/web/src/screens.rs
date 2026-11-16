@@ -243,19 +243,43 @@ impl App {
                         self.mail_pane(ui, bd, &shown);
                     });
                 } else {
-                    panel(ui, stage, "mail_list", |ui| self.mail_list(ui, bd, &shown));
+                    panel(ui, stage, "mail_list", |ui| self.mail_or_agenda(ui, bd, &shown));
                 }
             }
             Tier::Medium => {
                 let c = cols(stage, &[330.0, -1.0], g);
+                panel(ui, c[0], "mail_list", |ui| self.mail_or_agenda(ui, bd, &shown));
+                panel(ui, c[1], "mail_read", |ui| self.mail_pane(ui, bd, &shown));
+            }
+            Tier::Wide if stage.width() >= 1200.0 => {
+                // Mail, the open message and the agenda side by side.
+                let c = cols(stage, &[340.0, -1.0, 420.0], g);
                 panel(ui, c[0], "mail_list", |ui| self.mail_list(ui, bd, &shown));
                 panel(ui, c[1], "mail_read", |ui| self.mail_pane(ui, bd, &shown));
+                panel(ui, c[2], "agenda", |ui| self.agenda_panel(ui, bd));
             }
             Tier::Wide => {
-                let c = cols(stage, &[410.0, 640.0_f32.min(stage.width() - 410.0 - g)], g);
-                panel(ui, c[0], "mail_list", |ui| self.mail_list(ui, bd, &shown));
+                let c = cols(stage, &[410.0, -1.0], g);
+                panel(ui, c[0], "mail_list", |ui| self.mail_or_agenda(ui, bd, &shown));
                 panel(ui, c[1], "mail_read", |ui| self.mail_pane(ui, bd, &shown));
             }
+        }
+    }
+
+    /// Where there is room for one of them: the agenda or the mail list,
+    /// with a switch. The agenda is what opens first.
+    fn mail_or_agenda(&mut self, ui: &mut Ui, bd: &Backdrop, shown: &[basketman_core::inbox::Message]) {
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.sh.mail_tab, false, "Agenda");
+            let unread = self.world.unread();
+            let mail = if unread > 0 { format!("Mail ({unread})") } else { "Mail".to_string() };
+            ui.selectable_value(&mut self.sh.mail_tab, true, mail);
+        });
+        ui.add_space(6.0);
+        if self.sh.mail_tab {
+            self.mail_list(ui, bd, shown);
+        } else {
+            self.agenda_panel(ui, bd);
         }
     }
 

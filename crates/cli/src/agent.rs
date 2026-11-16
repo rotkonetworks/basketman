@@ -501,6 +501,57 @@ impl Session {
                 }
                 v
             }
+            "agenda" => {
+                let days = get_u64(a, "days")?.unwrap_or(21).clamp(1, 120) as u32;
+                to_json(&w.agenda(days))
+            }
+            "reports" => {
+                // The scout's assignments and his reports, newest first,
+                // each with its text; `club` narrows them to one opponent
+                // and adds the games of theirs he could still watch.
+                let club = get_u64(a, "club")?.map(|c| c as usize);
+                if club.is_some_and(|c| c >= w.teams.len()) {
+                    return Err(AgentError::new("out_of_range", "there is no such club"));
+                }
+                let mut all: Vec<&basketman_core::opponent::OpponentReport> = match club {
+                    Some(c) => w.reports_on(c),
+                    None => w.scouting.opponent_reports.iter().rev().collect(),
+                };
+                all.truncate(20);
+                let reports: Vec<Value> = all
+                    .iter()
+                    .map(|r| {
+                        let mut j = to_json(r);
+                        j["date"] = json!(w.day_label(r.day));
+                        j["club_name"] = json!(w.teams[r.team].name);
+                        j["confidence_label"] = json!(r.confidence_label());
+                        j["text"] = json!(w.report_text(r));
+                        j
+                    })
+                    .collect();
+                let assignments: Vec<Value> = w
+                    .scouting
+                    .assignments
+                    .iter()
+                    .map(|s| {
+                        json!({"day": s.day, "date": w.day_label(s.day), "club": s.team,
+                               "club_name": w.teams[s.team].name})
+                    })
+                    .collect();
+                let watchable: Vec<Value> = club
+                    .map(|c| {
+                        w.watchable_games(c)
+                            .into_iter()
+                            .map(|(day, vs, home)| {
+                                json!({"day": day, "date": w.day_label(day), "vs": vs,
+                                       "vs_name": w.teams[vs].name, "home": home})
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                json!({"has_scout": w.teams[me].office.staffer(Job::Scout).is_some(),
+                       "assignments": assignments, "reports": reports, "watchable": watchable})
+            }
             "leaders" => {
                 let n = get_u64(a, "n")?.unwrap_or(15) as usize;
                 match get_u64(a, "division")? {
@@ -518,7 +569,7 @@ impl Session {
             "appearances" => to_json(&w.view_appearances(me).ok_or_else(none)?),
             other => {
                 return Err(bad(format!(
-                    "unknown view {other}; try summary, full, own, squad, player, club, club_profile, career, job_offer, inbox, table, fixtures, box_score, market, draft, calendar, leaders, league, finance, fans, names, appearances"
+                    "unknown view {other}; try summary, full, own, squad, player, club, club_profile, career, job_offer, inbox, table, fixtures, box_score, market, draft, calendar, agenda, reports, leaders, league, finance, fans, names, appearances"
                 )));
             }
         })

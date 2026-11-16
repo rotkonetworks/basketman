@@ -4,6 +4,7 @@
 //! same save produces the same results natively and in wasm. Keep it that way:
 //! avoid `powf`/`exp`/`ln` and friends in sim code (libm differs per target).
 
+pub mod agenda;
 pub mod arena;
 pub mod assistant;
 pub mod board;
@@ -36,7 +37,9 @@ pub mod legal;
 pub mod media;
 pub mod observations;
 pub mod ops;
+pub mod opponent;
 pub mod player;
+pub mod prep;
 pub mod pricing;
 pub mod projection;
 pub mod replay;
@@ -54,6 +57,7 @@ pub mod staff;
 pub mod tactics;
 pub mod tax;
 pub mod training;
+pub mod travel;
 pub mod view;
 pub mod view_more;
 
@@ -65,3 +69,6 @@ mod club_tests;
 mod fame_tests;
 #[cfg(test)]
 mod signature_tests;
+
+#[cfg(test)]
+mod schedule_tests;

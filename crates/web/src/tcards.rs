@@ -433,6 +433,9 @@ impl App {
             } else {
                 ui.label(dim("No game is coming, so the board tests against a sample club."));
             }
+            if !o.source.is_empty() {
+                ui.label(RichText::new(&o.source).size(12.5).color(theme::ACCENT));
+            }
             ui.add_space(4.0);
             for line in &o.tendencies {
                 ui.label(RichText::new(line).size(13.0).color(theme::TEXT));

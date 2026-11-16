@@ -9,7 +9,7 @@
 
 use crate::court::{Vec2, v};
 use crate::league::{TeamId, World};
-use crate::player::{Attr, Player};
+use crate::player::{Attr, Player, PlayerId};
 use crate::tactics::{DefenseScheme, OffenseSet, Press, Tactics};
 
 /// A three-point shooter, for counting how many a team has.
@@ -902,6 +902,9 @@ pub struct Opponent {
     /// their offense.
     pub we_attack_with: Vec<OffenseSet>,
     pub we_defend_with: Vec<DefenseScheme>,
+    /// Where this comes from: the scout's report (with its date and how far
+    /// to trust it) or the assistant's own read.
+    pub source: String,
 }
 
 /// The club we play next, if there is a game to play.
@@ -919,6 +922,14 @@ pub fn sample_opponent(world: &World, team: TeamId) -> TeamId {
 }
 
 pub fn scout(world: &World, opp: TeamId) -> Opponent {
+    // With a manager in charge and a report from the chief scout, the card
+    // goes by what he found, not by what the assistant can read off the
+    // club's own tactics.
+    if world.watch.is_some()
+        && let Some(r) = world.latest_report(opp)
+    {
+        return scout_from_report(world, opp, r);
+    }
     let them = &world.teams[opp];
     let t = them.tactics();
     let mut tendencies = vec![
@@ -972,6 +983,63 @@ pub fn scout(world: &World, opp: TeamId) -> Opponent {
             .into_iter()
             .filter(|d| t.offense.bad_vs().contains(d))
             .collect(),
+        source: if world.watch.is_some() && next_opponent(world, world.watch.unwrap_or(0)) == Some(opp) {
+            "The assistant's read. No scout has seen them: send him to one of their games.".to_string()
+        } else {
+            String::new()
+        },
+    }
+}
+
+/// The card from the scout's report: only what he claims, as he claims it.
+fn scout_from_report(world: &World, opp: TeamId, r: &crate::opponent::OpponentReport) -> Opponent {
+    let them = &world.teams[opp];
+    let real = them.tactics();
+    let name = |p: PlayerId| world.players[p as usize].name.clone();
+    let mut tendencies = Vec::new();
+    match r.offense {
+        Some(o) => tendencies.push(format!("They run {}: {}", o.label().to_lowercase(), o.line().to_lowercase())),
+        None => tendencies.push("The scout could not tell what they run on offense.".into()),
+    }
+    match r.defense {
+        Some(d) => tendencies.push(format!("They defend in {}: {}", d.label().to_lowercase(), d.line().to_lowercase())),
+        None => tendencies.push("The scout could not tell what they defend.".into()),
+    }
+    if let Some(p) = r.press.filter(|p| *p != Press::None) {
+        tendencies.push(format!("They press ({}).", p.label().to_lowercase()));
+    }
+    if let Some(t) = r.tempo {
+        tendencies.push(format!("They play at {}.", t.label()));
+    }
+    if let Some(m) = r.shot_mix {
+        tendencies.push(format!("About {}% of their shots are threes, {}% at the rim.", m[2], m[0]));
+    }
+    if let Some(&(p, share)) = r.through.first() {
+        tendencies.push(format!("The offense goes through {} (about {share}% of the shots).", name(p)));
+    }
+    for c in &r.changes {
+        tendencies.push(format!(
+            "Behind by {} they went to {}.",
+            c.margin.unsigned_abs(),
+            c.defense.label().to_lowercase()
+        ));
+    }
+    let (off, def) = (r.offense.unwrap_or(real.offense), r.defense.unwrap_or(real.defense));
+    Opponent {
+        team: opp,
+        name: them.name.clone(),
+        offense: off,
+        defense: def,
+        press: r.press.unwrap_or(real.press),
+        pace: real.pace,
+        tendencies,
+        we_attack_with: OffenseSet::ALL.into_iter().filter(|o| o.good_vs().contains(&def)).collect(),
+        we_defend_with: DefenseScheme::ALL.into_iter().filter(|d| off.bad_vs().contains(d)).collect(),
+        source: format!(
+            "From the scout's report of {}, confidence {}. Clubs change their tactics, so check the date.",
+            world.day_label(r.day),
+            r.confidence_label()
+        ),
     }
 }
 

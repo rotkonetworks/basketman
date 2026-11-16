@@ -249,9 +249,12 @@ pub struct World {
     /// The manager's reputation, jobs and offers; see `career.rs`.
     #[serde(default)]
     pub career: crate::career::Career,
+    /// Where each club has been lately; see `travel.rs`.
+    #[serde(default)]
+    pub travel: Vec<crate::travel::TeamTravel>,
 }
 
-const CITIES: [&str; 20] = [
+pub(crate) const CITIES: [&str; 20] = [
     "Helsinki", "Tampere", "Turku", "Oulu", "Lahti", "Kuopio", "Tallinn", "Riga", "Kaunas",
     "Vilnius", "Gdansk", "Malmo", "Bergen", "Aarhus", "Rostock", "Tartu", "Espoo", "Vantaa",
     "Pori", "Joensuu",
@@ -410,6 +413,7 @@ impl World {
             round_seeds: Vec::new(),
             club: Default::default(),
             career: Default::default(),
+            travel: Vec::new(),
         };
         world.fixtures = schedule_tiers(&world.teams);
         world.date_fixtures();
@@ -530,6 +534,8 @@ impl World {
         let n = played.iter().position(|&i| i == fixture)?;
         let f = &self.fixtures[fixture];
         let side = if f.home == team { 0 } else { 1 };
+        // Our own game gets its preparation and its trip's toll like any.
+        let (home, away) = self.lineups_for(f.home, f.away, Some(f.day));
         // The other games of the block are played now, from their own seeds,
         // so the day around the user's game can be shown as it goes. The
         // results are kept for `complete_block`; only the games of today
@@ -542,13 +548,13 @@ impl World {
             .copied()
             .filter(|&i| i != fixture && self.fixtures[i].day == today)
             .collect();
-        let jobs: Vec<(TeamId, TeamId, u64, bool)> = others
+        let jobs: Vec<(TeamId, TeamId, u64, bool, Option<u32>)> = others
             .iter()
             .map(|&i| {
                 let g = &self.fixtures[i];
                 let i_n = played.iter().position(|&j| j == i).unwrap_or(0);
                 let record = g.day == today || self.watch == Some(g.home) || self.watch == Some(g.away);
-                (g.home, g.away, seeds[i_n], record)
+                (g.home, g.away, seeds[i_n], record, Some(g.day))
             })
             .collect();
         let mut pre = Vec::new();
@@ -560,13 +566,17 @@ impl World {
                     timeline: crate::live_feed::Timeline::of(rec),
                 });
             }
-            // Only a game the user's club plays in keeps its recording.
-            let keep = self.watch == Some(self.fixtures[i].home) || self.watch == Some(self.fixtures[i].away);
+            // Only a game the user's club plays in, or one the scout was
+            // sent to, keeps its recording.
+            let g = &self.fixtures[i];
+            let keep = self.watch == Some(g.home)
+                || self.watch == Some(g.away)
+                || self.scout_wants(g.day, g.home, g.away);
             pre.push((i, result, recording.filter(|_| keep)));
         }
         let game = LiveMatch::new(
-            &lineup(&self.teams[f.home], &self.players),
-            &lineup(&self.teams[f.away], &self.players),
+            &home,
+            &away,
             &self.rules,
             Rng::new(seeds[n]),
             Some(side),
@@ -668,6 +678,7 @@ impl World {
             })
             .collect();
         let seeds: Vec<u64> = played.iter().map(|_| self.rng.next_u64()).collect();
+        self.travel_for(&played);
         self.round_seeds
             .extend(played.iter().copied().zip(seeds.iter().copied()));
         (played, seeds)
@@ -685,11 +696,10 @@ impl World {
     /// `record` says which are recorded for the viewer.
     pub(crate) fn simulate_batch(
         &self,
-        jobs: &[(TeamId, TeamId, u64, bool)],
+        jobs: &[(TeamId, TeamId, u64, bool, Option<u32>)],
     ) -> Vec<(GameResult, Option<Recording>)> {
-        let simulate = |&(home, away, seed, record): &(TeamId, TeamId, u64, bool)| {
-            let home = lineup(&self.teams[home], &self.players);
-            let away = lineup(&self.teams[away], &self.players);
+        let simulate = |&(home, away, seed, record, day): &(TeamId, TeamId, u64, bool, Option<u32>)| {
+            let (home, away) = self.lineups_for(home, away, day);
             let rng = &mut Rng::new(seed);
             // Recording does not change the result, only keeps it.
             if record {
@@ -731,14 +741,16 @@ impl World {
             self.econ_round_start(&all);
         }
         self.econ_gates(&played);
-        let jobs: Vec<(TeamId, TeamId, u64, bool)> = played
+        let jobs: Vec<(TeamId, TeamId, u64, bool, Option<u32>)> = played
             .iter()
             .zip(&seeds)
             .filter(|(i, _)| !pre.iter().any(|p| p.0 == **i))
             .map(|(&i, &seed)| {
                 let f = &self.fixtures[i];
-                let record = self.watch == Some(f.home) || self.watch == Some(f.away);
-                (f.home, f.away, seed, record)
+                let record = self.watch == Some(f.home)
+                    || self.watch == Some(f.away)
+                    || self.scout_wants(f.day, f.home, f.away);
+                (f.home, f.away, seed, record, Some(f.day))
             })
             .collect();
         let mut simulated = self.simulate_batch(&jobs).into_iter();
@@ -753,12 +765,18 @@ impl World {
             }) else {
                 continue;
             };
-            if let Some(recording) = recording
-                && let Some(old) = self.replay.replace((i, recording))
-            {
-                self.tapes.push(old);
-            }
             let (home, away) = (self.fixtures[i].home, self.fixtures[i].away);
+            if let Some(recording) = recording {
+                if self.watch == Some(home) || self.watch == Some(away) || self.watch.is_none() {
+                    if let Some(old) = self.replay.replace((i, recording)) {
+                        self.tapes.push(old);
+                    }
+                } else {
+                    // Made for the scout: he writes it up and it is dropped.
+                    let day = self.fixtures[i].day;
+                    self.scout_game(day, home, away, false, &result, &recording);
+                }
+            }
             // Playoff games are kept, but the table and the season's
             // averages are the regular season's.
             let counted = !self.fixtures[i].playoff;
@@ -779,7 +797,9 @@ impl World {
                     self.season_stats[*pid as usize].add(line);
                     if line.secs > 0 {
                         self.games_played[*pid as usize] += 1;
-                        if self.scouting.is_shortlisted(*pid) {
+                        if self.scouting.is_shortlisted(*pid)
+                            && self.scout_free_for(self.fixtures[i].day, home, away)
+                        {
                             let opponent = [away, home][side];
                             self.scouting.watch(
                                 *pid,
@@ -823,6 +843,7 @@ impl World {
         self.dressing_week();
         let before = self.weekly_training();
         self.pay_wages();
+        self.ai_tactics_drift();
         self.round += 1;
         self.playoffs_step(&all);
         self.after_round(&all, &before);
@@ -852,7 +873,10 @@ impl World {
         }
         // Media work and events take some of the week's training.
         let media = self.media_factors();
+        // A day lost to a long trip was spent resting.
+        let weeks: Vec<Schedule> = (0..self.teams.len()).map(|t| self.week_schedule(t)).collect();
         for team in &mut self.teams {
+            let week = &weeks[team.id];
             let gym = self
                 .econ
                 .books
@@ -867,12 +891,12 @@ impl World {
                     continue;
                 }
                 let keen = (0.9 + 0.2 * player.morale) * media[p as usize];
-                train_week(player, &team.schedule, &mut self.rng, teaching * keen, wear);
+                train_week(player, week, &mut self.rng, teaching * keen, wear);
             }
             train_playbook(
                 &mut team.playbook,
                 team.active,
-                team.schedule.familiarity_gain() * team.office.drilling(),
+                week.familiarity_gain() * team.office.drilling(),
             );
         }
         before

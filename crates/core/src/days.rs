@@ -175,17 +175,30 @@ impl World {
         if due.is_empty() {
             return;
         }
-        let jobs: Vec<(TeamId, TeamId, u64, bool)> = due
+        let jobs: Vec<(TeamId, TeamId, u64, bool, Option<u32>)> = due
             .iter()
             .map(|&i| {
                 let f = &self.friendlies[i];
-                (f.home, f.away, self.rng.next_u64(), false)
+                (
+                    f.home,
+                    f.away,
+                    self.rng.next_u64(),
+                    self.scout_wants(f.day, f.home, f.away),
+                    None,
+                )
             })
             .collect();
         let results = self.simulate_batch(&jobs);
         let regulation = (self.rules.periods as u32 * self.rules.period_secs) as f32;
-        for (&i, (result, _)) in due.iter().zip(results) {
+        for (&i, (result, recording)) in due.iter().zip(results) {
             let (home, away) = (self.friendlies[i].home, self.friendlies[i].away);
+            if let Some(rec) = recording
+                && self.watch != Some(home)
+                && self.watch != Some(away)
+            {
+                let day = self.friendlies[i].day;
+                self.scout_game(day, home, away, true, &result, &rec);
+            }
             for (side, team) in [home, away].into_iter().enumerate() {
                 for (pid, line) in &result.boxes[side] {
                     if line.secs == 0 {

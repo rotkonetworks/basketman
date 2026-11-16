@@ -192,7 +192,7 @@ pub enum Stop {
     Draft,
 }
 
-fn hint(offense: OffenseSet, defense: DefenseScheme, press: Press) -> String {
+pub(crate) fn hint(offense: OffenseSet, defense: DefenseScheme, press: Press) -> String {
     let d = match defense {
         DefenseScheme::Zone23 => {
             "A 2-3 zone gives up the three and the high post: shooters and ball movement beat it, \
@@ -815,6 +815,7 @@ impl World {
             self.answer_bid(bid);
         }
         self.fame_daily();
+        self.drop_stale_assignments();
     }
 
     fn answer_bid(&mut self, bid: Bid) {
@@ -912,7 +913,6 @@ impl World {
             (f.home, false)
         };
         let team = &self.teams[opp];
-        let t = team.tactics();
         let s = &self.standings[opp];
         let rank = self.table().iter().position(|&x| x == opp).unwrap_or(0) + 1;
         let per_game = |p: PlayerId| {
@@ -942,16 +942,22 @@ impl World {
                 s.points_against as f32 / (s.wins + s.losses).max(1) as f32,
             );
         }
-        body += &format!(
-            "They run {} on offense and defend {}{}.\n\n{}\n\n",
-            t.offense.label().to_lowercase(),
-            t.defense.label().to_lowercase(),
-            match t.press {
-                Press::None => String::new(),
-                p => format!(", with a {}", p.label().to_lowercase()),
-            },
-            hint(t.offense, t.defense, t.press),
-        );
+        // The assistant only has the league's numbers: how they play is
+        // for the scout to say.
+        let games = self.team_stats[opp].games;
+        if games >= 3 {
+            let o = &self.team_stats[opp].own;
+            body += &format!(
+                "From the numbers: {:.0}% of their shots are threes, they shoot {:.0}% from the \
+                 field and turn it over {:.1} times a game.\n",
+                pct(o.tpa, o.fga),
+                pct(o.fgm, o.fga),
+                o.tov as f32 / games as f32,
+            );
+        } else {
+            body += "It is too early in the year to say how they play from the numbers.\n";
+        }
+        body += &format!("{}\n\n", self.report_pointer(opp));
         let mut players = Vec::new();
         if let Some(d) = danger {
             let p = &self.players[d as usize];
@@ -1078,6 +1084,10 @@ impl World {
                 players.push(p);
             }
             if let Some(line) = self.gate_line(i) {
+                body += &line;
+            }
+            let opp_id = [f.away, f.home][side];
+            if let Some(line) = self.prep_line(me, opp_id, gameday) {
                 body += &line;
             }
             body += "\nThe full replay and box score are on the Match screen.";

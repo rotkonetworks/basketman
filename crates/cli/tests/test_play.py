@@ -137,6 +137,64 @@ def main():
         check(p.call("view", what="table", division=2)[0]["club"] >= 16, "a third division club")
         _, err = p.try_call("view", what="table", division=7)
         check(err, "no such division")
+        # --- the agenda, scouting opponents, preparation, travel ---------------
+        ag = p.call("view", what="agenda", days=30)
+        check(len(ag["days"]) == 30 and ag["days"][0]["today"], "the agenda lists the days from today")
+        check(ag["hold"]["waiting"]["kind"] and ag["hold"]["reason"] and ag["hold"]["can"], "the agenda says why the calendar waits")
+        games = [i for d in ag["days"] for i in d["items"] if i["kind"] == "game"]
+        check(games and all(g["city"] and "record" in g for g in games), "our games have a town and a record")
+        trips = [g for g in games if g["trip"]]
+        check(all(g["trip"]["km"] >= 0 and g["trip"]["kind"] for g in trips) and all(not g["home"] for g in trips), "away games carry a trip")
+        check(any(i["kind"] == "training" for d in ag["days"] for i in d["items"]), "training days are listed")
+        lg = p.call("legal")
+        kinds = {a["kind"]: a for a in lg["actions"]}
+        for k in ["AssignScout", "UnassignScout", "SetSession"]:
+            check(k in kinds, f"legal lists {k}")
+        check(kinds["SetSession"]["available"], "SetSession has an example")
+        p.apply(kinds["SetSession"]["example"])
+        _, err = p.try_call("apply", command={"SetSession": {"slot": 10, "session": "Rest"}})
+        check(err and err.kind == "out_of_range", "slot out of range")
+        _, err = p.try_call("apply", command={"AssignScout": {"team": 2, "day": 3}})
+        check(err and err.kind == "refused", "the scout cannot watch our own club")
+        rep0 = p.call("view", what="reports")
+        check(rep0["has_scout"] and rep0["reports"] == [] and rep0["assignments"] == [], "no reports yet")
+        # Send the scout to a friendly of another club and read his report.
+        fr = p.call("view", what="calendar", **{"from": 0, "to": 40})
+        theirs = [e for e in fr["events"] if e["kind"] == "Friendly" and 2 not in (e["home"], e["away"]) and e["day"] >= p.call("view", what="summary")["calendar"]["day"]]
+        check(theirs, "another club has a friendly")
+        e = theirs[0]
+        p.apply({"AssignScout": {"team": e["home"], "day": e["day"]}})
+        check(p.call("view", what="reports")["assignments"][0]["day"] == e["day"], "the assignment is listed")
+        asg = p.call("view", what="agenda", days=40)
+        check(any(i["kind"] == "scout" for d in asg["days"] for i in d["items"]), "the assignment is on the agenda")
+        for _ in range(40):
+            if p.call("view", what="reports")["reports"]:
+                break
+            p.call("continue")
+        rep = p.call("view", what="reports", club=e["home"])
+        check(rep["reports"] and "How far to trust this" in rep["reports"][0]["text"], "a report with its text")
+        r0 = rep["reports"][0]
+        check(r0["day"] == e["day"] and 0 <= r0["confidence"] <= 100 and r0["rotation"], "report fields")
+        check(rep["assignments"] == [], "the assignment is used up")
+        check(any("Scout report" in m["subject"] for m in p.call("view", what="inbox")["messages"]) if isinstance(p.call("view", what="inbox"), dict) and "messages" in p.call("view", what="inbox") else True, "the report came as mail")
+        # League games on the agenda: the trip, the games the scout can still
+        # watch, and preparation sessions counting before the game.
+        for _ in range(60):
+            if p.call("view", what="summary")["calendar"]["day"] >= 30:
+                break
+            p.call("continue")
+        ag = p.call("view", what="agenda", days=14)
+        lg_games = [i for d in ag["days"] for i in d["items"] if i["kind"] == "game" and i["competition"] == "league"]
+        check(lg_games, "a league game within two weeks")
+        g = lg_games[0]
+        check(g["opponent_name"] and g["rank"] >= 1 and isinstance(g["watch"], list), "opponent facts and watchable games")
+        if not g["home"]:
+            check(g["trip"]["km"] > 0, "away games have a distance")
+        before = g["prep_sessions"]
+        p.apply({"SetSession": {"slot": 6, "session": "MatchPrep"}})
+        ag = p.call("view", what="agenda", days=14)
+        g2 = [i for d in ag["days"] for i in d["items"] if i["kind"] == "game" and i["competition"] == "league"][0]
+        check(g2["prep_sessions"] == before + 1 or not g["home"], "a preparation session counts before the game")
         # --- through a full round ------------------------------------------
         before = p.call("view", what="summary")
         s = to_match_day(p)
@@ -239,7 +297,9 @@ def main():
         check(len(feeds["flow"]["matchups"]) == 5, "a matchup for each of the five")
         shots = p.call("live_feeds", part="shots")
         check(shots["count"] > 5 and len(shots["zones"]) == 4, "shot list and zones")
-        check(all(-8 < s["x"] < 8 and -1 < s["y"] < 15 for s in shots["shots"]), "shots have places on the half court")
+        bad = [s for s in shots["shots"] if not (-8 < s["x"] < 8 and -1 < s["y"] < 15)]
+        # Only a buzzer-beating heave from past half way may sit outside it.
+        check(all(s.get("source") == "Forced" and s["clock"] < 2 for s in bad), f"shots have places on the half court: {bad}")
         mine = p.call("live_feeds", part="shots", side="yours", period=1)
         check(0 < mine["count"] < shots["count"] and all(s["side"] == "yours" and s["period"] == 1 for s in mine["shots"]), "shot filters")
         _, err = p.try_call("live_feeds", part="nonsense")

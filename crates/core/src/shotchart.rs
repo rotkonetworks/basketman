@@ -236,6 +236,13 @@ mod tests {
         assert!(share > 0.9, "only {share} of shots sit where their kind says");
         let z = zones(&list);
         assert_eq!(z.iter().map(|l| l.att as usize).sum::<usize>(), list.len());
-        assert!(list.iter().all(|s| s.x.abs() < 8.0 && s.y > -1.0 && s.y < 15.0));
+        // On the half court, bar the odd buzzer-beating heave from past
+        // half way (a shot forced by the clock in the last seconds of a
+        // period), which is real and sits where the ball was thrown from.
+        let heave = |s: &Shot| s.source == crate::replay::Source::Forced && s.clock < 2.0;
+        assert!(list
+            .iter()
+            .filter(|s| !heave(s))
+            .all(|s| s.x.abs() < 8.0 && s.y > -1.0 && s.y < 15.0));
     }
 }

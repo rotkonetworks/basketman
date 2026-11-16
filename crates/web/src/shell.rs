@@ -142,6 +142,11 @@ pub(crate) struct Shell {
     pub squad_full: bool,
     /// Phone: a message is open over the list.
     pub mail_open: bool,
+    /// The Inbox's list panel shows the mail (otherwise the agenda), where
+    /// the agenda has no panel of its own.
+    pub mail_tab: bool,
+    /// What the last action in the agenda said.
+    pub agenda_note: Option<String>,
     /// Which tab of a tabbed panel is open, per screen.
     pub tactics_tab: usize,
     pub league_tab: usize,
