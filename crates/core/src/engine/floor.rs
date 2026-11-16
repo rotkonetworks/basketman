@@ -806,6 +806,9 @@ pub(super) struct Game {
     dead_was: f32,
     /// Seconds a picked-off ball spent in the air.
     steal_flew: f32,
+    /// The picture was cut (timeout, end of a period) and the next restart
+    /// places the ten for the throw-in. Kept whether or not it is recorded.
+    restart_cut: bool,
 }
 
 impl Game {
@@ -878,6 +881,7 @@ impl Game {
             lost_by: None,
             dead_was: 0.0,
             steal_flew: 0.0,
+            restart_cut: false,
             m,
             frame: 0,
             play: Play::idle(),
@@ -1019,6 +1023,7 @@ impl Game {
                 self.event(EventKind::PeriodEnd);
                 self.wall += 4.0;
                 self.cut = true;
+                self.restart_cut = true;
                 let score = [self.sides[0].score, self.sides[1].score];
                 self.periods
                     .push([score[0] - self.before[0], score[1] - self.before[1]]);
@@ -1088,6 +1093,7 @@ impl Game {
         self.adapt(t);
         self.wall += 6.0;
         self.cut = true;
+        self.restart_cut = true;
         Some(t)
     }
 
@@ -2507,7 +2513,7 @@ impl Game {
         // After a timeout or between periods the picture is cut: the ten are
         // put where a throw-in finds them, the five on the floor now (those who
         // just came on too), and the ball is in the thrower's hands.
-        if self.cut && carrier.is_none() {
+        if std::mem::take(&mut self.restart_cut) && carrier.is_none() {
             let d = 1 - o;
             for k in 0..5 {
                 let p = self.play.spots[k];
