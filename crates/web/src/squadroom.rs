@@ -64,7 +64,14 @@ impl App {
         let cols = columns(narrow);
         let row_h = if narrow { 44.0 } else { 34.0 };
         ui.horizontal(|ui| {
-            theme::eyebrow(ui, &format!("First team / {} players", order.len()));
+            theme::eyebrow(
+                ui,
+                &if theme::side() {
+                    format!("{} players", order.len())
+                } else {
+                    format!("First team / {} players", order.len())
+                },
+            );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .add(egui::Button::new("Full table"))
@@ -89,7 +96,7 @@ impl App {
                 pos2(at, head.center().y),
                 anchor,
                 c.label.to_uppercase(),
-                FontId::new(10.0, egui::FontFamily::Monospace),
+                FontId::new(crate::theme::fs(10.0), egui::FontFamily::Monospace),
                 theme::TEXT_MUTE,
             );
         }
@@ -293,7 +300,7 @@ impl App {
                 });
             ui.label(
                 RichText::new("Underlined: what his training focus works on.")
-                    .size(11.5)
+                    .size(crate::theme::fs(11.5))
                     .color(theme::TEXT_MUTE),
             );
         });

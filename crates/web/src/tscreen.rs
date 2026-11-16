@@ -92,13 +92,27 @@ impl App {
                 let (a, b) = phone_split(stage, want.min(stage.height() * 0.6), g);
                 (None, a, b)
             }
+            Tier::Side => {
+                // The board has the full height; the cards the rest.
+                let board_h = stage.height() - 20.0 - 52.0;
+                let w = (board_h * 15.0 / 12.6 + 20.0).clamp(260.0, stage.width() * 0.5);
+                let c = cols(stage, &[w, -1.0], g);
+                (None, c[0], c[1])
+            }
         };
+        if tier == Tier::Side {
+            self.centre_panel_side(ui, centre);
+            self.cards_panel(ui, bd, right, false, false, true);
+            self.room.spots.cards = Some(right);
+            self.tour_overlay(ui);
+            return;
+        }
 
         if let Some(l) = left {
             panel(ui, l, "tactics_coach", |ui| self.coach_tab(ui, bd, false));
         }
         self.centre_panel(ui, bd, centre, narrow);
-        self.cards_panel(ui, bd, right, wide, narrow);
+        self.cards_panel(ui, bd, right, wide, narrow, false);
         self.room.spots.cards = Some(right);
         self.tour_overlay(ui);
     }
@@ -126,6 +140,24 @@ impl App {
             if !narrow {
                 ui.add_space(8.0);
                 self.result_strip(ui, bd);
+            }
+        });
+    }
+
+    /// A phone on its side: the board alone on the left, as tall as it
+    /// goes, with what it says (or the playback while a run is on) under it.
+    fn centre_panel_side(&mut self, ui: &mut Ui, rect: Rect) {
+        crate::shell::panel_with(ui, rect, "tactics_centre", false, |ui| {
+            let w = ui.available_width();
+            let under = if self.room.play.is_some() { 84.0 } else { 40.0 };
+            let h = (w * 12.6 / 15.0).min(ui.available_height() - under).max(120.0);
+            self.tactics_board(ui, vec2(w, h));
+            ui.add_space(4.0);
+            if self.room.play.is_some() {
+                self.playback_bar(ui);
+            } else {
+                let text = self.board_caption();
+                ui.label(RichText::new(text).size(13.0).color(theme::TEXT));
             }
         });
     }
@@ -266,17 +298,27 @@ impl App {
         }
     }
 
-    fn cards_panel(&mut self, ui: &mut Ui, bd: &Backdrop, rect: Rect, wide: bool, narrow: bool) {
+    fn cards_panel(&mut self, ui: &mut Ui, bd: &Backdrop, rect: Rect, wide: bool, narrow: bool, side: bool) {
         let names = tabs(wide);
         let cur = self.sh.tactics_tab.min(names.len() - 1);
         let mut pick = None;
         panel_with(ui, rect, "tactics_cards", false, |ui| {
+            if side {
+                // The board's own buttons live here, over the cards.
+                self.board_toolbar(ui, true);
+                ui.add_space(2.0);
+            }
             pick = tab_row(ui, &names, cur, narrow);
             let name = names[cur];
             let body = |this: &mut App, ui: &mut Ui| {
                 let w = ui.available_width();
+                let playing = this.room.play.is_some();
+                if side && playing {
+                    this.result_strip(ui, bd);
+                    ui.add_space(8.0);
+                }
                 match name {
-                    "Coach" => this.coach_tab(ui, bd, narrow),
+                    "Coach" => this.coach_tab(ui, bd, narrow || (side && !playing)),
                     "Offense" if narrow => this.card_row(ui, &[Group::Offense]),
                     "Defense" if narrow => this.card_row(ui, &[Group::Defense]),
                     "Style" if narrow => this.card_row(

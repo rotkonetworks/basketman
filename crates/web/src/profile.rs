@@ -164,7 +164,7 @@ fn radar(ui: &mut Ui, size: f32, series: &[([f32; 8], Color32)]) {
             c + d * (r + 8.0),
             align,
             label.to_uppercase(),
-            FontId::new(10.0, egui::FontFamily::Monospace),
+            FontId::new(crate::theme::fs(10.0), egui::FontFamily::Monospace),
             theme::TEXT_MUTE,
         );
     }

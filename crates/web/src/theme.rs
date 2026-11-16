@@ -357,9 +357,26 @@ pub(crate) fn spectrum(rect: Rect) -> Mesh {
 }
 
 /// Small uppercase mono label, used for section names and table headers.
+static SIDE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Set once a frame: the phone is on its side.
+pub fn set_side(on: bool) {
+    SIDE.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether the phone is on its side.
+pub fn side() -> bool {
+    SIDE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A font size: on a phone on its side nothing is smaller than 12.
+pub fn fs(size: f32) -> f32 {
+    if side() { size.max(12.0) } else { size }
+}
+
 pub fn eyebrow_text(text: &str) -> RichText {
     RichText::new(text.to_uppercase())
-        .font(FontId::new(10.5, FontFamily::Monospace))
+        .font(FontId::new(fs(10.5), FontFamily::Monospace))
         .extra_letter_spacing(1.1)
         .color(TEXT_MUTE)
 }

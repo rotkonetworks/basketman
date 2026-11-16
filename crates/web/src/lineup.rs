@@ -134,7 +134,7 @@ pub(crate) fn profile_figure(
                 at + vec2(11.0, 0.0),
                 Align2::LEFT_CENTER,
                 format!("{:.1} m", z),
-                FontId::new(10.0, theme::mono_semibold()),
+                FontId::new(crate::theme::fs(10.0), theme::mono_semibold()),
                 Color32::from_white_alpha(120),
             );
         }
@@ -145,7 +145,7 @@ pub(crate) fn profile_figure(
             pos2(a.x + 14.0, a.y - 3.0),
             Align2::LEFT_BOTTOM,
             format!("{:.0} cm", p.body.height_cm),
-            FontId::new(11.0, theme::mono_semibold()),
+            FontId::new(crate::theme::fs(11.0), theme::mono_semibold()),
             Color32::WHITE,
         );
     }
@@ -155,7 +155,7 @@ pub(crate) fn profile_figure(
             b,
             Align2::CENTER_BOTTOM,
             "league average",
-            FontId::new(10.0, theme::mono_semibold()),
+            FontId::new(crate::theme::fs(10.0), theme::mono_semibold()),
             Color32::from_white_alpha(120),
         );
     }

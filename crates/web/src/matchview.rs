@@ -22,7 +22,7 @@ use crate::view3d::{self, Cam3, FigureSpec, Preset, Scene, Vec3, v3};
 mod feeds;
 mod hud;
 pub(crate) use feeds::Ctx as FeedCtx;
-pub(crate) use hud::Hud;
+pub(crate) use hud::{Hud, HudPrefs};
 
 const LENGTH: f32 = 28.0;
 const WIDTH: f32 = 15.0;
@@ -174,6 +174,30 @@ pub(crate) fn view_buttons(ui: &mut Ui, mode: &mut ViewMode, commentary: bool) {
 thread_local! {
     /// A height the 3D court is drawn at, whatever its width.
     static FILL: std::cell::Cell<Option<f32>> = const { std::cell::Cell::new(None) };
+}
+
+/// What the 3D court draws over the picture. The match screen sets this
+/// from what the user chose; everywhere else all of it is on.
+#[derive(Copy, Clone)]
+pub(crate) struct Overlays {
+    pub names: bool,
+    pub swish: bool,
+    pub hint: bool,
+    pub cams: bool,
+}
+
+thread_local! {
+    static OVERLAYS: std::cell::Cell<Overlays> = const {
+        std::cell::Cell::new(Overlays { names: true, swish: true, hint: true, cams: true })
+    };
+}
+
+fn set_overlays(o: Overlays) {
+    OVERLAYS.with(|f| f.set(o));
+}
+
+fn overlays() -> Overlays {
+    OVERLAYS.with(std::cell::Cell::get)
 }
 
 /// Draw the 3D court this high until told otherwise (`None`).
@@ -804,6 +828,13 @@ fn paint_3d(
     if cam3.preset == Preset::Orbit {
         response.clone().on_hover_cursor(egui::CursorIcon::Grab);
     }
+    // Two fingers: pinch to zoom.
+    if ui.input(|i| i.multi_touch().is_some()) {
+        let pinch = ui.input(|i| i.zoom_delta());
+        if pinch != 1.0 {
+            cam3.zoom = (cam3.zoom * pinch).clamp(0.5, 4.0);
+        }
+    }
     if response.hovered() {
         let scroll = ui.input(|i| i.smooth_scroll_delta.y);
         if scroll != 0.0 {
@@ -900,7 +931,7 @@ fn paint_3d(
         let _p = crate::perf::scope("3d: project+sort");
         painter.add(Shape::mesh(scene.mesh(&cam, rect)));
     }
-    if let Some((end, age, points)) = swish {
+    if let Some((end, age, points)) = swish.filter(|_| overlays().swish) {
         paint_points(&painter, &cam, rect, end, age, points);
     }
 
@@ -918,7 +949,7 @@ fn paint_3d(
         };
         let scale = cam.scale(depth, rect);
         let size = (scale * 0.32).min(15.0);
-        if size >= 7.0 && rect.contains(head) {
+        if size >= 7.0 && rect.contains(head) && overlays().names {
             let text = initials(&p.name);
             let font = FontId::new(size, theme::mono_semibold());
             painter.text(
@@ -966,6 +997,7 @@ fn paint_3d(
     }
 
     // Camera buttons over the picture.
+    let ov = overlays();
     let bar = Rect::from_min_size(rect.min + vec2(8.0, 8.0), vec2(rect.width() - 16.0, 26.0));
     let mut row = ui.new_child(
         egui::UiBuilder::new()
@@ -973,7 +1005,7 @@ fn paint_3d(
             .layout(egui::Layout::left_to_right(egui::Align::Min)),
     );
     row.set_clip_rect(rect);
-    for preset in Preset::ALL {
+    for preset in Preset::ALL.into_iter().filter(|_| ov.cams) {
         let on = cam3.preset == preset;
         let mut button = egui::Button::selectable(on, preset.label());
         if !on {
@@ -989,13 +1021,15 @@ fn paint_3d(
     } else {
         "Scroll to zoom"
     };
-    painter.text(
+    if ov.hint {
+        painter.text(
         rect.left_bottom() + vec2(10.0, -8.0),
         Align2::LEFT_BOTTOM,
         hint,
-        FontId::new(11.0, theme::semibold()),
+        FontId::new(crate::theme::fs(11.0), theme::semibold()),
         Color32::from_white_alpha(150),
-    );
+        );
+    }
 }
 
 impl App {
@@ -1180,6 +1214,9 @@ impl App {
         let limit = self.world.rules.foul_limit;
         let queued = live.game.queued(side);
         let who = |pid: PlayerId| self.world.players[pid as usize].name.as_str();
+        // On a phone on its side the sheet is narrow: the figures that can
+        // wait are left out, so nothing needs to scroll sideways.
+        let compact = theme::side();
         let off = &mut self.touchline.off;
         if off.is_some_and(|id| !bench.iter().any(|p| p.id == id && p.on_court)) {
             *off = None;
@@ -1223,7 +1260,9 @@ impl App {
                                 } else {
                                     "Bench"
                                 }));
-                                if on_court {
+                                if on_court && compact {
+                                    header_row(ui, &["Energy", "PF"]);
+                                } else if on_court {
                                     header_row(
                                         ui,
                                         &[
@@ -1266,12 +1305,14 @@ impl App {
                                             text.color(theme::TEXT_DIM)
                                         },
                                     );
-                                    ui.label(
-                                        theme::mono(info.position.label()).color(theme::ACCENT),
-                                    );
+                                    if !compact {
+                                        ui.label(
+                                            theme::mono(info.position.label()).color(theme::ACCENT),
+                                        );
+                                    }
                                     ui.add(
                                         egui::ProgressBar::new(p.energy)
-                                            .desired_width(56.0)
+                                            .desired_width(if compact { 44.0 } else { 56.0 })
                                             .desired_height(8.0)
                                             .fill(match p.energy {
                                                 e if e >= 0.65 => theme::POS,
@@ -1286,18 +1327,23 @@ impl App {
                                     } else {
                                         fouls
                                     });
-                                    ui.label(theme::mono(p.line.pts.to_string()));
-                                    ui.label(theme::mono((p.line.secs / 60).to_string()));
-                                    for v in [p.line.reb(), p.line.ast] {
-                                        ui.label(theme::mono(v.to_string()));
+                                    if !compact {
+                                        ui.label(theme::mono(p.line.pts.to_string()));
+                                        ui.label(theme::mono((p.line.secs / 60).to_string()));
+                                        for v in [p.line.reb(), p.line.ast] {
+                                            ui.label(theme::mono(v.to_string()));
+                                        }
                                     }
-                                    if p.line.secs > 0 {
+                                    if compact {
+                                    } else if p.line.secs > 0 {
                                         ui.label(crate::pages::match_rating(p.line.rating()));
                                     } else {
                                         ui.label(theme::mono("-").color(theme::TEXT_MUTE));
                                     }
-                                    let (text, color) = mood(p);
-                                    ui.label(RichText::new(text).color(color));
+                                    if !compact {
+                                        let (text, color) = mood(p);
+                                        ui.label(RichText::new(text).color(color));
+                                    }
                                     ui.end_row();
                                 }
                             }

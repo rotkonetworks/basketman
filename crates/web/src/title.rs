@@ -74,17 +74,20 @@ impl App {
                 .then(y.strength.total_cmp(&x.strength))
         });
         let mut start = false;
+        // A phone on its side has no height to spare for the logo.
+        let side = crate::shell::tier_for(ui.ctx().content_rect().size()) == crate::shell::Tier::Side;
+        theme::set_side(side);
 
         egui::ScrollArea::vertical()
             .auto_shrink(false)
             .show(ui, |ui| {
                 ui.vertical_centered(|ui| {
-                    ui.add_space((ui.available_height() * 0.10).clamp(24.0, 110.0));
-                    ball(ui, 104.0);
-                    ui.add_space(14.0);
+                    ui.add_space(if side { 14.0 } else { (ui.available_height() * 0.10).clamp(24.0, 110.0) });
+                    ball(ui, if side { 56.0 } else { 104.0 });
+                    ui.add_space(if side { 6.0 } else { 14.0 });
                     ui.label(
                         RichText::new("basketman")
-                            .font(FontId::new(60.0, theme::mono_semibold()))
+                            .font(FontId::new(if side { 34.0 } else { 60.0 }, theme::mono_semibold()))
                             .color(theme::TEXT),
                     );
                     ui.label(
@@ -92,7 +95,7 @@ impl App {
                             .size(17.0)
                             .color(theme::TEXT_DIM),
                     );
-                    ui.add_space(30.0);
+                    ui.add_space(if side { 10.0 } else { 30.0 });
 
                     if self.career {
                         let club = self.world.teams[self.team].name.clone();
@@ -175,7 +178,7 @@ impl App {
                                         }
                                         rank += 1;
                                         let (rect, response) = ui.allocate_exact_size(
-                                            vec2(ui.available_width(), 34.0),
+                                            vec2(ui.available_width(), if side { 38.0 } else { 34.0 }),
                                             Sense::click(),
                                         );
                                         let painter = ui.painter_at(rect);

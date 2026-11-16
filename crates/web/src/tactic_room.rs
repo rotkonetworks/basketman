@@ -479,7 +479,7 @@ impl App {
                         rect.left_center() + vec2(x, 0.0),
                         Align2::LEFT_CENTER,
                         text,
-                        FontId::new(10.0, egui::FontFamily::Monospace),
+                        FontId::new(crate::theme::fs(10.0), egui::FontFamily::Monospace),
                         theme::TEXT_MUTE,
                     );
                 }

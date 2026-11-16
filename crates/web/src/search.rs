@@ -403,7 +403,7 @@ impl App {
                         ui.add_space(10.0);
                         ui.label(
                             egui::RichText::new("Up and Down to move, Enter to open, Esc to close")
-                                .size(11.5)
+                                .size(crate::theme::fs(11.5))
                                 .color(theme::TEXT_MUTE),
                         );
                         if let Some(open) = chosen {

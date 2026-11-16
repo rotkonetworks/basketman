@@ -26,6 +26,7 @@ mod scenes;
 mod screens;
 mod search;
 mod shell;
+mod side;
 mod signature_ui;
 mod squadroom;
 mod tactic_room;
