@@ -72,8 +72,39 @@ pub(crate) fn moments(rec: &Recording, what: &str) -> Vec<f32> {
         }
         out
     };
+    // Moments of the hands: the sequence starts four tenths before the pass.
+    let passes = |pred: &dyn Fn(&basketman_core::replay::PassRec, &Recording) -> bool| -> Vec<f32> {
+        rec.passes.iter().filter(|p| pred(p, rec)).map(|p| (p.time - 0.4).max(0.0)).collect()
+    };
+    let hoop_of = |rec: &Recording, p: &basketman_core::replay::PassRec| -> (f32, f32) {
+        let f = &rec.frames[rec.frame_at(p.time)];
+        if f.offense == 0 { (26.425, 7.5) } else { (1.575, 7.5) }
+    };
     match what {
-        // A defender sliding with the ball handler, who is dribbling.
+        "pass" => passes(&|p, _| !p.inbound && p.outcome == basketman_core::replay::PassOutcome::Caught && p.kind != basketman_core::replay::PassKind::Handoff),
+        "deflect" => passes(&|p, _| matches!(p.outcome, basketman_core::replay::PassOutcome::Tipped | basketman_core::replay::PassOutcome::Stolen)),
+        "bounce" => passes(&|p, _| p.kind == basketman_core::replay::PassKind::Bounce && p.outcome == basketman_core::replay::PassOutcome::Caught),
+        "lob" => passes(&|p, _| p.kind == basketman_core::replay::PassKind::Lob && p.outcome == basketman_core::replay::PassOutcome::Caught),
+        // A pass to a man at the rim.
+        "rimpass" => passes(&|p, rec| {
+            let h = hoop_of(rec, p);
+            let g = &rec.frames[rec.frame_at(p.time + 0.9)];
+            !p.inbound && g.pos[p.side as usize][p.to as usize].dist(basketman_core::court::Vec2 { x: h.0, y: h.1 }) < 3.0
+        }),
+        // Out of the paint to a man on the arc.
+        "kickout" => passes(&|p, rec| {
+            let h = hoop_of(rec, p);
+            let g = &rec.frames[rec.frame_at(p.time + 0.9)];
+            let hp = basketman_core::court::Vec2 { x: h.0, y: h.1 };
+            !p.inbound && p.at.dist(hp) < 3.6 && g.pos[p.side as usize][p.to as usize].dist(hp) > 6.0
+        }),
+        // Within three seconds of a ball screen.
+        "pnrpass" => passes(&|p, rec| {
+            rec.events.iter().any(|e| matches!(e.kind, EventKind::Screen { .. }) && p.time > e.time && p.time - e.time < 3.0)
+        }),
+        "poke" => rec.pokes.iter().map(|k| (k.time - 0.6).max(0.0)).collect(),
+        "pokeaway" => rec.pokes.iter().filter(|k| k.result == basketman_core::replay::PokeResult::Loose).map(|k| (k.time - 0.6).max(0.0)).collect(),
+        // A defender slides with the ball handler, who is dribbling.
         "slide" => streak(
             &|f, s, k| {
                 let Some((hs, hk)) = f.holder else { return false };
@@ -259,6 +290,16 @@ fn subject(rec: &Recording, what: &str, time: f32) -> Option<(usize, usize)> {
             let f = rec.frames.get(rec.frame_at(time + 0.05))?;
             f.holder.map(|(s, k)| (s as usize, k as usize))
         }
+        "pass" | "deflect" | "bounce" | "lob" | "rimpass" | "kickout" | "pnrpass" => rec
+            .passes
+            .iter()
+            .find(|p| (p.time - 0.4 - time).abs() < 0.011)
+            .map(|p| (p.side as usize, p.from as usize)),
+        "poke" | "pokeaway" => rec
+            .pokes
+            .iter()
+            .find(|k| (k.time - 0.6 - time).abs() < 0.011)
+            .map(|k| (k.side as usize, k.handler as usize)),
         "inbound" => rec.passes.iter().find(|p| p.inbound && (p.time - 1.4 - time).abs() < 0.01).map(|p| (p.side as usize, p.from as usize)),
         "chase" => {
             let f = rec.frames.get(rec.frame_at(time + 0.6))?;
@@ -307,6 +348,19 @@ fn follow_or_fixed(
     what: &str,
 ) -> Option<(super::Vec3, super::Vec3)> {
     use super::v3;
+    // Over the shoulder: behind and above the man, looking where he looks,
+    // for a crowd that blocks the side-on view.
+    if how == "shoulder" {
+        let (side, k) = subject(rec, what, time)?;
+        let f = rec.frames.get(rec.frame_at(at))?;
+        let hoop = if f.offense == 0 { (26.425, 7.5) } else { (1.575, 7.5) };
+        let p = f.pos[side][k];
+        let body = f.pose[side][k].body_dir().map_or((hoop.0 - p.x, hoop.1 - p.y), |d| (d.x, d.y));
+        let len = (body.0 * body.0 + body.1 * body.1).sqrt().max(0.2);
+        let (ux, uy) = (body.0 / len, body.1 / len);
+        let eye = v3(p.x - ux * 2.3 - uy * 0.5, p.y - uy * 2.3 + ux * 0.5, 3.1);
+        return Some((eye, v3(p.x + ux * 3.0, p.y + uy * 3.0, 1.2)));
+    }
     if how == "follow" {
         let (side, k) = subject(rec, what, time)?;
         let f0 = rec.frames.get(rec.frame_at(time + 0.3))?;
