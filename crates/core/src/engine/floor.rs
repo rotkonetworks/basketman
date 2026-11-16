@@ -11,6 +11,9 @@ use super::flight::{self, Path};
 use super::offense;
 use super::shot::{self, Errors};
 use super::{BoxLine, DT, GameResult, Lineup, Pause, Rules, Shout, Side};
+#[path = "officiating.rs"]
+mod officiating;
+use officiating::{Gate, Ofc};
 use crate::court::{
     KEY_DEPTH, KEY_HALF_WIDTH, HALF_WIDTH, BALL_RADIUS, BOARD_HALF, BOARD_LOW, BOARD_Y, GRAVITY, HOOP, LENGTH, NO_CHARGE_RADIUS, RIM_HEIGHT, ShotKind,
     Vec2, v,
@@ -485,6 +488,8 @@ enum FlightKind {
         /// Free throws to shoot once this missed shot has settled (he was
         /// fouled in the act and missed).
         foul_shots: u16,
+        /// What the officials counted the basket for, if it goes in.
+        ruled: u16,
         /// This is a free throw.
         line: bool,
     },
@@ -809,6 +814,8 @@ pub(super) struct Game {
     /// The picture was cut (timeout, end of a period) and the next restart
     /// places the ten for the throw-in. Kept whether or not it is recorded.
     restart_cut: bool,
+    /// The officials, if a crew was assigned: what they see and call.
+    ofc: Option<Ofc>,
 }
 
 impl Game {
@@ -882,6 +889,7 @@ impl Game {
             dead_was: 0.0,
             steal_flew: 0.0,
             restart_cut: false,
+            ofc: None,
             m,
             frame: 0,
             play: Play::idle(),
@@ -966,7 +974,11 @@ impl Game {
                 None
             }
             Stage::Play => {
-                let end = self.tick().or_else(|| {
+                // A review asked for or decided at this stoppage.
+                if let Gate::Pause(p) = self.review_gate() {
+                    return Some(p);
+                }
+                let end = self.forced_end().or_else(|| self.tick()).or_else(|| {
                     // A possession that will not end is ended; not with a shot in the air.
                     let idle = self.play.flight.is_none()
                         && self.play.after.is_none()
@@ -1063,6 +1075,7 @@ impl Game {
             periods,
             boxes: [boxes(&self.sides[0]), boxes(&self.sides[1])],
             possessions: self.possessions,
+            officiating: self.officiating(),
         }
     }
 
@@ -1446,6 +1459,7 @@ impl Game {
             }
         }
         self.ticks += 1;
+        self.officials_tick();
         for side in &mut self.m {
             for m in side {
                 m.hard = false;
@@ -3523,7 +3537,8 @@ impl Game {
             if r < strip {
                 return self.turnover(h, TurnoverKind::Stripped, Some(dk), 0.7);
             }
-            if r < strip + foul && self.called(1.0) {
+            let o = self.play.o;
+            if self.call(r < strip + foul, 1.0, FoulKind::ReachIn, (1 - o, dk), (o, h)) {
                 return self.floor_foul(dk, h, FoulKind::ReachIn);
             }
         }
@@ -3569,7 +3584,9 @@ impl Game {
         let beaten = !contained && (!guarded || self.rng.chance(p_beat));
         if beaten && guarded {
             // Beaten defenders reach.
-            if self.rng.chance(foul.min(0.95)) && self.called(1.0) {
+            let reach = self.rng.chance(foul.min(0.95));
+            let o = self.play.o;
+            if self.call(reach, 1.0, FoulKind::ReachIn, (1 - o, dk), (o, h)) {
                 return self.floor_foul(dk, h, FoulKind::ReachIn);
             }
             self.play.stun[dk] = self.play.stun[dk].max(0.4);
@@ -3787,17 +3804,20 @@ impl Game {
                 * (1.0 + 0.25 * (d_speed - 1.0).max(0.0))
                 * self.off().foul_mult(self.off().on[s])
                 / CALL_BASE;
-            if self.rng.chance(raw.min(0.9)) && self.called(1.0) {
+            let moved = self.rng.chance(raw.min(0.9));
+            let o = self.play.o;
+            if self.call(moved, 1.0, FoulKind::IllegalScreen, (o, s), (1 - o, dk)) {
                 return self.offensive_foul(s, dk, FoulKind::IllegalScreen);
             }
             // Fighting through it, a man grabs.
-            if delay > 0.0
-                && self.rng.chance(
+            if delay > 0.0 {
+                let grab = self.rng.chance(
                     (SCREEN_HOLD * self.def().foul_mult(self.def().on[dk]) / CALL_BASE).min(0.9),
-                )
-                && self.called(1.0)
-            {
-                return self.floor_foul(dk, s, FoulKind::Holding);
+                );
+                let o = self.play.o;
+                if self.call(grab, 1.0, FoulKind::Holding, (1 - o, dk), (o, s)) {
+                    return self.floor_foul(dk, s, FoulKind::Holding);
+                }
             }
         }
         let quality = if arrived {
@@ -3980,15 +4000,17 @@ impl Game {
         // metre closer to the basket has the better of the move.
         let gained = (self.play.post_from.dist(HOOP) - p.dist(HOOP)).clamp(-0.5, 1.8);
         let mult = self.def().foul_mult(self.def().on[dk]);
-        if r < strip + 0.07 * (1.0 + 0.6 * self.def().aggression()) * mult / CALL_BASE
-            && self.called(1.0)
-        {
+        let shoved =
+            r < strip + 0.07 * (1.0 + 0.6 * self.def().aggression()) * mult / CALL_BASE;
+        let o = self.play.o;
+        if self.call(shoved, 1.0, FoulKind::Pushing, (1 - o, dk), (o, h)) {
             return self.floor_foul(dk, h, FoulKind::Pushing);
         }
         // Moving a man who had his position is a foul, the more so the
         // further he was moved.
         let shove = POST_SHOVE + POST_SHOVE_RATE * (gained - POST_PAR).clamp(0.0, 1.1);
-        if self.rng.chance(shove.min(0.9) / CALL_BASE) && self.called(1.0) {
+        let pushed = self.rng.chance(shove.min(0.9) / CALL_BASE);
+        if self.call(pushed, 1.0, FoulKind::PostPushOff, (o, h), (1 - o, dk)) {
             return self.offensive_foul(h, dk, FoulKind::PostPushOff);
         }
         // Travels and three seconds.
@@ -4195,7 +4217,11 @@ impl Game {
                 / CALL_BASE;
             self.rng.chance(raw.min(0.95))
         });
-        let fouled = contact && self.called(1.0);
+        let o = self.play.o;
+        let fouled = match near {
+            Some(dk) => self.call(contact, 1.0, FoulKind::Shooting, (1 - o, dk), (o, h)),
+            None => false,
+        };
         let assist = self
             .play
             .assist
@@ -4429,6 +4455,7 @@ impl Game {
         };
         let flown = ball::fly(Ball { p: start, v: launch }, &hands[..nh]);
         let made = flown.made;
+        let ruled = self.call_count(kind, p, h, made);
         let blocker = flown.blocked.map(|(dk, _)| dk);
 
         if made || !fouled {
@@ -4476,6 +4503,7 @@ impl Game {
         let mut foul_shots = 0;
         if fouled && let Some(dk) = near_takeoff {
             let shots = if made { 1 } else { kind.points() };
+            self.shot_info(made, kind == ShotKind::Three);
             self.defensive_foul(dk, h, shots as u8, FoulKind::Shooting);
             if !made {
                 foul_shots = shots;
@@ -4518,6 +4546,7 @@ impl Game {
                 assist: assist.filter(|_| made),
                 and_one: fouled,
                 foul_shots,
+                ruled,
                 line: false,
             },
             path: Some(path),
@@ -4662,6 +4691,7 @@ impl Game {
                 assist,
                 and_one,
                 foul_shots,
+                ruled,
                 line,
             } => {
                 let path = f.path.unwrap_or_else(Path::new);
@@ -4683,12 +4713,19 @@ impl Game {
                     }
                     return self.go_live(path, f.t, false);
                 }
-                let points = kind.points();
+                let points = if ruled > 0 { ruled } else { kind.points() };
                 let line = self.oline(shooter);
                 line.fgm += 1;
                 line.pts += points;
-                if kind == ShotKind::Three {
+                if points == 3 {
                     line.tpm += 1;
+                }
+                // The try was entered by where he stood; the count is the
+                // official's.
+                if points == 3 && kind != ShotKind::Three {
+                    line.tpa += 1;
+                } else if points != 3 && kind == ShotKind::Three {
+                    line.tpa = line.tpa.saturating_sub(1);
                 }
                 self.sides[self.play.o].score += points;
                 if let Some(a) = assist {
@@ -5199,7 +5236,10 @@ impl Game {
                 / CALL_BASE;
             self.rng.chance(raw.min(0.95))
         });
-        let fouled = contact && self.called(1.0);
+        let fouled = match near {
+            Some(dk) => self.call(contact, 1.0, FoulKind::Shooting, (1 - o, dk), (o, who)),
+            None => false,
+        };
         let m = if fouled {
             m * FOULED_ERR
         } else if contact {
@@ -5239,6 +5279,7 @@ impl Game {
             fouled,
         });
         if fouled && let Some(dk) = near {
+            self.shot_info(made, false);
             self.defensive_foul(dk, who, if made { 1 } else { 2 }, FoulKind::Shooting);
         }
         self.cut_log(ts - a.t);
@@ -5284,7 +5325,8 @@ impl Game {
         self.cut_log(ts - a.t);
         self.play.after = None;
         let (bp, bz, _, _) = a.path.state(ts);
-        if self.play.def_touch {
+        let def_touch = self.call_touch(self.play.def_touch, bp, bz);
+        if def_touch {
             // Off a defender: it is the attackers' ball still, and they take
             // it in from the spot where it went out.
             let at = v(bp.x.clamp(-HALF_WIDTH, HALF_WIDTH), bp.y.clamp(0.0, LENGTH));
@@ -5338,7 +5380,10 @@ impl Game {
             let (side_k, other_k) = self.side_of(who);
             let mult = self.sides[side_k].foul_mult(self.sides[side_k].on[other_k]);
             let raw = REB_PUSH * held.min(2.0) * mult / CALL_BASE;
-            if self.rng.chance(raw.min(0.9)) && self.called(1.0) {
+            let pushed = self.rng.chance(raw.min(0.9));
+            let victim_idx = if who >= 5 { blocker.min(4) } else { blocker.saturating_sub(5) };
+            let (fouled_side, fouler_side) = (1 - side_k, side_k);
+            if self.call(pushed, 1.0, FoulKind::Pushing, (fouler_side, if who >= 5 { who - 5 } else { who }), (fouled_side, victim_idx)) {
                 if who >= 5 {
                     // A defender over the back: the offense keeps it, and it
                     // is the man he went through who has it.
@@ -5473,8 +5518,12 @@ impl Game {
             kind,
         });
         self.whistle_until = self.anim + WHISTLE_SHOWN;
+        let held = self.foul_booked(d, dk, h, shots, kind);
         let side = &self.sides[d];
-        if side.slots[side.on[dk]].line.pf >= self.rules.foul_limit {
+        if side.slots[side.on[dk]].line.pf >= self.rules.foul_limit && held {
+            // The call may yet be taken back; he leaves when it has stood.
+            self.hold_out(d, dk);
+        } else if side.slots[side.on[dk]].line.pf >= self.rules.foul_limit {
             let (elapsed, regulation, limit) =
                 (self.elapsed, self.regulation, self.rules.foul_limit);
             self.sides[d].replace(dk, elapsed, regulation, limit);
@@ -5624,19 +5673,23 @@ impl Game {
             } else {
                 CHARGE_SEV + CHARGE_IMPACT * impact
             };
-            if self.called(sev) {
-                if let Some(rec) = &mut self.rec {
-                    rec.charges[if planted { 0 } else { 1 }] += 1;
+            match self.call_collision(true, sev, h, dk) {
+                Some(FoulKind::Charging) => {
+                    if let Some(rec) = &mut self.rec {
+                        rec.charges[if planted { 0 } else { 1 }] += 1;
+                    }
+                    self.fall(d, dk, 1.5);
+                    return Some(self.offensive_foul(h, dk, FoulKind::Charging));
                 }
-                self.fall(d, dk, 1.5);
-                return Some(self.offensive_foul(h, dk, FoulKind::Charging));
+                // He was set, and the call went the other way.
+                Some(kind) => return Some(self.floor_foul(dk, h, kind)),
+                None => return None,
             }
-            return None;
         }
         // Not set: he may sell it.
         let urge = self.def().flop_urge(slot);
         if self.rng.chance(FLOP * urge * urge) {
-            if self.rng.chance(FOOLED * self.whistle) {
+            if self.buys_flop(h, dk) {
                 if let Some(rec) = &mut self.rec {
                     rec.charges[2] += 1;
                 }
@@ -5651,10 +5704,14 @@ impl Game {
             self.fall(d, dk, 1.5);
             return None;
         }
-        if self.called((BLOCK_SEV + BLOCK_IMPACT * impact) * mult) {
-            return Some(self.floor_foul(dk, h, FoulKind::Blocking));
+        match self.call_collision(false, (BLOCK_SEV + BLOCK_IMPACT * impact) * mult, h, dk) {
+            Some(FoulKind::Charging) => {
+                self.fall(d, dk, 1.5);
+                Some(self.offensive_foul(h, dk, FoulKind::Charging))
+            }
+            Some(kind) => Some(self.floor_foul(dk, h, kind)),
+            None => None,
         }
-        None
     }
 
     /// A foul by attacker `k` on defender `dk`: a turnover, and a personal.
@@ -5668,6 +5725,7 @@ impl Game {
             kind,
         });
         self.whistle_until = self.anim + WHISTLE_SHOWN;
+        self.offensive_booked(k, dk, kind);
         self.turnover(k, TurnoverKind::OffensiveFoul, None, 0.0)
     }
 
@@ -5698,6 +5756,7 @@ impl Game {
     /// takes them one by one. `ball` is where it is, if the shooter has not
     /// got it.
     fn free_throws(&mut self, h: usize, shots: u16, ball: Option<Vec2>) -> Option<End> {
+        self.ripen();
         self.assign_ft_spots(h);
         self.play.flight = None;
         self.play.after = None;
@@ -5884,6 +5943,7 @@ impl Game {
                 assist: None,
                 and_one: false,
                 foul_shots: 0,
+                ruled: 0,
                 line: true,
             },
             path: Some(path),
@@ -6185,6 +6245,11 @@ impl Game {
             whistle: self.anim < self.whistle_until,
             cut,
             swish,
+            officials: self.ofc.as_ref().map_or([Vec2::ZERO; 3], |o| o.pos),
+            whistler: self.ofc.as_ref().map_or(0, |o| match o.whistler {
+                Some((i, until)) if self.anim < until => i + 1,
+                _ => 0,
+            }),
         };
         if let Some(rec) = &mut self.rec {
             rec.frames.push(frame);

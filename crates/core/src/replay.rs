@@ -233,6 +233,12 @@ pub enum EventKind {
         side: u8,
         shout: Shout,
     },
+    /// The bench of `side` challenged a call, and the film decided.
+    Review {
+        side: u8,
+        overturned: bool,
+        what: crate::officials::What,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -285,7 +291,7 @@ impl Event {
             Switch { onto, .. } => Some(*onto),
             Help { helper, .. } => Some(*helper),
             Substitution { on, .. } => Some(*on),
-            PeriodStart | PeriodEnd | Timeout { .. } | Shout { .. } | Adjust { .. } => None,
+            PeriodStart | PeriodEnd | Timeout { .. } | Shout { .. } | Adjust { .. } | Review { .. } => None,
         }
     }
 
@@ -458,6 +464,23 @@ impl Event {
                     )
                 } else {
                     format!("{} by {} on {}.", what, name(*who), name(*on))
+                }
+            }
+            Review {
+                side,
+                overturned,
+                what,
+            } => {
+                let bench = if *side == 0 { "home" } else { "away" };
+                let call = match what {
+                    crate::officials::What::Foul => "the foul",
+                    crate::officials::What::OutOfBounds => "the ball",
+                    crate::officials::What::Count => "the count",
+                };
+                if *overturned {
+                    format!("The {bench} bench challenges {call}: overturned.")
+                } else {
+                    format!("The {bench} bench challenges {call}: the call stands.")
                 }
             }
             FreeThrows { who, made, of } => {
@@ -701,6 +724,12 @@ pub struct Frame {
     /// The ball is going down through the net in this frame.
     #[serde(default)]
     pub swish: bool,
+    /// Where the three officials stand, full-court coordinates.
+    #[serde(default)]
+    pub officials: [Vec2; 3],
+    /// The official (1-3, in the crew's order) with his arm up, or 0.
+    #[serde(default)]
+    pub whistler: u8,
 }
 
 /// One pass: when, which side, who threw it and who it was meant for (court
@@ -774,6 +803,10 @@ pub struct Recording {
     /// nobody passes to himself, and a throw-in starts out of bounds.
     #[serde(default)]
     pub passes: Vec<PassRec>,
+    /// Every whistle and every foul that should have been one, with what
+    /// really happened; see `officials.rs`. Review results are filled in.
+    #[serde(default)]
+    pub calls: Vec<crate::officials::CallRecord>,
 }
 
 /// One stretch of the ball's flight, in full-court coordinates.

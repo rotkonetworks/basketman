@@ -30,6 +30,7 @@ pub(crate) use offense::{places, template};
 
 use serde::{Deserialize, Serialize};
 
+use crate::officials::Crew;
 use crate::player::{Attr, Player, PlayerId};
 use crate::replay::Recording;
 use crate::rng::Rng;
@@ -179,6 +180,9 @@ pub struct GameResult {
     pub periods: Vec<[u16; 2]>,
     pub boxes: [Vec<(PlayerId, BoxLine)>; 2],
     pub possessions: [u16; 2],
+    /// How the game was officiated; `None` where no crew was assigned.
+    #[serde(default)]
+    pub officiating: Option<crate::officials::GameOfficiating>,
 }
 
 struct Slot {
@@ -782,6 +786,9 @@ impl Orders {
 pub enum Pause {
     /// Timeout called by this side.
     Timeout(usize),
+    /// A call went against this side's coach, who may challenge it before
+    /// the next step; see `LiveMatch::review`.
+    Review(usize),
     PeriodEnd,
     Final,
 }
@@ -1025,10 +1032,61 @@ impl LiveMatch {
     pub(crate) fn set_orders(&mut self, side: usize, orders: Orders, familiarity: f32) {
         self.game.sides[side].orders = Some((orders, familiarity));
     }
+
+    // ---- officials -------------------------------------------------------
+
+    /// Assign the crew that works this game. Call before the first step.
+    pub fn crewed(mut self, crew: &Crew) -> Self {
+        self.game.assign_crew(*crew);
+        self
+    }
+
+    /// A call a person on the bench may challenge right now, after a
+    /// `Pause::Review`: what it was and what the assistant thinks.
+    pub fn review(&self) -> Option<&crate::officials::ReviewPrompt> {
+        self.game.open_review()
+    }
+
+    /// Ask for the film. `Some(true)` if the call was overturned, `Some(false)`
+    /// if it stands, `None` if there was nothing to challenge (too late, no
+    /// challenge or timeout left).
+    pub(crate) fn challenge(&mut self, side: usize) -> Option<bool> {
+        self.game.challenge(side)
+    }
+
+    /// Challenges a side has left.
+    pub fn challenges_left(&self, side: usize) -> u8 {
+        self.game.challenges_left(side)
+    }
+
+    /// The crew, if one was assigned.
+    pub fn crew(&self) -> Option<&Crew> {
+        self.game.crew()
+    }
+
+    /// The calls so far, with what really happened.
+    pub fn calls(&self) -> &[crate::officials::CallRecord] {
+        &self.recording().calls
+    }
 }
 
 pub fn simulate_game(home: &Lineup, away: &Lineup, rules: &Rules, rng: &mut Rng) -> GameResult {
+    simulate_game_crewed(home, away, rules, rng, None)
+}
+
+/// Like `simulate_game`, with a crew of officials: what they call, what
+/// really happened and any challenges come back in `GameResult::officiating`.
+pub fn simulate_game_crewed(
+    home: &Lineup,
+    away: &Lineup,
+    rules: &Rules,
+    rng: &mut Rng,
+    crew: Option<&Crew>,
+) -> GameResult {
     let mut game = floor::Game::new(home, away, rules, rng.clone(), false);
+    if let Some(c) = crew {
+        game.assign_crew(*c);
+    }
     while !game.over() {
         game.step();
     }
@@ -1044,7 +1102,20 @@ pub fn simulate_recorded(
     rules: &Rules,
     rng: &mut Rng,
 ) -> (GameResult, Recording) {
+    simulate_recorded_crewed(home, away, rules, rng, None)
+}
+
+pub fn simulate_recorded_crewed(
+    home: &Lineup,
+    away: &Lineup,
+    rules: &Rules,
+    rng: &mut Rng,
+    crew: Option<&Crew>,
+) -> (GameResult, Recording) {
     let mut game = floor::Game::new(home, away, rules, rng.clone(), true);
+    if let Some(c) = crew {
+        game.assign_crew(*c);
+    }
     while !game.over() {
         game.step();
     }

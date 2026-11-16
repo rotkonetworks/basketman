@@ -10,6 +10,7 @@ mod balance;
 mod export;
 mod feeds;
 mod lab;
+mod lab_officials;
 mod mcp;
 mod play;
 mod realism;
@@ -133,6 +134,12 @@ fn main() {
                 lab::frames(games.unwrap_or(0), a, b)
             }
             Some("fouls") => lab::fouls(games.unwrap_or(200)),
+            Some("officials") => lab_officials::run(games.unwrap_or(600)),
+            Some("survival") => {
+                let first = std::env::args().nth(4).and_then(|s| s.parse().ok()).unwrap_or(100);
+                let with = std::env::args().nth(5).as_deref() != Some("without");
+                lab_officials::survival(games.unwrap_or(96), first, with)
+            }
             Some("physics") => {
                 lab::physics(games.unwrap_or(300));
                 lab::physics_post(games.unwrap_or(300));

@@ -24,7 +24,7 @@ use eframe::egui::{Color32, Mesh, Pos2, Rect, TextureId, pos2};
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
 pub(crate) use action::Act;
-pub(crate) use figure::{FigureSpec, emit_figure, to_body};
+pub(crate) use figure::{FigureSpec, emit_figure, emit_official, to_body};
 
 /// Nothing nearer than this (along the viewing direction) is drawn.
 pub(crate) const NEAR: f32 = 0.3;

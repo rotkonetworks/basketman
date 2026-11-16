@@ -5,7 +5,7 @@
 //! is the replay.
 
 use basketman_core::court::Vec2;
-use basketman_core::engine::{GameResult, LivePlayer, Orders, Reaction, Shout};
+use basketman_core::engine::{GameResult, LivePlayer, Orders, Pause, Reaction, Shout};
 use basketman_core::league::{LiveInput, LiveRound, Refusal, Stoppage, World};
 use basketman_core::player::{Player, PlayerId};
 use basketman_core::replay::{EventKind, Frame, Recording};
@@ -22,6 +22,7 @@ use crate::view3d::{self, Cam3, FigureSpec, Preset, Scene, Vec3, v3};
 
 mod feeds;
 mod hud;
+mod officials;
 mod stoproom;
 pub(crate) use feeds::Ctx as FeedCtx;
 pub(crate) use stoproom::StopRoom;
@@ -64,6 +65,10 @@ pub(crate) enum Command {
     Resume,
     SkipPeriod,
     SkipAll,
+    /// Ask for the film on the call the prompt shows.
+    Challenge,
+    /// Let the call stand and carry on.
+    PlayOn,
 }
 
 #[derive(Default)]
@@ -74,6 +79,8 @@ pub(crate) struct Touchline {
     said: Option<(Shout, Vec<(PlayerId, Reaction)>)>,
     /// Why the game is stopped.
     notice: Option<String>,
+    /// The game waits on the challenge prompt (not the coaching room).
+    pub review_open: bool,
     /// The coaching room: made when play stops, gone when it resumes.
     pub room: Option<StopRoom>,
     /// Play is stopped for the coach and has not been resumed.
@@ -553,7 +560,7 @@ pub(crate) fn paint_floor(
         return paint_3d(ui, rec, time, &mut look.cam, players, result, picked);
     }
     let angled = look.mode == ViewMode::Angled;
-    let (frame, pos, ball, ball_height, _) = blend(rec, time);
+    let (frame, pos, ball, ball_height, next) = blend(rec, time);
     let colors = [theme::ACCENT, theme::TEXT];
     let player = |side: usize, slot: u8| &players[result.boxes[side][slot as usize].0 as usize];
     let w = ui.available_width();
@@ -697,6 +704,7 @@ pub(crate) fn paint_floor(
             label = Some((target.center_top() - vec2(0.0, 4.0), text));
         }
     }
+    officials::paint_flat(&painter, &pitch, frame, next);
     if angled {
         paint_baskets(&painter, &pitch);
     }
@@ -934,6 +942,7 @@ fn paint_3d(
             ball_at = at;
         }
     }
+    officials::emit_3d(&mut scene, frame, next, ball);
     view3d::ball(&mut scene, (ball_at.x, ball_at.y), ball_at.z);
     drop(_figs);
     painter.rect_filled(rect, 4.0, hall.backdrop);
@@ -1115,6 +1124,10 @@ impl App {
                     );
                 });
             });
+            if let Some(ids) = self.next_fixture().and_then(|i| self.world.crew_of_fixture(i)) {
+                let r = Rect::from_min_size(stage.min + vec2(0.0, 160.0), vec2(w, 180.0));
+                crate::shell::panel(ui, r, "match_crew", |ui| self.crew_card(ui, bd, ids));
+            }
         }
         self.world.replay = replay;
     }
@@ -1136,6 +1149,12 @@ impl App {
             return;
         }
         let pb = &mut self.playback;
+        // A call against the user waits for his answer.
+        if self.touchline.review_open {
+            pb.playing = false;
+            pb.time = live.game.time();
+            return;
+        }
         if pb.playing {
             let dt = ui.input(|i| i.stable_dt).min(0.1);
             pb.time += dt * pb.speed;
@@ -1146,11 +1165,21 @@ impl App {
         while !live.game.is_over()
             && (live.game.time() < pb.time || live.game.recording().frames.is_empty())
         {
-            if live.step().is_some() {
-                stopped = true;
-                pb.playing = false;
-                pb.time = live.game.time();
-                break;
+            match live.step() {
+                // A call against the user: his own small prompt, not the room.
+                Some(Pause::Review(_)) => {
+                    self.touchline.review_open = true;
+                    pb.playing = false;
+                    pb.time = live.game.time();
+                    break;
+                }
+                Some(_) => {
+                    stopped = true;
+                    pb.playing = false;
+                    pb.time = live.game.time();
+                    break;
+                }
+                None => {}
             }
         }
         if pb.time >= live.game.time() {
@@ -1189,11 +1218,26 @@ impl App {
                 self.playback.playing = true;
                 return;
             }
+            Command::Challenge => {
+                live.input(LiveInput::Challenge);
+                self.touchline.review_open = false;
+                self.playback.playing = true;
+                return;
+            }
+            Command::PlayOn => {
+                // The call stands: the next step closes the review.
+                self.touchline.review_open = false;
+                self.playback.playing = true;
+                return;
+            }
             Command::SkipPeriod => {
-                // To the next stoppage of any kind.
+                self.touchline.review_open = false;
+                // To the next stoppage of any kind; a call under review is
+                // let stand.
                 while !live.game.is_over() {
-                    if live.step().is_some() {
-                        break;
+                    match live.step() {
+                        None | Some(Pause::Review(_)) => {}
+                        Some(_) => break,
                     }
                 }
                 self.playback.time = live.game.time();
@@ -1204,6 +1248,7 @@ impl App {
                 return;
             }
             Command::SkipAll => {
+                self.touchline.review_open = false;
                 live.input(LiveInput::AutoSubs(true));
                 while !live.game.is_over() {
                     live.step();

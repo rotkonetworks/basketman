@@ -151,16 +151,19 @@ pub(crate) struct Keys {
     pub space: bool,
     pub timeout: bool,
     pub escape: bool,
+    /// C, with a call under review: ask for the film.
+    pub challenge: bool,
 }
 
 /// Take Space, T and (with the room open) Escape out of the frame's input.
 /// Done before any widget is drawn: a button that has the focus would take
 /// the space bar as a click.
-fn take_keys(ctx: &egui::Context, room_open: bool) -> Keys {
+fn take_keys(ctx: &egui::Context, room_open: bool, review_open: bool) -> Keys {
     ctx.input_mut(|i| Keys {
         space: i.consume_key(egui::Modifiers::NONE, egui::Key::Space),
         timeout: i.consume_key(egui::Modifiers::NONE, egui::Key::T),
-        escape: room_open && i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+        escape: (room_open || review_open) && i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+        challenge: review_open && i.consume_key(egui::Modifiers::NONE, egui::Key::C),
     })
 }
 
@@ -347,6 +350,7 @@ impl App {
                 .collect();
             ui.label(theme::mono(periods.join("   ")).color(theme::TEXT_DIM));
         });
+        self.officials_box(ui, bd, g.result, &g.teams, g.live);
         for side in 0..2 {
             ui.add_space(6.0);
             bd.card(ui, |ui| {
@@ -526,7 +530,7 @@ impl App {
             return;
         }
         let room_open = self.touchline.room.as_ref().is_some_and(|r| r.open);
-        self.sh.hud.keys = take_keys(ctx, room_open);
+        self.sh.hud.keys = take_keys(ctx, room_open, self.touchline.review_open);
     }
 
     /// The match on every size: the court is the window, and what floats
@@ -550,7 +554,17 @@ impl App {
         let live_stopped = live
             .is_some_and(|l| matches!(l.stoppage(), Some(s) if s != basketman_core::league::Stoppage::Final))
             && self.touchline.stopped;
-        if let Some(cmds) = commands.as_deref_mut() {
+        if self.touchline.review_open
+            && let Some(cmds) = commands.as_deref_mut()
+        {
+            // A call under review has its own keys: C asks for the film,
+            // Space or Esc lets the call stand. Nothing else moves.
+            if keys.challenge {
+                cmds.push(Command::Challenge);
+            } else if keys.space || keys.escape {
+                cmds.push(Command::PlayOn);
+            }
+        } else if let Some(cmds) = commands.as_deref_mut() {
             if keys.timeout && live.is_some_and(|l| !l.game.is_over()) {
                 cmds.push(Command::Timeout);
             }
@@ -1038,6 +1052,17 @@ impl App {
             }
         }
 
+        // ---- the officials: the challenge prompt, whistle, review
+        {
+            let at = if narrow_top {
+                pos2((screen.left() + free_right) / 2.0, top + 52.0 + 52.0)
+            } else {
+                pos2((screen.left() + SAFE + CLUSTER_W + 10.0 + free_right) / 2.0, top + 52.0)
+            };
+            let at = if notice { at + vec2(0.0, 38.0) } else { at };
+            self.officials_layer(ui, rec, live, commands.as_deref_mut(), court_time, level, screen, at, solid);
+        }
+
         // ---- a slim handle on the right edge, where the panel is not
         if !phone && !open && ctl > 0.02 && level < 2 {
             let h = Rect::from_center_size(
@@ -1330,6 +1355,7 @@ mod tests {
             periods: Vec::new(),
             boxes: [Vec::new(), Vec::new()],
             possessions: [0, 0],
+            officiating: None,
         };
         let g = Game {
             fixture: 0,
@@ -1380,7 +1406,7 @@ mod tests {
             let (mut keys, mut clicked) = (Keys::default(), false);
             let _ = ctx.run_ui(input, |ui| {
                 if take {
-                    keys = take_keys(ui.ctx(), false);
+                    keys = take_keys(ui.ctx(), false, false);
                 }
                 let r = ui.add(egui::Button::new("Resume").sense(Sense::click()));
                 ui.memory_mut(|m| m.request_focus(r.id));

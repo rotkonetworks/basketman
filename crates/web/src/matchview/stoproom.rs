@@ -228,6 +228,7 @@ impl App {
                 "End of regulation. Level: overtime".to_string()
             }
             Stoppage::Break { period, .. } => format!("End of period {period}"),
+            Stoppage::Review => "A call under review".to_string(),
             Stoppage::Final => "Full time".to_string(),
         }
     }
@@ -971,6 +972,11 @@ mod tests {
                 break;
             }
             let stop = live.stoppage().expect("a pause is a stoppage");
+            // A call under review has its own small prompt, not the room:
+            // nothing can be changed in it but the challenge.
+            if stop == Stoppage::Review {
+                continue;
+            }
             let room = StopRoom::new(&live, &w, stop);
             assert!((1..=4).contains(&room.read.len()), "{:?}", room.read);
             match stop {

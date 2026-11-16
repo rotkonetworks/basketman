@@ -155,6 +155,7 @@ fn stop_name(s: Stop) -> &'static str {
 fn pause_name(p: Pause, me: usize) -> Value {
     match p {
         Pause::Timeout(s) => json!({"timeout": if s == me { "you" } else { "opponent" }}),
+        Pause::Review(_) => json!("review"),
         Pause::PeriodEnd => json!("period_end"),
         Pause::Final => json!("final"),
     }
@@ -173,11 +174,12 @@ fn play_json(live: &LiveRound) -> Value {
         ),
         Some(Stoppage::Break { half: true, .. }) => ("stopped", json!("half_time")),
         Some(Stoppage::Break { .. }) => ("stopped", json!("period_break")),
+        Some(Stoppage::Review) => ("stopped", json!("review")),
         Some(Stoppage::Final) => ("over", json!("final")),
     };
     let (team, words) = live.talks_left();
     let mut may = vec!["Timeout", "AutoSubs", "Swap", "CancelSwap"];
-    if matches!(stop, Some(s) if s != Stoppage::Final) {
+    if matches!(stop, Some(s) if s != Stoppage::Final && s != Stoppage::Review) {
         may.push("Orders");
         may.push("Brief");
         if team > 0 || words > 0 {
@@ -186,6 +188,9 @@ fn play_json(live: &LiveRound) -> Value {
     }
     if stop == Some(Stoppage::Final) {
         may.clear();
+    }
+    if stop == Some(Stoppage::Review) {
+        may = vec!["Challenge"];
     }
     json!({
         "state": state,
@@ -440,6 +445,27 @@ impl Session {
                     .view_job_offer(offer, &bring, &keep)
                     .map(|v| to_json(&v))
                     .map_err(|e| AgentError::new("refused", e));
+            }
+            "officials" => {
+                let me = w.watch;
+                let person = |r: &basketman_core::officials::Referee| {
+                    json!({"id": r.id, "name": r.name, "age": r.age, "known_for": r.tags(),
+                           "accuracy": r.accuracy, "strictness": r.strictness, "consistency": r.consistency,
+                           "home_lean": r.home_lean, "composure": r.composure,
+                           "season": {"games": r.season.games, "fouls_per_game": r.season.fouls_per_game(),
+                                      "home_balance": r.season.home_balance(), "overturned": r.season.overturned,
+                                      "reviewed": r.season.reviewed},
+                           "warned": r.warned})
+                };
+                let next = me.and_then(|me| {
+                    let i = w.fixtures.iter().position(|f| {
+                        f.round == w.round && f.result.is_none() && (f.home == me || f.away == me)
+                    })?;
+                    let ids = w.crew_of(basketman_core::officials::GameKey::League(i))?;
+                    Some(json!({"fixture": i, "crew": w.referees_of(ids).iter().map(|r| person(r)).collect::<Vec<_>>()}))
+                });
+                let pool: Vec<Value> = w.officials.pool.iter().filter(|r| r.active).map(person).collect();
+                return Ok(json!({"next_game": next, "referees": pool, "office": w.officials.notices}));
             }
             "club_profile" => {
                 let t = match get_u64(a, "club")? {
@@ -763,7 +789,42 @@ impl Session {
             "rules_fired": rules_fired,
             "assistant_notes": crate::feeds::recent(w, &live.round, live.team, &live.notes, 3),
             "team": live.team,
+            "officials": self.officials_json(w, live),
         }))
+    }
+
+    /// The crew, what each side has left to challenge with, and a call
+    /// waiting to be challenged.
+    fn officials_json(&self, w: &World, live: &Live) -> Value {
+        let g = &live.round.game;
+        let side = live.round.side;
+        let crew: Vec<Value> = g
+            .crew()
+            .map(|c| {
+                c.ids()
+                    .iter()
+                    .filter_map(|&id| w.officials.get(id))
+                    .map(|r| json!({"name": r.name, "tags": r.tags()}))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let review = g.review().map(|r| {
+            json!({
+                "call": r.call_text(|p| w.players[p as usize].name.as_str()),
+                "period": r.period + 1,
+                "seconds_left": r.clock.round(),
+                "assistant": r.opinion.words(),
+                "challenges_left": r.left,
+                "timeouts_left": r.timeouts,
+                "how": "send the live input \"Challenge\" now, or step on to let it stand; a lost challenge costs a timeout",
+            })
+        });
+        json!({
+            "crew": crew,
+            "challenges_left": g.challenges_left(side),
+            "challenged": g.calls().iter().any(|c| c.review.is_some_and(|r| r.by as usize == side)),
+            "review": review,
+        })
     }
 
     fn live_step(&mut self, a: &Value) -> Res {
@@ -885,7 +946,8 @@ impl Session {
         let said = live.round.try_input(input).map_err(|r| {
             let kind = match r {
                 Refusal::PlayIsLive => "play_is_live",
-                Refusal::GameOver | Refusal::NoTimeouts => "refused",
+                Refusal::GameOver | Refusal::NoTimeouts | Refusal::NothingToChallenge => "refused",
+                Refusal::ReviewOnly => "review_only",
                 Refusal::TeamTalkUsed | Refusal::WordsUsed => "talk_used",
                 Refusal::NotOnTheTeam => "not_your_player",
             };

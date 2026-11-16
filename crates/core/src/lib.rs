@@ -37,6 +37,7 @@ pub mod live_feed;
 pub mod legal;
 pub mod media;
 pub mod observations;
+pub mod officials;
 pub mod ops;
 pub mod opponent;
 pub mod player;
@@ -68,6 +69,8 @@ mod books_tests;
 mod club_tests;
 #[cfg(test)]
 mod fame_tests;
+#[cfg(test)]
+mod officials_tests;
 #[cfg(test)]
 mod signature_tests;
 

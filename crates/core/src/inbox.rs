@@ -1003,6 +1003,13 @@ impl World {
             mine.name,
             mine.familiarity() * 100.0
         );
+        if let Some(i) = self
+            .fixtures
+            .iter()
+            .position(|g| g.round == round && (g.home == me || g.away == me))
+        {
+            body += &self.crew_preview(i, home);
+        }
         let subject = format!(
             "Next up: {} ({})",
             team.name,
@@ -1090,6 +1097,9 @@ impl World {
             if let Some(line) = self.prep_line(me, opp_id, gameday) {
                 body += &line;
             }
+            if let Some(o) = &r.officiating {
+                body += &format!("\n{}", self.officiating_report(o, side, &self.teams[f.home].name, &self.teams[f.away].name));
+            }
             body += "\nThe full replay and box score are on the Match screen.";
             let subject = format!(
                 "{} {us}-{them} {} {opp}",
@@ -1114,6 +1124,7 @@ impl World {
             let (round, day) = (self.fixtures[i].round, self.fixtures[i].day);
             self.settle_pledge(round, won);
             self.press_after(day, i);
+            self.press_bad_call(day, i);
         }
     }
 
