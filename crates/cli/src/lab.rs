@@ -673,6 +673,7 @@ struct Totals {
     by_kind: [[u32; 3]; 9],
     margins: Vec<u32>,
     pair_frames: u64,
+    deep_out: u64,
     overlaps: u64,
     deep: u64,
     worst: f32,
@@ -926,6 +927,10 @@ pub fn stats(games: usize) {
                     }
                     if pen > 0.02 {
                         t.deep += 1;
+                        let outb = |p: basketman_core::court::Vec2| p.x < 0.0 || p.x > 28.0 || p.y < 0.0 || p.y > 15.0;
+                        if outb(all[i].0) || outb(all[j].0) {
+                            t.deep_out += 1;
+                        }
                     }
                     t.worst = t.worst.max(pen);
                 }
@@ -998,11 +1003,12 @@ pub fn stats(games: usize) {
     let at = |q: f32| t.margins[((t.margins.len() - 1) as f32 * q) as usize];
     println!("winning margin median {} p90 {}", at(0.5), at(0.9));
     println!(
-        "overlap: {} of {} pair-frames ({:.4}%), deeper than 2 cm {}, worst {:.3} m, in {} frames",
+        "overlap: {} of {} pair-frames ({:.4}%), deeper than 2 cm {} ({} with a man out of bounds), worst {:.3} m, in {} frames",
         t.overlaps,
         t.pair_frames,
         100.0 * t.overlaps as f64 / t.pair_frames.max(1) as f64,
         t.deep,
+        t.deep_out,
         t.worst,
         t.frames
     );
@@ -2895,6 +2901,11 @@ fn print_trans(rows: &[TransRow; 9], games: u32) {
         avg(all.tag_contest, all.tag_shots as f64),
         pc(all.tag_blocked as f64, all.tag_shots as f64),
         pc(all.tag_fouled as f64, all.tag_shots as f64)
+    );
+    println!(
+        "  transition possessions with a shot (fast break called or early shot): {} at {:.2} points each",
+        why[0].0 + why[1].0,
+        avg((why[0].1 + why[1].1) as f64, (why[0].0 + why[1].0) as f64)
     );
     let half = all.n - all.tagged;
     println!(

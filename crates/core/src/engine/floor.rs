@@ -80,6 +80,7 @@ const LEAD_RISK: f32 = 0.08;
 /// Chance per look that a defender who has been beaten on the break and has
 /// a clear path to the rim in front of the ball pulls him down.
 const STOP_FOUL: f32 = 0.05;
+
 /// Seconds the team that lost the ball takes to turn round: a base, so much
 /// more for each point of IQ under 20, and more for the man who lost it.
 const BEAT_BASE: f32 = 0.0;
@@ -87,6 +88,11 @@ const BEAT_IQ: f32 = 0.006;
 const BEAT_LOST: f32 = 0.15;
 /// Chance, at neutral tempo, that the receiver of a throw-in pushes the ball.
 const PUSH_OFF_INBOUND: f32 = 0.35;
+/// Extra error on a rim finish for each m/s above a stride on the break.
+const SPRINT_ERR: f32 = 0.7;
+const SPRINT_FROM: f32 = 1.0;
+/// How much more of a contest a defender running a shooter down gives.
+const CHASE: f32 = 0.55;
 /// Fatigue above which a man does not run the floor.
 const RUN_LIMIT: f32 = 0.6;
 /// Added to the crowding of a pass into a man at the rim, on top of 2.6.
@@ -798,6 +804,8 @@ pub(super) struct Game {
     lost_by: Option<usize>,
     /// The dead-ball clock at the last tick.
     dead_was: f32,
+    /// Seconds a picked-off ball spent in the air.
+    steal_flew: f32,
 }
 
 impl Game {
@@ -869,6 +877,7 @@ impl Game {
             prev_pos: [[Vec2::ZERO; 5]; 2],
             lost_by: None,
             dead_was: 0.0,
+            steal_flew: 0.0,
             m,
             frame: 0,
             play: Play::idle(),
@@ -1406,6 +1415,7 @@ impl Game {
             self.start_inbound(loose.map(|l| l.0), credit > 0.0, None);
         }
         self.lost_by = None;
+        self.steal_flew = 0.0;
     }
 
     fn tick(&mut self) -> Option<End> {
@@ -1495,8 +1505,26 @@ impl Game {
             .map(|(t, k)| (t, k, self.m[t][k].pos))
             .collect();
         self.collide(&bulk);
+        // A sprinting pack gets a second pass: bodies at full speed go deeper
+        // into each other in a tick than the first pass takes out.
+        if self.play.brk || self.play.live_start {
+            self.collide(&bulk);
+        }
         for (t, k, pos) in outside {
             self.m[t][k].pos = pos;
+            // Whoever is leaning on him is moved off him in full.
+            for j in 0..10 {
+                if j / 5 == t && j % 5 == k {
+                    continue;
+                }
+                let q = self.m[j / 5][j % 5].pos;
+                let gap = bulk[j].r + bulk[t * 5 + k].r - q.dist(pos);
+                if gap > 0.0 {
+                    let away = (q - pos).norm();
+                    let away = if away.len() < 0.5 { v(0.0, 1.0) } else { away };
+                    self.m[j / 5][j % 5].pos = contact::keep_in(q + away * gap, bulk[j].r);
+                }
+            }
             self.touch[t * 5 + k] = Touch::CLEAR;
             for i in 0..10 {
                 if self.touch[i].is_some() && self.touch[i].with as usize == t * 5 + k {
@@ -1872,7 +1900,18 @@ impl Game {
         for k in 0..5 {
             let pos = self.m[o][k].pos;
             let mut brake = false;
-            let (target, pace) = if self.play.holder.is_none()
+            let reacting = match self.play.flight {
+                Some(Flight {
+                    kind: FlightKind::Steal { .. },
+                    t,
+                    ..
+                }) => t > self.reaction(k),
+                _ => false,
+            };
+            let (target, pace) = if reacting {
+                // The ball is going the other way: he turns and runs back.
+                (v(pos.x * 0.7, (pos.y + 9.0).min(LENGTH - 2.0)), 1.0)
+            } else if self.play.holder.is_none()
                 && self.play.flight.is_none()
                 && self.play.fetcher == Some(k)
             {
@@ -2465,6 +2504,35 @@ impl Game {
         self.play.task = [Task::Spot; 5];
         self.play.task[to] = Task::Fill(rx);
         self.play.go[to] = 0.9;
+        // After a timeout or between periods the picture is cut: the ten are
+        // put where a throw-in finds them, the five on the floor now (those who
+        // just came on too), and the ball is in the thrower's hands.
+        if self.cut && carrier.is_none() {
+            let d = 1 - o;
+            for k in 0..5 {
+                let p = self.play.spots[k];
+                self.m[o][k].pos = p;
+                self.m[o][k].vel = Vec2::ZERO;
+                self.m[o][k].target = p;
+            }
+            self.m[o][who].pos = spot;
+            self.m[o][who].out = true;
+            self.m[o][to].pos = rx;
+            self.m[o][to].target = rx;
+            for dk in 0..5 {
+                let a = self.m[o][dk].pos;
+                let p = a.toward(HOOP, 1.5_f32.min(a.dist(HOOP)));
+                self.m[d][dk].pos = contact::keep_in(p, 0.3);
+                self.m[d][dk].vel = Vec2::ZERO;
+                self.m[d][dk].target = self.m[d][dk].pos;
+            }
+            self.bulk_dirty = true;
+            self.play.holder = Some(who);
+            self.play.fetcher = None;
+            self.play.ball = spot;
+            self.loose = None;
+            return;
+        }
         match (carrier, at) {
             (Some(c), _) => self.play.holder = Some(c),
             (None, None) => {
@@ -2553,6 +2621,16 @@ impl Game {
 
     /// How fast `k` of the side with the ball dribbles: handling decides how
     /// much speed he can carry the ball at, and tired legs take it away.
+    /// Seconds before man `k` of the side with the ball turns round when the
+    /// ball is picked off: his IQ, and more for the man who threw it.
+    fn reaction(&self, k: usize) -> f32 {
+        let mut beat = BEAT_BASE + (20.0 - self.oe(k, Attr::Iq)).max(0.0) * BEAT_IQ;
+        if Some(k) == self.lost_by {
+            beat += BEAT_LOST;
+        }
+        beat
+    }
+
     fn dribble_pace(&self, k: usize) -> f32 {
         let f = self.off().slots[self.off().on[k]].fatigue;
         (0.80 + 0.0085 * self.oe(k, Attr::Handling)).min(0.97) * (1.0 - 0.5 * (f - 0.2).max(0.0))
@@ -2612,7 +2690,8 @@ impl Game {
             if Some(dk) == lost {
                 beat += BEAT_LOST;
             }
-            self.play.stun[dk] = beat;
+            // Whatever time the ball spent in the air he was already turning.
+            self.play.stun[dk] = (beat - self.steal_flew).max(0.0);
         }
         self.play.think = 0.1 + (20.0 - self.oe(h, Attr::Iq)).max(0.0) * 0.01;
     }
@@ -2840,7 +2919,11 @@ impl Game {
                 (1.0 + (d_reach - reach) / 100.0).max(0.5)
             };
             if (q - p).dot(to_hoop) < -0.25 && p.dist(HOOP) > 1.0 {
-                w *= 0.45;
+                // Trailing the play. A man running him down is another matter:
+                // he is on him as he goes up, and his hand comes with him.
+                let toward = self.m[1 - self.play.o][dk].vel.dot((p - q).norm());
+                let chase = ((toward - 2.0) / 3.0).clamp(0.0, 1.0);
+                w *= 0.45 + CHASE * chase;
             }
             out[dk] = w;
         }
@@ -3319,11 +3402,13 @@ impl Game {
                 let end = self.turnover(h, TurnoverKind::BadPass, Some(thief.0), 0.62);
                 if let Some(End::Live(dk)) = end {
                     // The ball goes to his hand and he takes it from there.
+                    self.steal_flew = Self::pass_time(a.dist(self.dp(dk))).min(0.5).max(a.dist(self.dp(dk)) / 20.0);
                     self.play.flight = Some(Flight {
                         from: a,
                         to: self.dp(dk),
                         t: 0.0,
-                        dur: Self::pass_time(a.dist(self.dp(dk))).min(0.5),
+                        // A quick hand, but the ball does not fly faster than a thrown pass can.
+                        dur: Self::pass_time(a.dist(self.dp(dk))).min(0.5).max(a.dist(self.dp(dk)) / 20.0),
                         kind: FlightKind::Steal { to: dk },
                         path: None,
                     });
@@ -4142,10 +4227,17 @@ impl Game {
         let rim = matches!(style, Style::Layup | Style::Dunk) || kind == ShotKind::Rim;
         let (lat, depth) = shot::base(style, rim, d);
         let comp = self.oe(h, Attr::Composure) - 10.0;
+        // Taking it to the rim at a full sprint off a break: the faster he
+        // comes the less of the finish is his to place.
+        let sprint = if self.play.live_origin && self.play.t < BREAK_SECONDS {
+            SPRINT_ERR * (self.m[self.play.o][h].vel.len() - SPRINT_FROM).max(0.0)
+        } else {
+            0.0
+        };
         let mut m = if style == Style::Dunk {
             // The hand carries it through: only a body in the way, or the
             // top of his reach, spoils it.
-            1.0 + DUNK_CONTEST * c + DUNK_EDGE * (0.15 - reach_edge).max(0.0)
+            1.0 + DUNK_CONTEST * c + DUNK_EDGE * (0.15 - reach_edge).max(0.0) + sprint
         } else if rim {
             let finish = 0.6 * self.oe(h, Attr::CloseShot)
                 + 0.2 * self.oe(h, Attr::Vertical)
@@ -4155,6 +4247,7 @@ impl Game {
             });
             (1.0 - FINISH_SLOPE * (finish - 10.0)).clamp(0.4, 2.0)
                 * (1.0 + CONTEST_RIM * c * (1.0 + GUARD_SLOPE * (protect - 10.0)).max(0.3))
+                * (1.0 + sprint)
         } else {
             let touch = if kind == ShotKind::Three {
                 self.oe(h, Attr::ThreePoint)
