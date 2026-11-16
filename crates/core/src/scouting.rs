@@ -225,6 +225,13 @@ pub struct Scouting {
     /// player reaches `signature::KNOWN_AT`; see `knows_signature`.
     #[serde(default)]
     pub seen_signatures: Vec<(PlayerId, Signature)>,
+    /// Games of other clubs the chief scout has been sent to; see
+    /// `opponent.rs`.
+    #[serde(default)]
+    pub assignments: Vec<crate::opponent::ScoutAssignment>,
+    /// What he wrote about the clubs he watched, oldest first.
+    #[serde(default)]
+    pub opponent_reports: Vec<crate::opponent::OpponentReport>,
 }
 
 /// Stable pseudo-random value in -1..=1 for a (player, salt) pair, so a
@@ -244,6 +251,8 @@ impl Scouting {
             knowledge: vec![PUBLIC_KNOWLEDGE; players],
             reports: Vec::new(),
             seen_signatures: Vec::new(),
+            assignments: Vec::new(),
+            opponent_reports: Vec::new(),
         }
     }
 

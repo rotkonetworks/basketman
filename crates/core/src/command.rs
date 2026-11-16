@@ -170,6 +170,17 @@ pub enum Command {
     DeclineJob(usize),
     /// Leave the club you manage. You are out of work until somebody calls.
     Resign,
+    /// Send the chief scout to watch `team` play on `day` (a day of the
+    /// calendar); he files an opponent report after the game. Replaces
+    /// what he was to do that day.
+    AssignScout {
+        team: TeamId,
+        day: u32,
+    },
+    /// Take the chief scout off whatever he was to do on `day`.
+    UnassignScout {
+        day: u32,
+    },
 }
 
 /// Why a command was not carried out.
@@ -328,6 +339,14 @@ impl World {
                     return Err(CommandError::OutOfRange("job offer"));
                 }
                 out.note = Some(self.decline_job(*offer).map_err(refused)?);
+            }
+            Command::AssignScout { team, day } => {
+                self.club()?;
+                out.note = Some(self.assign_scout(*team, *day).map_err(refused)?);
+            }
+            Command::UnassignScout { day } => {
+                self.club()?;
+                self.unassign_scout(*day).map_err(refused)?;
             }
             Command::Resign => {
                 self.club()?;

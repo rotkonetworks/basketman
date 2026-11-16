@@ -32,6 +32,7 @@ pub mod league;
 pub mod legal;
 pub mod media;
 pub mod ops;
+pub mod opponent;
 pub mod player;
 pub mod pricing;
 pub mod projection;
@@ -59,3 +60,6 @@ mod club_tests;
 mod fame_tests;
 #[cfg(test)]
 mod signature_tests;
+
+#[cfg(test)]
+mod schedule_tests;

@@ -696,7 +696,9 @@ impl World {
             .filter(|(i, _)| Some(**i) != skip)
             .map(|(&i, &seed)| {
                 let f = &self.fixtures[i];
-                let record = self.watch == Some(f.home) || self.watch == Some(f.away);
+                let record = self.watch == Some(f.home)
+                    || self.watch == Some(f.away)
+                    || self.scout_wants(f.day, f.home, f.away);
                 (f.home, f.away, seed, record)
             })
             .collect();
@@ -711,12 +713,18 @@ impl World {
             }) else {
                 continue;
             };
-            if let Some(recording) = recording
-                && let Some(old) = self.replay.replace((i, recording))
-            {
-                self.tapes.push(old);
-            }
             let (home, away) = (self.fixtures[i].home, self.fixtures[i].away);
+            if let Some(recording) = recording {
+                if Some(i) == skip || self.watch == Some(home) || self.watch == Some(away) {
+                    if let Some(old) = self.replay.replace((i, recording)) {
+                        self.tapes.push(old);
+                    }
+                } else {
+                    // Made for the scout: he writes it up and it is dropped.
+                    let day = self.fixtures[i].day;
+                    self.scout_game(day, home, away, false, &result, &recording);
+                }
+            }
             // Playoff games are kept, but the table and the season's
             // averages are the regular season's.
             let counted = !self.fixtures[i].playoff;
@@ -737,7 +745,9 @@ impl World {
                     self.season_stats[*pid as usize].add(line);
                     if line.secs > 0 {
                         self.games_played[*pid as usize] += 1;
-                        if self.scouting.is_shortlisted(*pid) {
+                        if self.scouting.is_shortlisted(*pid)
+                            && self.scout_free_for(self.fixtures[i].day, home, away)
+                        {
                             let opponent = [away, home][side];
                             self.scouting.watch(
                                 *pid,
@@ -781,6 +791,7 @@ impl World {
         self.dressing_week();
         let before = self.weekly_training();
         self.pay_wages();
+        self.ai_tactics_drift();
         self.round += 1;
         self.playoffs_step(&all);
         self.after_round(&all, &before);

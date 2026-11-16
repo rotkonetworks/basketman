@@ -288,6 +288,7 @@ impl World {
     pub fn begin_preseason(&mut self) {
         self.preseason_days = PRESEASON_DAYS;
         self.day = 0;
+        self.scouting.assignments.clear();
         self.date_fixtures();
         self.arrange_friendlies();
     }
