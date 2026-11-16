@@ -521,6 +521,30 @@ impl App {
                             || app.world.fixtures[i].away == app.team
                     });
                 }
+                // `SHOT_SACK=1` has the board dismiss the manager,
+                // `SHOT_RESIGN=1` has him resign, and `SHOT_ACCEPT=1` takes
+                // the first open offer (stage one with `SHOT_OFFER=n`, and
+                // `SHOT_ROUNDS=0` so it does not lapse).
+                if std::env::var("SHOT_SACK").is_ok() {
+                    app.world.stage_dismissal();
+                    app.follow_watch();
+                }
+                if std::env::var("SHOT_RESIGN").is_ok() {
+                    let _ = app.world.apply(Command::Resign);
+                    app.follow_watch();
+                }
+                if std::env::var("SHOT_ACCEPT").is_ok()
+                    && let Some(i) = app.world.open_job_offers().first().copied()
+                {
+                    let cmd = Command::AcceptJob {
+                        offer: i,
+                        bring: Vec::new(),
+                        keep: basketman_core::staff::Job::HIRED.to_vec(),
+                    };
+                    app.cu.note = app.world.apply(cmd).ok().and_then(|o| o.note);
+                    app.follow_watch();
+                    app.start_intro();
+                }
                 // `SHOT_CONDITION=0.1` sets every hall's condition and
                 // `SHOT_FILL=0.3` how full every played game's crowd was.
                 if let Some(c) = std::env::var("SHOT_CONDITION")

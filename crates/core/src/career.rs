@@ -911,6 +911,12 @@ impl World {
 }
 
 impl World {
+    /// The board dismisses the manager now. Not a player action: for the
+    /// screenshot harness and tests.
+    pub fn stage_dismissal(&mut self) {
+        self.manager_dismissed("The results did not come and the board lost patience.");
+    }
+
     /// Make `club` lose its manager and call, whatever the manager's name
     /// is worth. Not a player action: for the screenshot harness and tests.
     pub fn stage_offer(&mut self, club: TeamId) -> Option<usize> {

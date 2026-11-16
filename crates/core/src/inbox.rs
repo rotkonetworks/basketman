@@ -265,7 +265,7 @@ impl World {
             "You have {} to work with and a wage bill of {} a week. \
              Your assistant runs training unless you take it over, and the scouts follow \
              whoever you shortlist. The coaches and scouts you inherit are on the Staff \
-             page; better ones can be hired.\n\nThe season is {} rounds, one game every Saturday. \
+             page; better ones can be hired.\n\nThe season is {} rounds, one round a week. \
              Press Continue to move through the week.",
             money(self.teams[team].budget),
             money((self.wages(team) + self.teams[team].office.wages()) / 52),

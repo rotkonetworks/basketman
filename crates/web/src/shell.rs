@@ -605,8 +605,18 @@ impl App {
         let spectrum = Rect::from_min_size(rect.min, vec2(rect.width(), SPECTRUM_H));
         ui.painter()
             .add(Shape::Mesh(std::sync::Arc::new(theme::spectrum(spectrum))));
-        let v = vitals(self);
-        let club = self.world.teams[self.team].name.clone();
+        let mut v = vitals(self);
+        let jobless = self.world.watch.is_none();
+        let mut club = self.world.teams[self.team].name.clone();
+        if jobless {
+            // Nothing of the old club is his any more.
+            club = "Out of work".to_string();
+            v.record = "-".into();
+            v.place = String::new();
+            v.next = "no club".into();
+            v.balance = "-".into();
+            v.room = "-".into();
+        }
         let narrow = tier == Tier::Narrow;
         let pad = if narrow { 10.0 } else { 16.0 };
         let inner = Rect::from_min_max(
@@ -762,7 +772,7 @@ impl App {
                     egui::Label::new(
                         theme::mono(format!(
                             "{rec}  {}",
-                            short_money(self.world.teams[self.team].budget)
+                            if jobless { "-".to_string() } else { short_money(self.world.teams[self.team].budget) }
                         ))
                         .size(12.0)
                         .color(theme::TEXT),

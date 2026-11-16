@@ -6,7 +6,7 @@
 use basketman_core::board::{sack_line, warn_line};
 use basketman_core::club::{ClubSummary, PersonView, YearLine};
 use basketman_core::command::Command;
-use basketman_core::inbox::{OfferState, date};
+use basketman_core::inbox::OfferState;
 use basketman_core::staff::Job;
 use eframe::egui::{self, Color32, FontId, Rect, RichText, Sense, Ui, pos2, vec2};
 
@@ -187,7 +187,7 @@ fn record_strip(ui: &mut Ui, record: &[YearLine]) {
     }
     let (first, last) = (record[0].year, record[record.len() - 1].year);
     ui.label(dim(format!(
-        "{first} to {last}, {per_row} to a row. Gold: champions. Grey: runners-up. Blue: top four. \
+        "{first} to {last}, {per_row} to a row. Gold: won the division. Grey: runners-up in the top division. Blue: top four. \
          Outlined: seasons you have managed."
     )));
 }
