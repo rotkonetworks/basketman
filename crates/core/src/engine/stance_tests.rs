@@ -108,11 +108,11 @@ fn the_body_turns_no_faster_than_it_can_and_a_sprinter_hardly_at_all() {
                     }
                     let rate = angle_between(x, y) / dt;
                     frames += 1;
-                    // The quickest feet, standing, turn about 11.8 rad/s (plus bytes).
-                    assert!(rate < 12.6, "body turned {rate} rad/s at {}", a.time);
+                    // The quickest feet, standing, turn about 14.5 rad/s (plus bytes).
+                    assert!(rate < 15.4, "body turned {rate} rad/s at {}", a.time);
                     if a.pose[s][k].speed() > 6.0 {
                         worst_sprint = worst_sprint.max(rate);
-                        if rate > 5.6 {
+                        if rate > 7.0 {
                             fast_sprint += 1;
                         }
                     }

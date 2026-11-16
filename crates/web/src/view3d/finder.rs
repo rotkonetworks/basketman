@@ -190,8 +190,8 @@ pub(crate) fn viewpoint(
         ),
         // Further out and square to the line to the basket: sliding, closeouts, backpedals.
         "side" => (
-            v3(bx - uy * 8.0, by + ux * 8.0, 2.8),
-            v3(bx, by, 1.0),
+            v3(bx - uy * 5.0, by + ux * 5.0, 2.0),
+            v3((bx + f.ball.x) * 0.5, (by + f.ball.y) * 0.5, 0.9),
         ),
         "close" => (
             v3(bx - uy * 4.5 - ux * 1.0, by + ux * 4.5 - uy * 1.0, 2.4),

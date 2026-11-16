@@ -93,7 +93,7 @@ impl Game {
                             w.gaze = Some(ball);
                         }
                     } else if shot_up {
-                        if me.dist(HOOP) < 7.0 {
+                        if me.dist(HOOP) < 3.0 {
                             w.body = Some(HOOP);
                         }
                         w.gaze = Some(ball);
@@ -128,7 +128,7 @@ impl Game {
                         w.gaze = Some(sp);
                         w.square = true;
                     } else if shot_up {
-                        w.body = if me.dist(HOOP) < 6.5 { Some(HOOP) } else { None };
+                        w.body = if me.dist(HOOP) < 3.0 { Some(HOOP) } else { None };
                         w.gaze = Some(ball);
                     } else if line {
                         w.body = Some(ball);
@@ -238,6 +238,11 @@ impl Game {
         let to = aim - m.pos;
         let len = to.len();
         if len < 0.3 {
+            return (1.0, 1.0);
+        }
+        // Going for a rebound everyone turns and runs: the body follows
+        // the ball, so the angle to it costs nothing.
+        if self.play.after.is_some() {
             return (1.0, 1.0);
         }
         let c = to.dot(self.st[t][k].body) / len;
@@ -413,7 +418,7 @@ impl Game {
         let finish = matches!(style, Style::Layup | Style::Dunk);
         // At the rim the line to it means nothing (he is under it): a finish
         // was squared when he left the floor.
-        let at_rim = finish && m.pos.dist(HOOP) < 1.3;
+        let at_rim = finish && (m.pos.dist(HOOP) < 0.4 || (m.pos.dist(HOOP) < 1.3 && m.vel.len() > 1.5));
         let ang = if at_rim { 0.0 } else { angle(st.body, to) };
         let eff = if style == Style::Hook { (ang - 1.5708).abs() } else { ang };
         let fwd = if at_rim { 0.0 } else { m.vel.dot(to) };
@@ -473,7 +478,7 @@ impl Game {
         let rst = &self.st[o][j];
         let run = self.m[o][j].vel.len();
         let behind = ((-rst.body.dot(back) - 0.2) / 1.2).clamp(0.0, 1.0) * (run / 4.0).min(1.0);
-        1.0 + loose + 0.35 * unseen + 0.5 * behind
+        1.0 + loose + 0.2 * unseen + 0.3 * behind
     }
 
     /// Seconds a pass takes longer to leave his hand when it is thrown

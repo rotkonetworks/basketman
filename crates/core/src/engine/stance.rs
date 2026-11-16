@@ -190,7 +190,7 @@ pub fn clamp_gaze(body: Vec2, gaze: Vec2) -> Vec2 {
 /// How fast the body turns, radians per second: quick feet turn faster, a
 /// sprinting body hardly at all, and a man off balance slowly.
 pub fn turn_rate(sk: &Skill, speed_frac: f32, balance: f32) -> f32 {
-    let base = 4.6 + 0.36 * sk.agility;
+    let base = 6.5 + 0.40 * sk.agility;
     base * (1.0 - 0.72 * speed_frac.clamp(0.0, 1.0)) * (0.55 + 0.45 * balance.clamp(0.0, 1.0))
 }
 
@@ -295,7 +295,7 @@ pub fn shot_multiplier(ang: f32, fwd: f32, side: f32, balance: f32, skill: f32, 
 pub fn pass_cost(c: f32, skill: f32) -> (f32, f32) {
     let behind = ((0.7 - c) / 1.7).clamp(0.0, 1.0);
     let relief = 1.0 - 0.6 * skill.clamp(0.0, 1.0);
-    (0.35 * behind * relief, 1.2 * behind * relief)
+    (0.30 * behind * relief, 0.6 * behind * relief)
 }
 
 // ---- the ball handler's dribble ------------------------------------------

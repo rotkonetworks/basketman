@@ -34,9 +34,9 @@ const GAME: f32 = 1.14;
 /// What a live two, a three and a finish at the rim add or take off the
 /// error, on top of their own base: the part of in-game difficulty that
 /// the base error shape does not carry.
-const MID_SCALE: f32 = 0.96;
-const THREE_SCALE: f32 = 0.96;
-const RIM_SCALE: f32 = 1.22;
+const MID_SCALE: f32 = 0.85;
+const THREE_SCALE: f32 = 0.93;
+const RIM_SCALE: f32 = 1.40;
 /// What each point of rating above 10 takes off the error of a jump shot,
 /// of a finish at the rim, and of a free throw.
 const SKILL_SLOPE: f32 = 0.035;
@@ -48,7 +48,7 @@ const FT_SLOPE: f32 = 0.045;
 /// skill above 10 adds to that.
 const CONTEST_THREE: f32 = 0.45;
 const CONTEST_MID: f32 = 0.35;
-const CONTEST_RIM: f32 = 1.1;
+const CONTEST_RIM: f32 = 1.5;
 const DUNK_CONTEST: f32 = 1.5;
 const GUARD_SLOPE: f32 = 0.04;
 /// A dunk from the very top of his reach is shaky: what each metre short
@@ -83,7 +83,7 @@ const HAND_STANDING: f32 = 0.75;
 const ARM_SHARE: f32 = 0.37;
 /// How much shorter than his arm the reach is at which his hand meets a
 /// ball in flight: a block needs the ball well inside it, not at the fingertip.
-const BLOCK_SLACK: f32 = 0.292;
+const BLOCK_SLACK: f32 = 0.272;
 // ---- the loose ball ------------------------------------------------------
 /// How high a rebounder jumps, as a share of the most he can.
 const JUMP_FRAC: f32 = 0.9;
@@ -3574,7 +3574,11 @@ impl Game {
                 Style::Hook => (ang - 1.5708).abs(),
                 // A finish from a driver already faces the rim; a post player
                 // with his back to it has to turn first.
-                Style::Layup | Style::Dunk if p.dist(HOOP) < 1.3 || ang < 0.6 => 0.0,
+                Style::Layup | Style::Dunk
+                    if p.dist(HOOP) < 0.4 || (p.dist(HOOP) < 1.3 && speed > 1.5) || ang < 0.6 =>
+                {
+                    0.0
+                }
                 Style::Layup | Style::Dunk => ang - 0.3,
                 _ if self.play.source == Source::Forced => 0.0,
                 _ => (ang - 0.25).max(0.0),
