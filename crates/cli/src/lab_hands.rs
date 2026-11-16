@@ -293,3 +293,104 @@ pub fn relations(games: usize) {
         }
     }
 }
+
+/// One half-court possession written out from the recording: who has the
+/// ball, each pass with its kind and what became of it, who cut where, and
+/// how it ended. `set` is the offense (0 Motion ... by `OffenseSet::ALL`).
+pub fn possession(set: usize, nth: usize) {
+    use basketman_core::court::{HOOP, Vec2};
+    let w = World::generate(7, 12);
+    let n = w.teams.len();
+    let mut shown = 0;
+    for g in 0..60usize {
+        let (a, b) = (g % n, (g * 5 + 1 + g / n) % n);
+        if a == b {
+            continue;
+        }
+        let (mut ta, mut tb) = (w.teams[a].tactics().clone(), w.teams[b].tactics().clone());
+        ta.offense = OffenseSet::ALL[set % OffenseSet::ALL.len()];
+        ta.defense = DefenseScheme::ManToMan;
+        tb.defense = DefenseScheme::ManToMan;
+        tb.offense = OffenseSet::Motion;
+        let (la, lb) = (mk(&w, &ta), mk(&w, &tb));
+        let (r, rec) = simulate_recorded(&la, &lb, &w.rules, &mut Rng::new(4000 + g as u64));
+        // The names, by player id.
+        let name = |id: u32| -> String { { let n = &w.players[id as usize].name; let mut it = n.split(' '); let first = it.next().unwrap_or("?"); format!("{}.{}#{}", &first[..1], it.next_back().unwrap_or("?"), id) } };
+        let slot_name = |side: usize, slot: u8, f: &basketman_core::replay::Frame| -> String {
+            let who = f.who[side][slot as usize] as usize;
+            name(r.boxes[side][who].0 as u32)
+        };
+        // Possessions of side 0 in the half court, found by frames where
+        // side 0 has the offense without a cut for at least eight seconds.
+        let mut i = 0;
+        while i < rec.frames.len() {
+            if rec.frames[i].offense != 0 {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < rec.frames.len() && rec.frames[i].offense == 0 && !rec.frames[i].cut {
+                i += 1;
+            }
+            let (t0, t1) = (rec.frames[start].time, rec.frames[i - 1].time);
+            let ps: Vec<_> = rec.passes.iter().filter(|p| p.side == 0 && p.time >= t0 && p.time <= t1 && !p.inbound).collect();
+            if t1 - t0 < 9.0 || ps.len() < 3 {
+                continue;
+            }
+            shown += 1;
+            if shown <= nth {
+                continue;
+            }
+            println!("{:?} offense, possession from {:.1} s to {:.1} s of the recording ({:.1} s)", ta.offense, t0, t1, t1 - t0);
+            let mut last_cut = [-9.0f32; 5];
+            for f in &rec.frames[start..i] {
+                // Who has it.
+                if let Some((s, k)) = f.holder
+                    && s == 0
+                    && (f.time * 10.0).round() as i64 % 20 == 0
+                {
+                    println!("  {:6.1}  ball with {}", f.time, slot_name(0, k, f));
+                }
+            }
+            for p in &ps {
+                let f = &rec.frames[rec.frame_at(p.time)];
+                let to_name = slot_name(0, p.to, f);
+                println!(
+                    "  {:6.1}  {} passes to {} ({:?}, {:?})",
+                    p.time, slot_name(0, p.from, f), to_name, p.kind, p.outcome
+                );
+            }
+            // Cuts: a man without the ball who goes at least three metres
+            // toward the basket in a second and a half at a run.
+            for j in start + 15..i {
+                let (f0, f1) = (&rec.frames[j - 15], &rec.frames[j]);
+                let hoop = Vec2 { x: HOOP.x, y: HOOP.y };
+                let _ = hoop;
+                for k in 0..5 {
+                    if f1.holder == Some((0, k as u8)) || f0.holder == Some((0, k as u8)) {
+                        continue;
+                    }
+                    let rim = if f1.offense == 0 { Vec2 { x: 26.425, y: 7.5 } } else { Vec2 { x: 1.575, y: 7.5 } };
+                    let (d0, d1) = (f0.pos[0][k].dist(rim), f1.pos[0][k].dist(rim));
+                    if d0 - d1 > 3.0 && d1 < 5.5 && f1.time - last_cut[k] > 3.0 {
+                        last_cut[k] = f1.time;
+                        println!("  {:6.1}  {} cuts to the basket ({:.1} m out to {:.1} m)", f0.time, slot_name(0, k as u8, f1), d0, d1);
+                    }
+                }
+            }
+            for e in rec.events.iter().filter(|e| e.time >= t0 && e.time <= t1 + 1.0 && e.offense == 0) {
+                match &e.kind {
+                    EventKind::Shot { who, kind, made, source, assist, .. } => println!(
+                        "  {:6.1}  {} shoots a {:?} ({:?}) and {}{}",
+                        e.time, name(*who as u32), kind, source, if *made { "makes it" } else { "misses" },
+                        assist.map_or(String::new(), |a| format!(", assisted by {}", name(a as u32)))
+                    ),
+                    EventKind::Turnover { who, kind, .. } => println!("  {:6.1}  turnover by {} ({:?})", e.time, name(*who as u32), kind),
+                    _ => {}
+                }
+            }
+            return;
+        }
+    }
+    println!("no such possession found");
+}

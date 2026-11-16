@@ -768,6 +768,8 @@ struct Play {
     scramble: Option<Scramble>,
     /// Passes this man has held on to because a hand was in the way.
     aborts: u8,
+    /// When each attacker last had the ball this possession.
+    held_at: [f32; 5],
 }
 
 /// A throw-in: who takes the ball out, who is to get it, where from, where
@@ -3571,6 +3573,10 @@ impl Game {
             if self.play.from == Some(j) {
                 *w *= 0.4;
             }
+            // The ball goes round: not back to a man who has just had it.
+            if self.play.t - self.play.held_at[j] < 7.0 {
+                *w *= 0.3;
+            }
         }
         if weights.iter().sum::<f32>() <= 0.0 {
             return self.drive(h, 0.0);
@@ -4909,6 +4915,8 @@ impl Game {
         match f.kind {
             FlightKind::Pass { from, to } => {
                 self.play.aborts = 0;
+                self.play.held_at[from] = self.play.t;
+                self.play.held_at[to] = self.play.t;
                 self.play.holder = Some(to);
                 let near = self.op(to).dist(HOOP) < 2.6;
                 self.play.source = match self.play.task[to] {
@@ -6609,6 +6617,7 @@ impl Play {
             thrown: None,
             scramble: None,
             aborts: 0,
+            held_at: [-99.0; 5],
         }
     }
 }

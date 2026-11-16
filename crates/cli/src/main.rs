@@ -115,6 +115,7 @@ fn main() {
             Some("stats") => lab::stats(games.unwrap_or(400)),
             Some("finish") => lab::finish(games.unwrap_or(300)),
             Some("stance") => lab::stance(games.unwrap_or(120)),
+            Some("hands") if std::env::args().nth(3).as_deref() == Some("possession") => lab_hands::possession(std::env::args().nth(4).and_then(|s| s.parse().ok()).unwrap_or(0), std::env::args().nth(5).and_then(|s| s.parse().ok()).unwrap_or(0)),
             Some("hands") if std::env::args().nth(3).as_deref() == Some("relations") => lab_hands::relations(std::env::args().nth(4).and_then(|s| s.parse().ok()).unwrap_or(120)),
             Some("hands") => lab_hands::run(games.unwrap_or(60)),
             Some("transition") if std::env::args().nth(3).as_deref() == Some("watch") => {
