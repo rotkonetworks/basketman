@@ -69,6 +69,8 @@ mod club_tests;
 #[cfg(test)]
 mod fame_tests;
 #[cfg(test)]
+mod officials_tests;
+#[cfg(test)]
 mod signature_tests;
 
 #[cfg(test)]
