@@ -1,9 +1,12 @@
 //! Desktop and browser frontend. Same code for both: `cargo run -p
 //! basketman-web` natively, `trunk serve` in this directory for wasm.
 
+mod agenda;
 mod app;
 mod arena;
 mod board;
+mod calendar;
+mod club_ui;
 mod coach;
 mod fame_ui;
 mod film;
@@ -26,6 +29,9 @@ mod shell;
 mod signature_ui;
 mod squadroom;
 mod tactic_room;
+mod tboard;
+mod tcards;
+mod tscreen;
 mod theme;
 mod title;
 mod view3d;

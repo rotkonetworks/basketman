@@ -321,7 +321,14 @@ pub fn run(world: &mut World, team: TeamId) {
         (p.training, p.intensity) = plan_individual(p);
     }
     let t = &mut world.teams[team];
+    let old = t.schedule.clone();
     t.schedule = advice.schedule;
+    // Preparation for the next game is the manager's call: keep it.
+    for (slot, s) in old.sessions.iter().enumerate() {
+        if *s == Session::MatchPrep {
+            t.schedule.sessions[slot] = Session::MatchPrep;
+        }
+    }
     t.assistant_notes = advice.reasons;
 }
 

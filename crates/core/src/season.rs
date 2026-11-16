@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::engine::BoxLine;
 use crate::inbox::{Kind, MAX_ROSTER, money};
-use crate::league::{Fixture, Standing, TeamId, TeamStats, World, generate_player, schedule};
+use crate::league::{Fixture, Standing, TeamId, TeamStats, World, generate_player};
 use crate::player::Attr;
 use crate::player::{Player, PlayerId};
 
@@ -71,6 +71,13 @@ pub struct SeasonRecord {
     pub champion: TeamId,
     pub runner_up: Option<TeamId>,
     pub mvp: Option<PlayerId>,
+    /// Every division's final table, the top one first; `table` is the
+    /// first of them.
+    #[serde(default)]
+    pub divisions: Vec<Vec<(TeamId, u16, u16)>>,
+    /// Who won each division below the top, by division number.
+    #[serde(default)]
+    pub division_champions: Vec<TeamId>,
 }
 
 /// A best-of-three playoff series. The higher seed hosts games one and
@@ -119,12 +126,25 @@ pub struct MvpCase {
 }
 
 impl SeasonRecord {
-    /// 1-based finishing position.
+    /// 1-based finishing position, in the club's own division.
     pub fn place(&self, team: TeamId) -> usize {
+        if let Some(t) = self.divisions.iter().find(|t| t.iter().any(|r| r.0 == team)) {
+            return t.iter().position(|r| r.0 == team).map_or(0, |p| p + 1);
+        }
         self.table
             .iter()
             .position(|t| t.0 == team)
             .map_or(0, |p| p + 1)
+    }
+
+    /// The division the club played in that season, 0 being the top.
+    pub fn division_of(&self, team: TeamId) -> Option<usize> {
+        if self.divisions.is_empty() {
+            return self.table.iter().any(|t| t.0 == team).then_some(0);
+        }
+        self.divisions
+            .iter()
+            .position(|t| t.iter().any(|r| r.0 == team))
     }
 }
 
@@ -184,11 +204,11 @@ impl World {
     /// the further off the draft, the less anybody will pay today.
     pub fn pick_value(&self, i: usize) -> i64 {
         let p = &self.picks[i];
-        let n = self.teams.len().max(2) as i64;
+        let n = self.division_size(p.original).max(2) as i64;
         // Where the original club stands now is the best guess at where
         // the pick will fall; before any games, the middle.
         let place = if self.round > 0 {
-            self.table()
+            self.table_of(self.teams[p.original].division)
                 .iter()
                 .position(|&t| t == p.original)
                 .unwrap_or(0) as i64
@@ -222,8 +242,12 @@ impl World {
             return;
         }
         let n = self.teams.len();
-        // Worst record first, in both rounds.
-        let order: Vec<TeamId> = self.table().into_iter().rev().collect();
+        // The lowest division picks first, the worst record first within a
+        // division, in both rounds.
+        let order: Vec<TeamId> = (0..self.division_count())
+            .rev()
+            .flat_map(|d| self.table_of(d).into_iter().rev())
+            .collect();
         let mut slots = Vec::new();
         for round in 1..=2u8 {
             for &original in &order {
@@ -241,11 +265,17 @@ impl World {
             }
         }
         let mut pool = Vec::new();
+        // The class is as deep as the league is big.
+        let step = if self.division_count() > 1 {
+            0.14 * 22.0 / (2 * n + 6) as f32
+        } else {
+            0.14
+        };
         for i in 0..2 * n + 6 {
             let id = self.players.len() as PlayerId;
             // The class thins out: a few who could start tomorrow, then
             // projects.
-            let quality = 9.8 - i as f32 * 0.14;
+            let quality = 9.8 - i as f32 * step;
             let slot = self.rng.range(0, 5) as usize;
             let mut p = generate_player(id, slot, quality, &mut self.rng);
             p.age = 19 + self.rng.range(0, 3) as u8;
@@ -272,11 +302,16 @@ impl World {
                 .collect();
             let body = format!(
                 "The season is over and the draft is open: {} prospects, two rounds, the \
-                 worst record picks first.\n\n{}\n\nOur scouts only know the class roughly, \
+                 {}.\n\n{}\n\nOur scouts only know the class roughly, \
                  so the figures are ranges. Players you shortlisted during the year are no \
                  better known: none of these played in our league.\n\nWhen the draft is done \
                  the new season starts.",
                 draft.pool.len(),
+                if self.division_count() > 1 {
+                    "every club picks, the lowest division first and the worst record first within a division"
+                } else {
+                    "the worst record picks first"
+                },
                 if mine.is_empty() {
                     "We traded our picks away and will only be watching.".to_string()
                 } else {
@@ -423,7 +458,8 @@ impl World {
     /// Close the books on the season and set up the next one.
     fn new_season(&mut self) {
         let me = self.watch;
-        let table = self.table();
+        let tables = self.division_tables();
+        let table = tables[0].clone();
         let scorers = (0..self.teams.len())
             .map(|t| {
                 self.teams[t]
@@ -448,19 +484,23 @@ impl World {
         // A club over its wage budget keeps renewals at current pay; the
         // books are looked at before they are closed.
         let capped = self.renewals_capped();
-        self.econ_close_season(&table, champion_id);
+        self.econ_close_season(&tables, champion_id);
         let grown = self.develop();
+        let rows = |t: &Vec<TeamId>| -> Vec<(TeamId, u16, u16)> {
+            t.iter()
+                .map(|&c| (c, self.standings[c].wins, self.standings[c].losses))
+                .collect()
+        };
         self.history.push(SeasonRecord {
             champion: champion_id,
             runner_up,
             mvp,
             season: self.season,
-            table: table
-                .iter()
-                .map(|&t| (t, self.standings[t].wins, self.standings[t].losses))
-                .collect(),
+            table: rows(&table),
             stats: self.team_stats.clone(),
             scorers,
+            divisions: tables.iter().map(rows).collect(),
+            division_champions: tables.iter().skip(1).map(|t| t[0]).collect(),
         });
         // The season's box scores go; what each player did in it stays.
         if self.careers.len() < self.players.len() {
@@ -482,7 +522,13 @@ impl World {
             });
         }
         self.fame_close_season(&table, champion_id, runner_up, mvp);
-        self.fans_close_season(&table, champion_id);
+        self.fans_close_season(&tables, champion_id);
+        // The boards judge the season in the divisions the clubs played in.
+        self.club_close_season(&tables, champion_id);
+        // Promotion and relegation: the clubs change division before the
+        // new schedule is drawn.
+        let moved = self.promote_and_relegate(&tables);
+        self.club_after_moves(&moved);
         self.summer_retirements();
         let champion = self.teams[champion_id].name.clone();
         let mvp_line = mvp.map(|p| {
@@ -493,7 +539,7 @@ impl World {
             )
         });
         let place = me
-            .and_then(|m| table.iter().position(|&t| t == m))
+            .and_then(|m| tables.iter().find_map(|t| t.iter().position(|&x| x == m)))
             .map_or(0, |p| p + 1);
 
         // A year older, a year less on every contract.
@@ -561,7 +607,8 @@ impl World {
         self.season += 1;
         self.round = 0;
         self.day = 0;
-        self.fixtures = schedule(n);
+        self.draft_day = 0;
+        self.fixtures = crate::league::schedule_tiers(&self.teams);
         self.standings = vec![Standing::default(); n];
         self.team_stats = vec![TeamStats::default(); n];
         for line in &mut self.season_stats {
@@ -579,20 +626,33 @@ impl World {
             m.day = 0;
         }
 
+        // Every season opens with a training camp.
+        self.begin_preseason();
         self.reserve_summer();
         let staff_news = self.staff_summer(&crate::league::FIRST_NAMES, &crate::league::LAST_NAMES);
         self.econ_open_season();
+        self.career_fill_vacancies();
+        self.club_open_season();
 
         let Some(me) = me else { return };
-        let mut body = format!(
-            "{champion} are champions. We finished {place}{}.\n\n",
-            match place % 10 {
-                1 if place != 11 => "st",
-                2 if place != 12 => "nd",
-                3 if place != 13 => "rd",
-                _ => "th",
-            }
-        );
+        let suffix = match place % 10 {
+            1 if place != 11 => "st",
+            2 if place != 12 => "nd",
+            3 if place != 13 => "rd",
+            _ => "th",
+        };
+        let was = moved.iter().find(|m| m.team == me).map(|m| m.from);
+        let my_div = was.unwrap_or(self.teams[me].division);
+        let mut body = if my_div == 0 {
+            format!("{champion} are champions. We finished {place}{suffix}.\n\n")
+        } else {
+            format!(
+                "{champion} are champions of the First Division. We played in the {}, \
+                 finished {place}{suffix} and {} won it.\n\n",
+                self.division_name(my_div),
+                self.teams[tables[my_div][0]].name
+            )
+        };
         if let Some(line) = mvp_line {
             body += &format!("{line}\n\n");
         }
@@ -643,7 +703,7 @@ impl World {
     /// on the schedule. The top four play best-of-three semifinals (1 v 4,
     /// 2 v 3) and a best-of-three final.
     pub(crate) fn playoffs_step(&mut self, played: &[usize]) {
-        if self.teams.len() < 4 || self.champion.is_some() {
+        if self.division_teams(0).len() < 4 || self.champion.is_some() {
             return;
         }
         for &i in played {
@@ -664,9 +724,9 @@ impl World {
                 s.wins[(winner == s.low) as usize] += 1;
             }
         }
-        let table = self.table();
+        let table = self.table_of(0);
         let seed = |t: TeamId| table.iter().position(|&x| x == t).unwrap_or(usize::MAX);
-        let sunday = (self.round as u32).saturating_sub(1) * 7 + crate::inbox::MATCH_DAY + 1;
+        let sunday = self.round_base(self.round.saturating_sub(1)) + crate::inbox::MATCH_DAY + 1;
         if self.playoffs.is_empty() {
             if !self.season_over() {
                 return;
@@ -740,7 +800,13 @@ impl World {
             return;
         }
         let round = self.round;
-        for s in self.playoffs.iter().filter(|s| s.winner().is_none()) {
+        let base = self.round_base(round);
+        for (k, s) in self
+            .playoffs
+            .iter()
+            .filter(|s| s.winner().is_none())
+            .enumerate()
+        {
             // Game two is at the lower seed's.
             let (home, away) = if s.wins[0] + s.wins[1] == 1 {
                 (s.low, s.high)
@@ -753,6 +819,8 @@ impl World {
                 away,
                 result: None,
                 playoff: true,
+                day: base + 5 + (k % 2) as u32,
+                division: 0,
             });
         }
     }
@@ -764,7 +832,7 @@ impl World {
     /// come with winning: only players from the top half of the table are
     /// considered, and a deep playoff run counts.
     pub fn mvp_race(&self) -> Vec<MvpCase> {
-        let table = self.table();
+        let table = self.table_of(0);
         let mut cases = Vec::new();
         for (place, &t) in table.iter().enumerate() {
             let s = &self.standings[t];

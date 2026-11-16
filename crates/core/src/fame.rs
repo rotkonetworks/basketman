@@ -383,7 +383,7 @@ impl World {
         }
         // Scoring title: most points a game among the regulars.
         let mut scorer: Option<(PlayerId, f32)> = None;
-        for t in 0..self.teams.len() {
+        for t in self.division_teams(0) {
             let team_games = (self.standings[t].wins + self.standings[t].losses).max(1);
             for &p in &self.teams[t].roster {
                 let g = self.games_played[p as usize];

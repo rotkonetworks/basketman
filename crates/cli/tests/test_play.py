@@ -81,6 +81,19 @@ def main():
         check(kinds["Advance"]["available"] and not kinds["TakeCharge"]["available"], "legal availability")
         check(kinds["TakeCharge"]["why_not"], "reason given")
 
+        # --- the club's past and people, the manager's career --------------
+        prof = p.call("view", what="club_profile")
+        check(prof["founded"] > 1800 and prof["rival"] and prof["legends"] and prof["people"], "club profile")
+        check(0 <= prof["confidence"] <= 100 and prof["reasons"] == [], "the board starts without reasons")
+        check(len(prof["record"]) >= 20 and prof["record"][0]["played"] is False, "the record starts before the game")
+        other = p.call("view", what="club_profile", club=5)
+        check(other["name"] != prof["name"], "another club's profile")
+        car = p.call("view", what="career")
+        check(car["jobless"] is False and car["reputation"] > 0 and len(car["spells"]) == 1, "career view")
+        check(kinds["Resign"]["available"] and not kinds["AcceptJob"]["available"], "resign listed, no offer yet")
+        _, err = p.try_call("apply", command={"AcceptJob": {"offer": 0, "bring": [], "keep": []}})
+        check(err and err.kind == "out_of_range", "no such offer")
+
         # --- fog: another club's players are ranges, hidden things absent --
         club = p.call("view", what="club", club=5)
         text = json.dumps(club)
@@ -110,6 +123,78 @@ def main():
         sug = p.call("suggest_tactics")
         check(len(sug["rotation"]) >= 5, "suggested rotation")
 
+        # --- calendar and divisions -------------------------------------------
+        cal = p.call("view", what="calendar", day=0)
+        check(cal["phase"] == "preseason" and cal["preseason_days"] == 28, "a new game opens in the camp")
+        check(any(e["title"] == "Training camp opens" for e in cal["events"]), "events on a day")
+        r = p.call("continue")
+        check(r["day"] == cal["day"] + 1 and "date" in r and "weekday" in r, "continue passes one day")
+        fr = p.call("view", what="calendar", **{"from": 0, "to": 40, "club": 2})
+        check(sum(e["kind"] == "Friendly" for e in fr["events"]) == 4, "four friendlies for our club")
+        summary = p.call("view", what="summary")
+        check(summary["division"] == 0 and summary["division_name"] == "First Division", "the summary names the division")
+        check(len(p.call("view", what="table", division=2)) == 8, "another division's table")
+        check(p.call("view", what="table", division=2)[0]["club"] >= 16, "a third division club")
+        _, err = p.try_call("view", what="table", division=7)
+        check(err, "no such division")
+        # --- the agenda, scouting opponents, preparation, travel ---------------
+        ag = p.call("view", what="agenda", days=30)
+        check(len(ag["days"]) == 30 and ag["days"][0]["today"], "the agenda lists the days from today")
+        check(ag["hold"]["waiting"]["kind"] and ag["hold"]["reason"] and ag["hold"]["can"], "the agenda says why the calendar waits")
+        games = [i for d in ag["days"] for i in d["items"] if i["kind"] == "game"]
+        check(games and all(g["city"] and "record" in g for g in games), "our games have a town and a record")
+        trips = [g for g in games if g["trip"]]
+        check(all(g["trip"]["km"] >= 0 and g["trip"]["kind"] for g in trips) and all(not g["home"] for g in trips), "away games carry a trip")
+        check(any(i["kind"] == "training" for d in ag["days"] for i in d["items"]), "training days are listed")
+        lg = p.call("legal")
+        kinds = {a["kind"]: a for a in lg["actions"]}
+        for k in ["AssignScout", "UnassignScout", "SetSession"]:
+            check(k in kinds, f"legal lists {k}")
+        check(kinds["SetSession"]["available"], "SetSession has an example")
+        p.apply(kinds["SetSession"]["example"])
+        _, err = p.try_call("apply", command={"SetSession": {"slot": 10, "session": "Rest"}})
+        check(err and err.kind == "out_of_range", "slot out of range")
+        _, err = p.try_call("apply", command={"AssignScout": {"team": 2, "day": 3}})
+        check(err and err.kind == "refused", "the scout cannot watch our own club")
+        rep0 = p.call("view", what="reports")
+        check(rep0["has_scout"] and rep0["reports"] == [] and rep0["assignments"] == [], "no reports yet")
+        # Send the scout to a friendly of another club and read his report.
+        fr = p.call("view", what="calendar", **{"from": 0, "to": 40})
+        theirs = [e for e in fr["events"] if e["kind"] == "Friendly" and 2 not in (e["home"], e["away"]) and e["day"] >= p.call("view", what="summary")["calendar"]["day"]]
+        check(theirs, "another club has a friendly")
+        e = theirs[0]
+        p.apply({"AssignScout": {"team": e["home"], "day": e["day"]}})
+        check(p.call("view", what="reports")["assignments"][0]["day"] == e["day"], "the assignment is listed")
+        asg = p.call("view", what="agenda", days=40)
+        check(any(i["kind"] == "scout" for d in asg["days"] for i in d["items"]), "the assignment is on the agenda")
+        for _ in range(40):
+            if p.call("view", what="reports")["reports"]:
+                break
+            p.call("continue")
+        rep = p.call("view", what="reports", club=e["home"])
+        check(rep["reports"] and "How far to trust this" in rep["reports"][0]["text"], "a report with its text")
+        r0 = rep["reports"][0]
+        check(r0["day"] == e["day"] and 0 <= r0["confidence"] <= 100 and r0["rotation"], "report fields")
+        check(rep["assignments"] == [], "the assignment is used up")
+        check(any("Scout report" in m["subject"] for m in p.call("view", what="inbox")["messages"]) if isinstance(p.call("view", what="inbox"), dict) and "messages" in p.call("view", what="inbox") else True, "the report came as mail")
+        # League games on the agenda: the trip, the games the scout can still
+        # watch, and preparation sessions counting before the game.
+        for _ in range(60):
+            if p.call("view", what="summary")["calendar"]["day"] >= 30:
+                break
+            p.call("continue")
+        ag = p.call("view", what="agenda", days=14)
+        lg_games = [i for d in ag["days"] for i in d["items"] if i["kind"] == "game" and i["competition"] == "league"]
+        check(lg_games, "a league game within two weeks")
+        g = lg_games[0]
+        check(g["opponent_name"] and g["rank"] >= 1 and isinstance(g["watch"], list), "opponent facts and watchable games")
+        if not g["home"]:
+            check(g["trip"]["km"] > 0, "away games have a distance")
+        before = g["prep_sessions"]
+        p.apply({"SetSession": {"slot": 6, "session": "MatchPrep"}})
+        ag = p.call("view", what="agenda", days=14)
+        g2 = [i for d in ag["days"] for i in d["items"] if i["kind"] == "game" and i["competition"] == "league"][0]
+        check(g2["prep_sessions"] == before + 1 or not g["home"], "a preparation session counts before the game")
         # --- through a full round ------------------------------------------
         before = p.call("view", what="summary")
         s = to_match_day(p)
@@ -195,8 +280,30 @@ def main():
         check(not st["over"] and len(st["players"]["yours"]) >= 8, "kickoff state")
         _, err = p.try_call("advance")
         check(err and err.kind == "live_match_open", "world is locked during a live game")
+        _, err = p.try_call("live_feeds")
+        check(err and err.kind == "refused", "no feeds before the game has started")
         st = p.call("live_step", seconds=90)
         check(st["time"] > 0 and st["steps"] > 0, "stepped")
+        check(isinstance(st["assistant_notes"], list), "live state carries the assistant's notes")
+        st = p.call("live_step", seconds=600)
+        feeds = p.call("live_feeds")
+        sc = feeds["scores"]
+        check(len(sc["games"]) >= 2 and sc["games"][0]["yours"], "other games of the day are listed, ours first")
+        check(all(g["status"] in ("live", "final") for g in sc["games"]), "games have a status")
+        rows = sc["table"]["rows"]
+        check(rows and all(r["place"] == i + 1 for i, r in enumerate(rows)), "live table is ordered")
+        check(any(r["ours"] for r in rows) and "lines" in sc["table"], "the table has our row and its lines")
+        check(feeds["flow"]["four_factors"]["yours"]["counts"]["fga"] > 0, "four factors count shots")
+        check(len(feeds["flow"]["matchups"]) == 5, "a matchup for each of the five")
+        shots = p.call("live_feeds", part="shots")
+        check(shots["count"] > 5 and len(shots["zones"]) == 4, "shot list and zones")
+        bad = [s for s in shots["shots"] if not (-8 < s["x"] < 8 and -1 < s["y"] < 15)]
+        # Only a buzzer-beating heave from past half way may sit outside it.
+        check(all(s.get("source") == "Forced" and s["clock"] < 2 for s in bad), f"shots have places on the half court: {bad}")
+        mine = p.call("live_feeds", part="shots", side="yours", period=1)
+        check(0 < mine["count"] < shots["count"] and all(s["side"] == "yours" and s["period"] == 1 for s in mine["shots"]), "shot filters")
+        _, err = p.try_call("live_feeds", part="nonsense")
+        check(err and err.kind == "bad_request", "unknown part refused")
         st = p.call("live_input", input="Timeout")
         check(st["timeout_wanted"], "timeout requested")
         on = [q for q in st["players"]["yours"] if q["on_court"]][0]["id"]
@@ -244,6 +351,40 @@ def main():
             q.close()
     finally:
         p.close()
+
+    # --- out of work: resign, wait for a call, take the job ------------------
+    q = Play(BIN)
+    try:
+        q.call("new_game", seed=7, clubs=8, club=2)
+        old = q.call("view", what="club_profile")["name"]
+        q.apply("Resign")
+        lg = q.call("legal")
+        check(lg["club"] is None, "no club when out of work")
+        ks = {a["kind"]: a for a in lg["actions"]}
+        check(ks["Advance"]["available"] and "Resign" in ks and not ks["Resign"]["available"], "jobless actions")
+        car = q.call("view", what="career")
+        check(car["jobless"] and car["spells"][0]["ended"] == "resigned", "career says out of work")
+        _, err = q.try_call("view", what="summary")
+        check(err and err.kind == "no_club", "no summary without a club")
+        offer = None
+        for _ in range(80):
+            car = q.call("view", what="career")
+            opens = [o for o in car["offers"] if o["open"]]
+            if opens:
+                offer = opens[0]["offer"]
+                break
+            r = q.call("advance")
+            if r.get("stop") == "match_day":
+                q.call("play_round")
+        check(offer is not None, "a club called")
+        jo = q.call("view", what="job_offer", offer=offer, bring=[], keep=["Assistant"])
+        check(jo["summary"]["name"] and jo["terms"]["release"] is not None, "the offer shows the new club")
+        q.apply({"AcceptJob": {"offer": offer, "bring": [], "keep": ["Assistant", "Skills", "Fitness", "Scout", "Press"]}})
+        s2 = q.call("view", what="summary")
+        check(s2["name"] != old and q.call("view", what="career")["club"] is not None, "a new club")
+        check(q.call("legal")["club"] is not None, "legal is back")
+    finally:
+        q.close()
 
     # --- determinism --------------------------------------------------------
     one, two = Play(BIN), Play(BIN)

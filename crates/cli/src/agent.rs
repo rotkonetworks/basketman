@@ -15,6 +15,7 @@ use basketman_core::inbox::{Deal, Stop};
 use basketman_core::instructions::{Coach, Instructions};
 use basketman_core::league::{LiveInput, LiveRound, TeamId, World};
 use basketman_core::player::PlayerId;
+use basketman_core::staff::Job;
 use basketman_core::save;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -71,6 +72,8 @@ struct Live {
     round: LiveRound,
     coach: Option<Coach>,
     team: TeamId,
+    /// What the assistant has noticed (see `feeds`).
+    notes: crate::feeds::Notes,
 }
 
 #[derive(Default)]
@@ -170,6 +173,18 @@ fn outcome_json(w: &World, o: &Outcome) -> Value {
     if let Some(s) = o.slot {
         out.insert("slot".into(), json!(s));
     }
+    if let Some(d) = o.day {
+        out.insert("date".into(), json!(w.day_label(d)));
+        out.insert("weekday".into(), json!(w.weekday(d)));
+        // What is on the new day for the manager's own club.
+        let mine: Vec<Value> = w
+            .events_on(d)
+            .iter()
+            .filter(|e| me.is_some() && (e.home == me || e.away == me) || e.home.is_none())
+            .map(|e| to_json(e))
+            .collect();
+        out.insert("today".into(), Value::Array(mine));
+    }
     if !o.played.is_empty() {
         out.insert("played".into(), json!(o.played));
         let games: Vec<Value> = o
@@ -239,6 +254,11 @@ impl Session {
             "view" => self.view(a),
             "legal" => {
                 let w = self.world()?;
+                if w.watch.is_none() {
+                    return Ok(to_json(
+                        &w.legal_jobless().ok_or_else(|| bad("nobody is in charge of a club"))?,
+                    ));
+                }
                 let me = self.club()?;
                 Ok(to_json(&w.legal(me).ok_or_else(|| bad("no club"))?))
             }
@@ -252,8 +272,13 @@ impl Session {
             "trade_check" => self.trade_check(a),
             "apply" => self.apply(a.get("command").unwrap_or(a)),
             "advance" => self.apply(&json!("Advance")),
+            "continue" => self.apply(&json!("Continue")),
             "play_round" => {
-                if get_bool(a, "instructions")?.unwrap_or(false) {
+                let today = get_bool(a, "today")?.unwrap_or(false);
+                if today {
+                    // Standing instructions, if there are any, coach it.
+                    self.apply(&json!("PlayToday"))
+                } else if get_bool(a, "instructions")?.unwrap_or(false) {
                     self.apply(&json!("PlayWithInstructions"))
                 } else {
                     self.apply(&json!("PlayRound"))
@@ -281,6 +306,13 @@ impl Session {
             "live_state" => Ok(self.live_state()?),
             "live_step" => self.live_step(a),
             "live_input" => self.live_input(a),
+            "live_feeds" => {
+                let w = self.world()?;
+                let live = self.live.as_ref().ok_or_else(|| {
+                    AgentError::new("no_live_match", "no live match: use kickoff")
+                })?;
+                crate::feeds::report(w, &live.round, live.team, &live.notes, a)
+            }
             "live_finish" => self.live_finish(),
             "ping" => Ok(json!("pong")),
             other => Err(AgentError::new(
@@ -295,13 +327,17 @@ impl Session {
         let seed = get_u64(a, "seed")?.unwrap_or(1);
         let clubs = get_u64(a, "clubs")?.unwrap_or(12) as usize;
         let club = get_u64(a, "club")?.unwrap_or(0) as usize;
+        let divisions = get_u64(a, "divisions")?.unwrap_or(3) as usize;
         if !(2..=20).contains(&clubs) || !clubs.is_multiple_of(2) {
             return Err(bad("clubs must be an even number from 2 to 20"));
         }
-        if club >= clubs {
-            return Err(bad(format!("club must be 0..={}", clubs - 1)));
+        if !(1..=3).contains(&divisions) {
+            return Err(bad("divisions must be 1, 2 or 3"));
         }
-        let mut w = World::generate(seed, clubs);
+        if club >= clubs * divisions {
+            return Err(bad(format!("club must be 0..={}", clubs * divisions - 1)));
+        }
+        let mut w = World::new_career_tiers(seed, clubs, divisions);
         w.apply(Command::TakeCharge(club))?;
         self.world = Some(w);
         self.view(&json!({"what": "summary"}))
@@ -316,6 +352,10 @@ impl Session {
         self.world = Some(w);
         if self.world()?.watch.is_some() {
             self.view(&json!({"what": "summary"}))
+        } else if self.world()?.jobless() {
+            let career = to_json(&self.world()?.view_career());
+            Ok(json!({"loaded": true, "jobless": true, "career": career,
+                      "note": "you are out of work: advance, play_round, and answer the offers that come"}))
         } else {
             Ok(json!({"loaded": true, "note": "no club is managed in this save"}))
         }
@@ -332,9 +372,49 @@ impl Session {
 
     fn view(&self, a: &Value) -> Res {
         let w = self.world()?;
-        let me = self.club()?;
         let what = get_str(a, "what")?.unwrap_or("summary");
         let none = || AgentError::new("view_unavailable", "no such thing to show");
+        // These work without a club too: an out-of-work manager reads his
+        // career and the offers.
+        match what {
+            "career" => return Ok(to_json(&w.view_career())),
+            "inbox" if w.jobless() => {
+                return Ok(to_json(&w.view_inbox(0).ok_or_else(none)?));
+            }
+            "job_offer" => {
+                let offer = need_u64(a, "offer")? as usize;
+                let jobs = |key: &str| -> Result<Vec<Job>, AgentError> {
+                    match a.get(key) {
+                        None | Some(Value::Null) => Ok(Vec::new()),
+                        Some(v) => serde_json::from_value(v.clone())
+                            .map_err(|e| bad(format!("{key} must be a list of jobs: {e}"))),
+                    }
+                };
+                let bring = jobs("bring")?;
+                // Without `keep`, everybody at the new club stays.
+                let keep = if a.get("keep").is_some_and(|k| !k.is_null()) {
+                    jobs("keep")?
+                } else {
+                    Job::HIRED.to_vec()
+                };
+                return w
+                    .view_job_offer(offer, &bring, &keep)
+                    .map(|v| to_json(&v))
+                    .map_err(|e| AgentError::new("refused", e));
+            }
+            "club_profile" => {
+                let t = match get_u64(a, "club")? {
+                    Some(t) => t as usize,
+                    None => w.watch.ok_or_else(|| bad("club is required when you have no job"))?,
+                };
+                if t >= w.teams.len() {
+                    return Err(AgentError::new("out_of_range", format!("there is no club {t}")));
+                }
+                return Ok(to_json(&w.club_summary(t)));
+            }
+            _ => {}
+        }
+        let me = self.club()?;
         Ok(match what {
             "summary" => to_json(&w.view_summary(me).ok_or_else(none)?),
             "full" => to_json(&w.view(me).ok_or_else(none)?),
@@ -364,7 +444,11 @@ impl Session {
                 }
                 v
             }
-            "table" => to_json(&w.view_table()),
+            "table" => match get_u64(a, "division")? {
+                Some(d) if (d as usize) < w.division_count() => to_json(&w.view_table_of(d as usize)),
+                Some(_) => return Err(bad("no such division")),
+                None => to_json(&w.view_table()),
+            },
             "fixtures" => {
                 let mut f = w.view_fixtures();
                 if let Some(r) = get_u64(a, "round")? {
@@ -372,6 +456,9 @@ impl Session {
                 }
                 if let Some(c) = get_u64(a, "club")? {
                     f.retain(|x| x.home == c as usize || x.away == c as usize);
+                }
+                if let Some(d) = get_u64(a, "division")? {
+                    f.retain(|x| x.division == d as usize);
                 }
                 to_json(&f)
             }
@@ -384,8 +471,97 @@ impl Session {
             }
             "market" => to_json(&w.view_market(me).ok_or_else(none)?),
             "draft" => to_json(&w.view_draft(me)),
-            "calendar" => to_json(&w.view_calendar()),
-            "leaders" => to_json(&w.view_leaders(get_u64(a, "n")?.unwrap_or(15) as usize)),
+            "calendar" => {
+                let mut v = to_json(&w.view_calendar());
+                // `day`, or `from` and `to`: what is on, across the league
+                // (or for one `club`).
+                let (from, to) = match get_u64(a, "day")? {
+                    Some(d) => (Some(d as u32), Some(d as u32)),
+                    None => (
+                        get_u64(a, "from")?.map(|x| x as u32),
+                        get_u64(a, "to")?.map(|x| x as u32),
+                    ),
+                };
+                if from.is_some() || to.is_some() {
+                    let from = from.unwrap_or(0);
+                    let to = to.unwrap_or(from + 30);
+                    let club = get_u64(a, "club")?.map(|c| c as usize);
+                    let events: Vec<Value> = w
+                        .calendar_events(from, to)
+                        .iter()
+                        .filter(|e| club.is_none() || e.home == club || e.away == club)
+                        .map(|e| {
+                            let mut j = to_json(e);
+                            j["date"] = json!(w.day_label(e.day));
+                            j["weekday"] = json!(w.weekday(e.day));
+                            j
+                        })
+                        .collect();
+                    v["events"] = Value::Array(events);
+                }
+                v
+            }
+            "agenda" => {
+                let days = get_u64(a, "days")?.unwrap_or(21).clamp(1, 120) as u32;
+                to_json(&w.agenda(days))
+            }
+            "reports" => {
+                // The scout's assignments and his reports, newest first,
+                // each with its text; `club` narrows them to one opponent
+                // and adds the games of theirs he could still watch.
+                let club = get_u64(a, "club")?.map(|c| c as usize);
+                if club.is_some_and(|c| c >= w.teams.len()) {
+                    return Err(AgentError::new("out_of_range", "there is no such club"));
+                }
+                let mut all: Vec<&basketman_core::opponent::OpponentReport> = match club {
+                    Some(c) => w.reports_on(c),
+                    None => w.scouting.opponent_reports.iter().rev().collect(),
+                };
+                all.truncate(20);
+                let reports: Vec<Value> = all
+                    .iter()
+                    .map(|r| {
+                        let mut j = to_json(r);
+                        j["date"] = json!(w.day_label(r.day));
+                        j["club_name"] = json!(w.teams[r.team].name);
+                        j["confidence_label"] = json!(r.confidence_label());
+                        j["text"] = json!(w.report_text(r));
+                        j
+                    })
+                    .collect();
+                let assignments: Vec<Value> = w
+                    .scouting
+                    .assignments
+                    .iter()
+                    .map(|s| {
+                        json!({"day": s.day, "date": w.day_label(s.day), "club": s.team,
+                               "club_name": w.teams[s.team].name})
+                    })
+                    .collect();
+                let watchable: Vec<Value> = club
+                    .map(|c| {
+                        w.watchable_games(c)
+                            .into_iter()
+                            .map(|(day, vs, home)| {
+                                json!({"day": day, "date": w.day_label(day), "vs": vs,
+                                       "vs_name": w.teams[vs].name, "home": home})
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                json!({"has_scout": w.teams[me].office.staffer(Job::Scout).is_some(),
+                       "assignments": assignments, "reports": reports, "watchable": watchable})
+            }
+            "leaders" => {
+                let n = get_u64(a, "n")?.unwrap_or(15) as usize;
+                match get_u64(a, "division")? {
+                    Some(d) if (d as usize) < w.division_count() => {
+                        to_json(&w.view_leaders_in(d as usize, n))
+                    }
+                    Some(_) => return Err(bad("no such division")),
+                    None => to_json(&w.view_leaders(n)),
+                }
+            }
             "league" => to_json(&w.view_league(me).ok_or_else(none)?),
             "finance" => to_json(&w.view_finance(me).ok_or_else(none)?),
             "fans" => to_json(&w.view_finance(me).ok_or_else(none)?.fans),
@@ -393,7 +569,7 @@ impl Session {
             "appearances" => to_json(&w.view_appearances(me).ok_or_else(none)?),
             other => {
                 return Err(bad(format!(
-                    "unknown view {other}; try summary, full, own, squad, player, club, inbox, table, fixtures, box_score, market, draft, calendar, leaders, league, finance, fans, names, appearances"
+                    "unknown view {other}; try summary, full, own, squad, player, club, club_profile, career, job_offer, inbox, table, fixtures, box_score, market, draft, calendar, agenda, reports, leaders, league, finance, fans, names, appearances"
                 )));
             }
         })
@@ -435,6 +611,10 @@ impl Session {
             v["round"] = json!(w.round);
             v["season"] = json!(w.season + 1);
             let _ = me;
+        } else if w.jobless() {
+            v["waiting"] = to_json(&basketman_core::legal::waiting(w));
+            v["jobless"] = json!(true);
+            v["season"] = json!(w.season + 1);
         }
         Ok(v)
     }
@@ -456,14 +636,18 @@ impl Session {
                 "there is no game today: advance to match day first",
             ));
         }
-        let round = w
-            .kickoff(me)
-            .ok_or_else(|| AgentError::new("no_game", "There is no game for you this round."))?;
+        let round = if get_bool(a, "today")?.unwrap_or(false) {
+            w.kickoff_today(me)
+        } else {
+            w.kickoff(me)
+        }
+        .ok_or_else(|| AgentError::new("no_game", "There is no game for you this round."))?;
         let coach = use_rules.then(|| Coach::new(&w.teams[me].instructions, &w.rules));
         self.live = Some(Live {
             round,
             coach,
             team: me,
+            notes: Default::default(),
         });
         self.live_state()
     }
@@ -537,6 +721,7 @@ impl Session {
             "foul_bonus_after": w.rules.bonus_after,
             "standing_rules": live.coach.is_some(),
             "rules_fired": rules_fired,
+            "assistant_notes": crate::feeds::recent(w, &live.round, live.team, &live.notes, 3),
             "team": live.team,
         }))
     }
@@ -570,6 +755,7 @@ impl Session {
                 None => live.round.step(),
             };
             n += 1;
+            live.notes.watch(w, &live.round);
             if let Some(p) = p {
                 paused = pause_name(p, me);
                 break;

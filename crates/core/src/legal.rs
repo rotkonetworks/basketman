@@ -36,6 +36,8 @@ pub enum Waiting {
     Offer { message: u32, offer: usize },
     /// A question from the press is open. It lapses after the next round.
     Press { question: usize },
+    /// Another club has offered you its job: `AcceptJob` or `DeclineJob`.
+    JobOffer { offer: usize },
     /// A sponsor's proposal is open.
     SponsorOffer { offer: usize },
     /// A sponsor wants one of your players at an event: `AnswerAppearance`.
@@ -47,8 +49,9 @@ pub enum Waiting {
     Nothing,
 }
 
-/// Everything waiting, most urgent first. Never empty: ends with
-/// `MatchDay` or `Nothing`.
+/// Everything waiting, most urgent first. Never empty: `MatchDay` or
+/// `Nothing` comes after everything that holds the calendar, and only job
+/// offers follow it.
 pub fn waiting_all(w: &World) -> Vec<Waiting> {
     let mut out = Vec::new();
     if w.draft.as_ref().is_some_and(|d| d.on_clock() == w.watch) && w.watch.is_some() {
@@ -89,6 +92,11 @@ pub fn waiting_all(w: &World) -> Vec<Waiting> {
     } else {
         Waiting::Nothing
     });
+    // A club's offer of its job waits for nobody and blocks nothing, so it
+    // comes after the day's business and is never the first thing.
+    for offer in w.open_job_offers() {
+        out.push(Waiting::JobOffer { offer });
+    }
     out
 }
 
@@ -114,7 +122,8 @@ pub struct ActionSpec {
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Legal {
-    pub club: TeamId,
+    /// `None` when you are out of work.
+    pub club: Option<TeamId>,
     pub waiting: Waiting,
     /// Everything waiting, most urgent first.
     pub pending: Vec<Waiting>,
@@ -152,11 +161,109 @@ impl World {
         }
         let pending = waiting_all(self);
         Some(Legal {
-            club,
+            club: Some(club),
             waiting: pending[0].clone(),
             pending,
             actions: self.action_specs(club),
         })
+    }
+
+    /// What an out-of-work manager can do: let time pass, read his mail and
+    /// answer the offers that come.
+    pub fn legal_jobless(&self) -> Option<Legal> {
+        if !self.jobless() {
+            return None;
+        }
+        let pending = waiting_all(self);
+        let mut actions = Vec::new();
+        actions.push(spec(
+            "Advance",
+            "Let the calendar run until a game, new mail or the draft. Returns why it stopped.",
+            None,
+            json!({}),
+            Some(Command::Advance),
+        ));
+        actions.push(spec(
+            "Continue",
+            "Pass one day. Every club's games are played on their days, by the assistants.",
+            None,
+            json!({}),
+            Some(Command::Continue),
+        ));
+        let over = self.season_over().then(|| "The season is over.".to_string());
+        actions.push(spec(
+            "PlayRound",
+            "Play this round's games. You manage nobody, so all are played by the assistants.",
+            over,
+            json!({}),
+            Some(Command::PlayRound),
+        ));
+        let unread: Vec<u32> = self.inbox().iter().filter(|m| !m.read).map(|m| m.id).collect();
+        actions.push(spec(
+            "MarkRead",
+            "Mark a message read.",
+            None,
+            json!({"message": {"choices": unread}}),
+            unread.first().map(|&id| Command::MarkRead(id)),
+        ));
+        actions.extend(self.job_specs());
+        Some(Legal {
+            club: None,
+            waiting: pending[0].clone(),
+            pending,
+            actions,
+        })
+    }
+
+    /// The career commands: answering a job offer, resigning.
+    fn job_specs(&self) -> Vec<ActionSpec> {
+        let open = self.open_job_offers();
+        let list: Vec<Value> = open
+            .iter()
+            .map(|&i| {
+                let o = &self.career.offers[i];
+                json!({"offer": i, "club": o.club, "club_name": self.teams[o.club].name,
+                       "stature": self.stature(o.club),
+                       "division": self.division_name(self.teams[o.club].division), "why": o.why})
+            })
+            .collect();
+        let draft = self
+            .draft
+            .is_some()
+            .then(|| "The draft is on. Finish it first.".to_string());
+        let mut out = Vec::new();
+        out.push(spec(
+            "AcceptJob",
+            "Take another club's job. `bring`: jobs on your staff whose holders you ask to come (those who are willing do, the rest stay); `keep`: jobs at the new club whose holders stay (the others are paid off; a loyal owner limits how many). See view job_offer for what each says before you sign.",
+            draft.clone(),
+            json!({"offer": {"choices": list},
+                   "bring": {"jobs": ["Assistant", "Skills", "Fitness", "Scout", "Press"]},
+                   "keep": {"jobs": ["Assistant", "Skills", "Fitness", "Scout", "Press"]}}),
+            open.first().map(|&offer| Command::AcceptJob {
+                offer,
+                bring: Vec::new(),
+                keep: Job::HIRED.to_vec(),
+            }),
+        ));
+        out.push(spec(
+            "DeclineJob",
+            "Turn down a job offer.",
+            None,
+            json!({"offer": {"choices": list}}),
+            open.first().map(|&i| Command::DeclineJob(i)),
+        ));
+        out.push(spec(
+            "Resign",
+            "Leave your club. You are out of work until somebody calls, and your reputation is untouched.",
+            if self.watch.is_none() {
+                Some("You have no job to leave.".to_string())
+            } else {
+                draft
+            },
+            json!({}),
+            Some(Command::Resign),
+        ));
+        out
     }
 
     /// A rotation `SetTactics` accepts: the assistant's own choice of the
@@ -239,9 +346,30 @@ impl World {
             json!({}),
             Some(Command::Advance),
         ));
+        out.push(spec(
+            "Continue",
+            "Pass one day: other clubs' games, reserve games and friendlies are played on their days. Does nothing while you have a game to play today.",
+            None,
+            json!({}),
+            Some(Command::Continue),
+        ));
         let over = self
             .season_over()
             .then(|| "The season is over.".to_string());
+        let no_game = if over.is_some() {
+            over.clone()
+        } else if self.user_fixture().is_none() {
+            Some("You have no game this round.".to_string())
+        } else {
+            None
+        };
+        out.push(spec(
+            "PlayToday",
+            "Play only today's games, with the assistant coaching yours; the rest of the round is played on its days.",
+            no_game,
+            json!({}),
+            Some(Command::PlayToday),
+        ));
         out.push(spec(
             "PlayRound",
             "Play this round's games with the assistant coaching yours.",
@@ -259,6 +387,13 @@ impl World {
         out.push(spec(
             "PlayLive",
             "Not for direct use: a live game you coach is played with the live match requests of the protocol, and logged as this.",
+            Some("Use kickoff and live inputs.".into()),
+            json!({}),
+            None,
+        ));
+        out.push(spec(
+            "PlayLiveToday",
+            "Not for direct use: a live game of today's games only, logged as this.",
             Some("Use kickoff and live inputs.".into()),
             json!({}),
             None,
@@ -447,6 +582,45 @@ impl World {
             } else {
                 sl_example.map(|p| Command::Shortlist { player: p, on: true })
             },
+        ));
+
+        // The scout's game, preparation and training sessions.
+        let scout_example = (|| {
+            let first = self.agenda(30).days.into_iter().flat_map(|d| d.items).find_map(|i| match i {
+                crate::agenda::AgendaItem::Game(g) if g.competition != "friendly" => Some(g),
+                _ => None,
+            })?;
+            let pick = first.watch.iter().find(|x| x.before_meeting && x.busy_with.is_none() && !x.assigned)?;
+            Some(Command::AssignScout { team: first.opponent, day: pick.day })
+        })();
+        let no_scout = team
+            .office
+            .staffer(Job::Scout)
+            .is_none()
+            .then(|| "You have no chief scout.".to_string());
+        out.push(spec(
+            "AssignScout",
+            "Send the chief scout to watch a club play on a day: he files an opponent report after the game (view reports). One game a day; replaces what he was to do that day. While at a game he does no player scouting elsewhere. The agenda lists, for each of our games, the opponent's games he can still watch before we meet.",
+            no_scout,
+            json!({"team": "the club to watch (not yours)", "day": "day number of a game of that club still to play, today or later"}),
+            scout_example,
+        ));
+        out.push(spec(
+            "UnassignScout",
+            "Take the chief scout off his assignment on a day.",
+            None,
+            json!({"day": {"choices": self.scouting.assignments.iter().map(|a| a.day).collect::<Vec<_>>()}}),
+            self.scouting.assignments.first().map(|a| Command::UnassignScout { day: a.day }),
+        ));
+        out.push(spec(
+            "SetSession",
+            "Set one session of the weekly training plan; slot 0..9 is Monday morning, Monday afternoon ... Friday afternoon. Use MatchPrep for match preparation: in the week of a league game these sessions prepare for the next opponent and help only as far as the scout's report on them is right (an edge of up to a quarter of a point of belief for four sessions and a fully right report), and they build nothing else. Sessions on a day lost to a long trip do not count.",
+            None,
+            json!({"slot": {"range": [0, 9]}, "session": names(&Session::ALL), "now": team.schedule.sessions}),
+            Some(Command::SetSession {
+                slot: 7,
+                session: if team.schedule.sessions[7] == Session::MatchPrep { Session::Tactics } else { Session::MatchPrep },
+            }),
         ));
 
         // Draft.
@@ -792,6 +966,7 @@ impl World {
                 },
             })),
         ));
+        out.extend(self.job_specs());
         out
     }
 }
@@ -844,6 +1019,10 @@ mod tests {
     fn what_it_lists_is_accepted_and_what_it_refuses_is_refused() {
         let mut w = World::generate(31, 8);
         w.apply(Command::TakeCharge(2)).unwrap();
+        // The board's patience is not what this test is about: this club
+        // finishes last without a manager's hand on it.
+        w.club.clubs[2].board.owner.patience = 20;
+        w.club.clubs[2].board.chairman = None;
         assert_eq!(w.legal(0), None);
         let n = check(&w);
         assert!(n >= 15, "only {n} examples");

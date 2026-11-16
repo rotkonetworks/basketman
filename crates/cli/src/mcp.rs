@@ -20,7 +20,7 @@ const SUPPORTED: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11
 const INSTRUCTIONS: &str = "You manage a basketball club in a deterministic league sim. Start with new_game (or load_game). \
 Then call view with what=summary: it says what the game is waiting for. Read the inbox (view what=inbox): offers for your players, press questions, \
 sponsor proposals, appearance requests and the draft need answers; the finance view has the ticket price (SetTicketPrice), budgets (MoveBudget) and facilities (UpgradeFacility); SetMedia gives players media work for fame and fans; use legal_actions to see exactly which commands are valid and their choices, then apply_command. \
-Move time with advance (stops at match day, new mail or the draft) and play_round on match days. Leave standing_rules with set_instructions \
+Move time with advance (stops at match day, new mail or the draft), continue (one day) and play_round on match days. Leave standing_rules with set_instructions \
 if you do not want to coach live. Other clubs' players are shown as ranges that narrow when you shortlist them.";
 
 struct Tool {
@@ -39,13 +39,14 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "new_game",
             op: "new_game",
-            description: "Start a new league and take charge of one club. The same seed gives the same league and the same results for the same decisions. Returns the summary view. Call this first unless you load a save.",
+            description: "Start a new league (three divisions by default, opening in the preseason) and take charge of one club. The same seed gives the same league and the same results for the same decisions. Returns the summary view. Call this first unless you load a save.",
             schema: || {
                 obj(
                     json!({
                         "seed": {"type": "integer", "minimum": 0, "description": "Random seed, default 1."},
-                        "clubs": {"type": "integer", "minimum": 2, "maximum": 20, "description": "Number of clubs, even, default 12."},
-                        "club": {"type": "integer", "minimum": 0, "description": "Which club (0-based) you manage, default 0."}
+                        "clubs": {"type": "integer", "minimum": 2, "maximum": 20, "description": "Clubs in each division, even, default 12."},
+                        "divisions": {"type": "integer", "minimum": 1, "maximum": 3, "description": "Number of divisions, default 3. Division 0 (First Division) is the top; clubs 0..clubs-1 are in it, the next clubs in the Second, and so on."},
+                        "club": {"type": "integer", "minimum": 0, "description": "Which club (0-based) you manage, default 0 (the first club of the First Division). Starting in a lower division is the long road up."}
                     }),
                     &[],
                 )
@@ -66,15 +67,20 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "view",
             op: "view",
-            description: "Look at the world exactly as your club's manager sees it. Start with what=summary (calendar, record, budget, next game, and what the game is waiting for). Other views: own (your whole club: squad with attributes, condition, contracts, tactics playbook, training, staff, finances, arena, sponsors, standing instructions), squad, player (needs player id; for other clubs' players the figures are ranges that narrow when you shortlist him), club (needs club id: public facts, scouted squad), inbox (messages, with offers and questions that need answers; unread_only optional), table, fixtures (optional round, club), box_score (needs fixture index), market (free agents, shortlist, staff for hire), draft (prospects and order while a draft is on), calendar, leaders, league (with the biggest names and the hall of fame), finance (ticket price and a preview of crowd and gate one step either side, board budgets, overdraft, luxury tax, facilities, projection, shop and top shirt sellers, fan base), fans, names (biggest names and hall of fame; n optional), appearances (sponsors' requests for a player's time), full (everything; large). Fame is public for every player; media work and manner in public are shown for your own players only.",
+            description: "Look at the world exactly as your club's manager sees it. Start with what=summary (calendar, record, budget, next game, and what the game is waiting for). Other views: own (your whole club: squad with attributes, condition, contracts, tactics playbook, training, staff, finances, arena, sponsors, standing instructions), squad, player (needs player id; for other clubs' players the figures are ranges that narrow when you shortlist him), club (needs club id: public facts, scouted squad), inbox (messages, with offers and questions that need answers; unread_only optional), table, fixtures (optional round, club), box_score (needs fixture index), market (free agents, shortlist, staff for hire), draft (prospects and order while a draft is on), calendar, agenda (days optional: the next weeks day by day: our games with opponent, town, record, form, trip length, the scout's report and the opponent's games he can still watch before we meet, training and preparation sessions, scout assignments, deadlines, mail needing an answer, and why the calendar is waiting), reports (opponent reports from the scout with text, plus his assignments; club optional adds that club's games he could watch), leaders, league (with the biggest names and the hall of fame), finance (ticket price and a preview of crowd and gate one step either side, board budgets, overdraft, luxury tax, facilities, projection, shop and top shirt sellers, fan base), fans, names (biggest names and hall of fame; n optional), appearances (sponsors' requests for a player's time), club_profile (any club's history, honours, legends, rival, owner and chairman with their traits, the board's confidence in the manager and why, arena, squad and the assistant's view; club optional, default yours), career (your reputation, jobs held, job offers, clubs looking for a manager; works when you are out of work), job_offer (needs offer; optional bring and keep, lists of jobs: the new club beside yours, and which of your staff would come), full (everything; large). Fame is public for every player; media work and manner in public are shown for your own players only.",
             schema: || {
                 obj(
                     json!({
-                        "what": {"type": "string", "enum": ["summary", "own", "squad", "player", "club", "inbox", "table", "fixtures", "box_score", "market", "draft", "calendar", "leaders", "league", "finance", "fans", "names", "appearances", "full"]},
+                        "what": {"type": "string", "enum": ["summary", "own", "squad", "player", "club", "inbox", "table", "fixtures", "box_score", "market", "draft", "calendar", "agenda", "reports", "leaders", "league", "finance", "fans", "names", "appearances", "club_profile", "career", "job_offer", "full"]},
                         "player": {"type": "integer", "description": "Player id, for what=player."},
                         "club": {"type": "integer", "description": "Club id, for what=club or a fixtures filter."},
                         "fixture": {"type": "integer", "description": "Fixture index, for what=box_score."},
                         "round": {"type": "integer"},
+                        "division": {"type": "integer", "description": "For what=table or what=leaders: a division (0 is the First Division); default your own. what=league has every table."},
+                        "days": {"type": "integer", "description": "For what=agenda: how many days ahead (default 21)."},
+                        "day": {"type": "integer", "description": "For what=calendar: list everything on this day of the season, across the league."},
+                        "from": {"type": "integer", "description": "For what=calendar: first day of a range of events (with to; club filters)."},
+                        "to": {"type": "integer"},
                         "unread_only": {"type": "boolean"},
                         "n": {"type": "integer"}
                     }),
@@ -106,10 +112,16 @@ fn tools() -> Vec<Tool> {
             schema: || obj(json!({}), &[]),
         },
         Tool {
+            name: "continue",
+            op: "continue",
+            description: "Pass one day. Whatever is scheduled for it happens: other clubs' games, reserve games, preseason friendlies, camp training. Returns the new date and what is on it for your club (`today`), and `stop` if the new day holds mail, a game for you (match_day) or the draft. If you have a game today, nothing is passed (stop=match_day): play it first. Use advance to jump to the next thing that needs you.",
+            schema: || obj(json!({}), &[]),
+        },
+        Tool {
             name: "play_round",
             op: "play_round",
-            description: "Play this round's games on a match day without coaching live. With instructions=true your game is coached by your standing instructions (see set_instructions); otherwise your assistant coach runs it. Returns the scores.",
-            schema: || obj(json!({"instructions": {"type": "boolean"}}), &[]),
+            description: "Play this round's games on a match day without coaching live. By default the whole round (Friday to Sunday) is played at once. With today=true only today's games are played (yours with your standing instructions or the assistant) and the rest of the weekend is played as the days pass. With instructions=true your game is coached by your standing instructions (see set_instructions); otherwise your assistant coach runs it. Returns the scores.",
+            schema: || obj(json!({"instructions": {"type": "boolean"}, "today": {"type": "boolean"}}), &[]),
         },
         Tool {
             name: "suggest_tactics",
@@ -137,8 +149,8 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "live_kickoff",
             op: "kickoff",
-            description: "Coach today's game yourself, live. Only on a match day. After this the world is locked until live_finish: use live_state, live_step and live_input, then live_finish. Set instructions=true to have your standing rules applied automatically while you step. You cannot abort a started game.",
-            schema: || obj(json!({"instructions": {"type": "boolean"}}), &[]),
+            description: "Coach today's game yourself, live. Only on a match day. After this the world is locked until live_finish: use live_state, live_step and live_input, then live_finish. Set instructions=true to have your standing rules applied automatically while you step. Set today=true to hold back only today's games instead of the whole round. You cannot abort a started game.",
+            schema: || obj(json!({"instructions": {"type": "boolean"}, "today": {"type": "boolean"}}), &[]),
         },
         Tool {
             name: "live_state",
@@ -151,6 +163,12 @@ fn tools() -> Vec<Tool> {
             op: "live_step",
             description: "Advance the live game. With seconds=N, play about N seconds of replay time (stops earlier at a timeout, the end of a period or full time); without it, play to the next such pause. Returns the new state and why it paused. Substitutions, timeouts and new orders take effect at the next dead ball.",
             schema: || obj(json!({"seconds": {"type": "number", "minimum": 0}}), &[]),
+        },
+        Tool {
+            name: "live_feeds",
+            op: "live_feeds",
+            description: "The data feeds of a live game, the same as the match screen's Scores, Shots and Flow tabs. part=scores: the day's other games (all divisions) with score, period, clock and when they last scored, and the league table of your division (or `division`) as it stands if every game on now ended at its score, with `was` (place before today) and the promotion/playoff/relegation lines. part=shots: every attempt so far with where it was taken (x, y in metres from the basket's frame), made or missed, zone, distance, contest, assist, plus made/attempted by zone against the league average; filter with side (yours|theirs|both), player (id) and period (1-based). part=flow: the score margin over time, runs of eight points or more, timeouts and substitutions, both sides' four factors, who is hot and cold (last five shots, fouls, your players' energy) and each of your players' matchup. part=notes: what the assistant coach has pointed out so far, each with a ready `input` to send to live_input where there is something to do. Without part: scores, flow and notes. Available once the game has started (live_step).",
+            schema: || obj(json!({"part": {"type": "string", "enum": ["scores", "shots", "flow", "notes"]}, "division": {"type": "integer", "minimum": 0}, "side": {"type": "string", "enum": ["yours", "theirs", "both"]}, "player": {"type": "integer", "minimum": 0}, "period": {"type": "integer", "minimum": 1}}), &[]),
         },
         Tool {
             name: "live_input",

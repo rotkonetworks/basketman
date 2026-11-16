@@ -88,16 +88,16 @@ impl World {
             .map(|d| d.fee / regular.max(1))
             .sum::<i64>()
             * rounds_left;
-        let n = self.teams.len() as i64;
+        let n = self.division_size(team) as i64;
         let place = self
-            .table()
+            .table_of(self.teams[team].division)
             .iter()
             .position(|&t| t == team)
             .map_or(0, |p| p as i64);
         let prize = if self.season_over() || n < 2 {
             0
         } else {
-            PRIZE_TOP * (n - 1 - place) / (n - 1)
+            (PRIZE_TOP as f32 * self.money_scale(team)) as i64 * (n - 1 - place) / (n - 1)
         };
         let tax = -self.tax_view(team).to_pay();
         let now = self.teams[team].budget;

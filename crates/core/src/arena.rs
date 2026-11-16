@@ -282,14 +282,18 @@ impl World {
     /// 0..=1, 1 on top of the table. Early in the year it leans on how the
     /// club did last year.
     pub(crate) fn standing_of(&self, team: TeamId) -> f32 {
-        let n = self.teams.len();
+        let n = self.division_size(team);
         let s = &self.standings[team];
         let games = (s.wins + s.losses) as f32;
         let prestige = self.econ.arenas[team].prestige;
         if n < 2 {
             return prestige;
         }
-        let rank = self.table().iter().position(|&t| t == team).unwrap_or(0);
+        let rank = self
+            .table_of(self.teams[team].division)
+            .iter()
+            .position(|&t| t == team)
+            .unwrap_or(0);
         let now = 1.0 - rank as f32 / (n - 1) as f32;
         let w = (games / 8.0).min(1.0);
         w * now + (1.0 - w) * prestige

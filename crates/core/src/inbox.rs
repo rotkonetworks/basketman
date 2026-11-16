@@ -141,6 +141,9 @@ pub struct Message {
     /// player's time.
     #[serde(default)]
     pub appearance: Option<usize>,
+    /// Index into `Career::offers` when it is a club offering him a job.
+    #[serde(default)]
+    pub job: Option<usize>,
     pub read: bool,
 }
 
@@ -189,7 +192,7 @@ pub enum Stop {
     Draft,
 }
 
-fn hint(offense: OffenseSet, defense: DefenseScheme, press: Press) -> String {
+pub(crate) fn hint(offense: OffenseSet, defense: DefenseScheme, press: Press) -> String {
     let d = match defense {
         DefenseScheme::Zone23 => {
             "A 2-3 zone gives up the three and the high post: shooters and ball movement beat it, \
@@ -243,41 +246,32 @@ impl World {
             ov.sort_by(|a, b| b.total_cmp(a));
             ov.iter().take(8).sum::<f32>()
         };
-        let n = self.teams.len();
-        let better = (0..n).filter(|&t| strength(t) > strength(team)).count();
-        let (target, wish) = if better < 3 {
-            (
-                3,
-                "The squad is among the best in the league and we expect a top-three finish.",
-            )
+        let mates = self.division_teams(self.teams[team].division);
+        let n = mates.len();
+        let better = mates.iter().filter(|&&t| strength(t) > strength(team)).count();
+        let target = self.board_target(team);
+        let wish = if target <= 3 {
+            "The squad is among the best in the league and we expect a top-three finish."
         } else if better < n / 2 {
-            (n / 2, "We see this squad in the top half of the table.")
+            "We see this squad in the top half of the table."
         } else {
-            (
-                n.saturating_sub(2),
-                "Nobody expects miracles. Keep us out of the bottom two.",
-            )
+            "Nobody expects miracles. Keep us out of the bottom two."
         };
         self.desk.expectation = target;
+        self.career_arrive(team);
         let name = self.teams[team].name.clone();
-        let body = format!(
-            "Welcome to {name}.\n\n{wish}\n\nYou have {} to work with and a wage bill of {} a week. \
+        let _ = (&name, wish);
+        let practical = format!(
+            "You have {} to work with and a wage bill of {} a week. \
              Your assistant runs training unless you take it over, and the scouts follow \
              whoever you shortlist. The coaches and scouts you inherit are on the Staff \
-             page; better ones can be hired.\n\nThe season is {} rounds, one game every Saturday. \
+             page; better ones can be hired.\n\nThe season is {} rounds, one round a week. \
              Press Continue to move through the week.",
             money(self.teams[team].budget),
             money((self.wages(team) + self.teams[team].office.wages()) / 52),
             self.rounds(),
         );
-        self.post(
-            self.day,
-            Kind::Board,
-            "The board",
-            "Welcome to the club",
-            body,
-            vec![],
-        );
+        self.club_welcome(team, &practical);
         self.econ_welcome(team);
         self.preview();
     }
@@ -328,44 +322,6 @@ impl World {
         }
     }
 
-    /// Day the next round is played on.
-    pub fn match_day(&self) -> u32 {
-        self.round as u32 * 7 + MATCH_DAY
-    }
-
-    pub fn match_today(&self) -> bool {
-        !self.season_over() && self.day >= self.match_day()
-    }
-
-    /// Move through the calendar until something wants the manager: a game,
-    /// or new mail.
-    pub fn advance(&mut self) -> Stop {
-        loop {
-            if self.match_today() {
-                return Stop::MatchDay;
-            }
-            let pending =
-                self.desk.messages.iter().any(|m| m.day > self.day) || !self.desk.bids.is_empty();
-            if self.draft.is_some() {
-                return Stop::Draft;
-            }
-            if self.season_over() && !pending {
-                self.begin_draft();
-                // With nobody to wait for, the draft is already over.
-                return if self.draft.is_some() {
-                    Stop::Draft
-                } else {
-                    Stop::Mail
-                };
-            }
-            self.day += 1;
-            self.daily();
-            if self.desk.messages.iter().any(|m| m.day == self.day) {
-                return Stop::Mail;
-            }
-        }
-    }
-
     pub(crate) fn post(
         &mut self,
         day: u32,
@@ -388,6 +344,7 @@ impl World {
             press: None,
             sponsor: None,
             appearance: None,
+            job: None,
             read: false,
         });
         self.desk.messages.last_mut().expect("just pushed")
@@ -839,7 +796,7 @@ impl World {
     }
 
     /// Things that happen because a day has passed.
-    fn daily(&mut self) {
+    pub(crate) fn daily(&mut self) {
         let day = self.day;
         for o in &mut self.desk.offers {
             if o.state == OfferState::Open && o.expires < day {
@@ -858,6 +815,7 @@ impl World {
             self.answer_bid(bid);
         }
         self.fame_daily();
+        self.drop_stale_assignments();
     }
 
     fn answer_bid(&mut self, bid: Bid) {
@@ -955,7 +913,6 @@ impl World {
             (f.home, false)
         };
         let team = &self.teams[opp];
-        let t = team.tactics();
         let s = &self.standings[opp];
         let rank = self.table().iter().position(|&x| x == opp).unwrap_or(0) + 1;
         let per_game = |p: PlayerId| {
@@ -985,16 +942,22 @@ impl World {
                 s.points_against as f32 / (s.wins + s.losses).max(1) as f32,
             );
         }
-        body += &format!(
-            "They run {} on offense and defend {}{}.\n\n{}\n\n",
-            t.offense.label().to_lowercase(),
-            t.defense.label().to_lowercase(),
-            match t.press {
-                Press::None => String::new(),
-                p => format!(", with a {}", p.label().to_lowercase()),
-            },
-            hint(t.offense, t.defense, t.press),
-        );
+        // The assistant only has the league's numbers: how they play is
+        // for the scout to say.
+        let games = self.team_stats[opp].games;
+        if games >= 3 {
+            let o = &self.team_stats[opp].own;
+            body += &format!(
+                "From the numbers: {:.0}% of their shots are threes, they shoot {:.0}% from the \
+                 field and turn it over {:.1} times a game.\n",
+                pct(o.tpa, o.fga),
+                pct(o.fgm, o.fga),
+                o.tov as f32 / games as f32,
+            );
+        } else {
+            body += "It is too early in the year to say how they play from the numbers.\n";
+        }
+        body += &format!("{}\n\n", self.report_pointer(opp));
         let mut players = Vec::new();
         if let Some(d) = danger {
             let p = &self.players[d as usize];
@@ -1050,13 +1013,9 @@ impl World {
         self.press_before(opp, rank);
     }
 
-    /// Everything a played round puts in the post. `played` are the round's
-    /// fixtures, `before` the user's players' overall before the week's
-    /// training.
-    pub(crate) fn after_round(&mut self, played: &[usize], before: &[(PlayerId, f32)]) {
-        let round = self.round - 1;
-        let today = round as u32 * 7 + MATCH_DAY;
-        self.day = self.day.max(today);
+    /// What a block of games puts in the post at once: the manager's match
+    /// report and the press's questions about it.
+    pub(crate) fn after_games(&mut self, played: &[usize]) {
         let Some(me) = self.watch else { return };
         let best = |lines: &[(PlayerId, BoxLine)]| {
             lines
@@ -1066,7 +1025,6 @@ impl World {
         };
         let line_text =
             |l: &BoxLine| format!("{} points, {} rebounds, {} assists", l.pts, l.reb(), l.ast);
-
         // The match report.
         let mine = played.iter().copied().find(|&i| {
             let f = &self.fixtures[i];
@@ -1076,6 +1034,7 @@ impl World {
             && let Some(r) = self.fixtures[i].result.clone()
         {
             let f = &self.fixtures[i];
+            let gameday = f.day;
             let side = if f.home == me { 0 } else { 1 };
             let opp = self.teams[[f.away, f.home][side]].name.clone();
             let (us, them) = (r.score[side], r.score[1 - side]);
@@ -1127,6 +1086,10 @@ impl World {
             if let Some(line) = self.gate_line(i) {
                 body += &line;
             }
+            let opp_id = [f.away, f.home][side];
+            if let Some(line) = self.prep_line(me, opp_id, gameday) {
+                body += &line;
+            }
             body += "\nThe full replay and box score are on the Match screen.";
             let subject = format!(
                 "{} {us}-{them} {} {opp}",
@@ -1134,7 +1097,7 @@ impl World {
                 if side == 0 { "at home to" } else { "away at" },
             );
             self.post(
-                today,
+                gameday,
                 Kind::Match,
                 "Assistant coach",
                 subject,
@@ -1148,18 +1111,39 @@ impl World {
         {
             let side = if self.fixtures[i].home == me { 0 } else { 1 };
             let won = r.score[side] > r.score[1 - side];
+            let (round, day) = (self.fixtures[i].round, self.fixtures[i].day);
             self.settle_pledge(round, won);
-            self.press_after(today, i);
+            self.press_after(day, i);
         }
+    }
 
+    /// Everything a played round puts in the post. `played` are the round's
+    /// fixtures, `before` the user's players' overall before the week's
+    /// training.
+    pub(crate) fn after_round(&mut self, played: &[usize], before: &[(PlayerId, f32)]) {
+        let round = self.round - 1;
+        let today = self.round_base(round) + MATCH_DAY;
+        let Some(me) = self.watch else { return };
+        let best = |lines: &[(PlayerId, BoxLine)]| {
+            lines
+                .iter()
+                .max_by(|a, b| a.1.game_score().total_cmp(&b.1.game_score()))
+                .copied()
+        };
+        let line_text =
+            |l: &BoxLine| format!("{} points, {} rebounds, {} assists", l.pts, l.reb(), l.ast);
         // Sunday: the round around the league.
         let table = self.table();
         let place = table.iter().position(|&t| t == me).unwrap_or(0) + 1;
         let mut body = String::new();
         let mut star: Option<(PlayerId, BoxLine, TeamId)> = None;
+        let my_division = self.teams[me].division;
         for &i in played {
             let f = &self.fixtures[i];
             let Some(r) = &f.result else { continue };
+            if f.division != my_division {
+                continue;
+            }
             body += &format!(
                 "{} {} - {} {}\n",
                 self.teams[f.home].name, r.score[0], r.score[1], self.teams[f.away].name
@@ -1603,6 +1587,10 @@ mod seasons {
     fn the_draft_leads_into_the_next_season() {
         let mut w = World::generate(9, 8);
         w.take_charge(3);
+        // The board's patience is not what this test is about: nobody
+        // manages this club, and it finishes near the bottom.
+        w.club.clubs[3].board.owner.patience = 20;
+        w.club.clubs[3].board.chairman = None;
         let players = w.players.len();
         for season in 0..2 {
             loop {

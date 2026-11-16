@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::assistant;
 use crate::books::FacilityKind;
 use crate::inbox::{Deal, OfferState, Stop};
-use crate::league::{LiveInput, TeamId, World};
+use crate::league::{LiveInput, Scope, TeamId, World};
 use crate::media::MediaLevel;
 use crate::player::PlayerId;
 use crate::staff::Job;
@@ -32,8 +32,20 @@ pub enum Command {
     TakeCharge(TeamId),
     /// Let the calendar run until a game, new mail or the draft.
     Advance,
+    /// Pass one day. Whatever is scheduled for it happens: other clubs'
+    /// games, reserve games, friendlies. Does nothing if the manager has a
+    /// game to play first.
+    Continue,
     /// Play this round's games without coaching any of them.
     PlayRound,
+    /// Play only today's games, the manager's with the assistant (or the
+    /// standing instructions) in charge. The rest of the round follows on
+    /// its days.
+    PlayToday,
+    /// A live game of `PlayToday`'s scope; logged by `World::full_time`.
+    PlayLiveToday {
+        inputs: Vec<(u32, LiveInput)>,
+    },
     /// Coach this round's game of the user's club live: the inputs were
     /// applied after that many `step` calls (see `LiveRound`). Logged by
     /// `World::full_time`; replayed by `apply`.
@@ -88,6 +100,13 @@ pub enum Command {
         intensity: Intensity,
     },
     SetSchedule(Schedule),
+    /// Set one session of the weekly plan: `slot` 0..=9 is Monday morning,
+    /// Monday afternoon, ... Friday afternoon. `Session::MatchPrep` is the
+    /// preparation for the next opponent.
+    SetSession {
+        slot: usize,
+        session: crate::training::Session,
+    },
     DelegateTraining(bool),
     /// The assistant plans the week and every player's training.
     AskAssistantToPlan,
@@ -145,6 +164,30 @@ pub enum Command {
     /// instructions (the assistant's own game if there are none). The game
     /// is logged as what it was, `PlayLive` or `PlayRound`.
     PlayWithInstructions,
+    /// Take the job offered at `World::career.offers[offer]`. `bring` are
+    /// the jobs whose holders on your staff you ask to come; those who are
+    /// willing do. `keep` are the jobs at the new club whose holders stay;
+    /// the others are paid off.
+    AcceptJob {
+        offer: usize,
+        bring: Vec<Job>,
+        keep: Vec<Job>,
+    },
+    /// Turn down the job offered at `World::career.offers[offer]`.
+    DeclineJob(usize),
+    /// Leave the club you manage. You are out of work until somebody calls.
+    Resign,
+    /// Send the chief scout to watch `team` play on `day` (a day of the
+    /// calendar); he files an opponent report after the game. Replaces
+    /// what he was to do that day.
+    AssignScout {
+        team: TeamId,
+        day: u32,
+    },
+    /// Take the chief scout off whatever he was to do on `day`.
+    UnassignScout {
+        day: u32,
+    },
 }
 
 /// Why a command was not carried out.
@@ -185,8 +228,10 @@ impl std::error::Error for CommandError {}
 pub struct Outcome {
     /// Something to tell the user, if the game had something to say.
     pub note: Option<String>,
-    /// `Advance`: why the calendar stopped.
+    /// `Advance`, `Continue`: why the calendar stopped, if it did.
     pub stop: Option<Stop>,
+    /// `Advance`, `Continue`: the day the calendar stands at.
+    pub day: Option<u32>,
     /// `PlayRound`: indices of the fixtures played.
     pub played: Vec<usize>,
     /// `CopyTactic`: the playbook index of the new entry.
@@ -205,6 +250,7 @@ fn replaces(last: &Command, next: &Command) -> bool {
         | (Command::RenameTactic { slot: a, .. }, Command::RenameTactic { slot: b, .. }) => a == b,
         (Command::SetTraining { player: a, .. }, Command::SetTraining { player: b, .. }) => a == b,
         (Command::SetSchedule(_), Command::SetSchedule(_)) => true,
+        (Command::SetSession { slot: a, .. }, Command::SetSession { slot: b, .. }) => a == b,
         (Command::SetTicketPrice(_), Command::SetTicketPrice(_)) => true,
         (Command::SetMedia { player: a, .. }, Command::SetMedia { player: b, .. }) => a == b,
         _ => false,
@@ -223,7 +269,7 @@ impl World {
     /// A live game is logged by `full_time` as `PlayLive`, not by this.
     pub fn apply(&mut self, cmd: Command) -> Result<Outcome, CommandError> {
         let outcome = self.execute(&cmd)?;
-        if matches!(cmd, Command::PlayWithInstructions) {
+        if matches!(cmd, Command::PlayWithInstructions | Command::PlayToday) {
             // It logged the game it played, not itself.
             return Ok(outcome);
         }
@@ -270,19 +316,57 @@ impl World {
                 if self.watch.is_some() {
                     return Err(refused("A club is already in your charge."));
                 }
+                if !self.career.spells.is_empty() {
+                    return Err(refused("You can only take a job you are offered."));
+                }
                 if *team >= self.teams.len() {
                     return Err(CommandError::NoSuchTeam(*team));
                 }
                 self.take_charge(*team);
             }
-            Command::Advance => out.stop = Some(self.advance()),
+            Command::Advance => {
+                out.stop = Some(self.advance());
+                out.day = Some(self.day);
+            }
+            Command::Continue => {
+                out.stop = self.continue_day();
+                out.day = Some(self.day);
+            }
+            Command::PlayToday => out.played = self.play_with_instructions_scoped(Scope::Day)?,
+            Command::PlayLiveToday { inputs } => {
+                out.played = self.replay_live(inputs, Scope::Day)?
+            }
+            Command::AcceptJob { offer, bring, keep } => {
+                if *offer >= self.career.offers.len() {
+                    return Err(CommandError::OutOfRange("job offer"));
+                }
+                out.note = Some(self.accept_job(*offer, bring, keep).map_err(refused)?);
+            }
+            Command::DeclineJob(offer) => {
+                if *offer >= self.career.offers.len() {
+                    return Err(CommandError::OutOfRange("job offer"));
+                }
+                out.note = Some(self.decline_job(*offer).map_err(refused)?);
+            }
+            Command::AssignScout { team, day } => {
+                self.club()?;
+                out.note = Some(self.assign_scout(*team, *day).map_err(refused)?);
+            }
+            Command::UnassignScout { day } => {
+                self.club()?;
+                self.unassign_scout(*day).map_err(refused)?;
+            }
+            Command::Resign => {
+                self.club()?;
+                out.note = Some(self.resign().map_err(refused)?);
+            }
             Command::PlayRound => {
                 if self.season_over() {
                     return Err(refused("The season is over."));
                 }
                 out.played = self.play_round();
             }
-            Command::PlayLive { inputs } => out.played = self.replay_live(inputs)?,
+            Command::PlayLive { inputs } => out.played = self.replay_live(inputs, Scope::Round)?,
             Command::MarkRead(id) => {
                 match self.desk.messages.iter().find(|m| m.id == *id) {
                     None => return Err(CommandError::OutOfRange("message")),
@@ -447,6 +531,16 @@ impl World {
                     return Err(CommandError::NothingToDo);
                 }
                 self.teams[me].schedule = schedule.clone();
+            }
+            Command::SetSession { slot, session } => {
+                let me = self.club()?;
+                if *slot >= crate::training::SESSIONS_PER_WEEK {
+                    return Err(CommandError::OutOfRange("training slot"));
+                }
+                if self.teams[me].schedule.sessions[*slot] == *session {
+                    return Err(CommandError::NothingToDo);
+                }
+                self.teams[me].schedule.sessions[*slot] = *session;
             }
             Command::DelegateTraining(on) => {
                 let me = self.club()?;

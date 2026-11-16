@@ -118,10 +118,14 @@ pub enum Session {
     Tactics,
     Scrimmage,
     FilmStudy,
+    /// Work against the next opponent's system, from the scout's report:
+    /// helps in that one game and only as far as the report is right. It
+    /// builds nothing else.
+    MatchPrep,
 }
 
 impl Session {
-    pub const ALL: [Session; 13] = [
+    pub const ALL: [Session; 14] = [
         Session::Rest,
         Session::Recovery,
         Session::Shooting,
@@ -135,6 +139,7 @@ impl Session {
         Session::Tactics,
         Session::Scrimmage,
         Session::FilmStudy,
+        Session::MatchPrep,
     ];
 
     pub fn label(self) -> &'static str {
@@ -152,6 +157,7 @@ impl Session {
             Session::Tactics => "Tactics",
             Session::Scrimmage => "Scrimmage",
             Session::FilmStudy => "Film study",
+            Session::MatchPrep => "Match preparation",
         }
     }
 
@@ -171,6 +177,7 @@ impl Session {
             Session::Tactics => "tactic familiarity",
             Session::Scrimmage => "a bit of everything, some familiarity",
             Session::FilmStudy => "IQ, composure, some familiarity",
+            Session::MatchPrep => "the next opponent's plays, from the scout's report; nothing else grows",
         }
     }
 
@@ -186,7 +193,11 @@ impl Session {
             Session::Athleticism => TrainingFocus::Athleticism.attrs(),
             Session::Conditioning => TrainingFocus::Conditioning.attrs(),
             Session::FilmStudy => TrainingFocus::Mental.attrs(),
-            Session::Rest | Session::Recovery | Session::Tactics | Session::Scrimmage => &[],
+            Session::Rest
+            | Session::Recovery
+            | Session::Tactics
+            | Session::Scrimmage
+            | Session::MatchPrep => &[],
         }
     }
 
@@ -196,7 +207,7 @@ impl Session {
             Session::Rest => 0.03,
             Session::Recovery => 0.015,
             Session::FilmStudy => 0.0,
-            Session::Tactics => -0.004,
+            Session::Tactics | Session::MatchPrep => -0.004,
             Session::Scrimmage | Session::Athleticism => -0.010,
             Session::Conditioning => -0.012,
             _ => -0.006,

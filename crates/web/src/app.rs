@@ -11,7 +11,9 @@ use crate::theme::{self, Backdrop};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::view3d::Preset;
 
+/// Clubs in a division, and the number of divisions.
 pub(crate) const TEAMS: usize = 12;
+pub(crate) const DIVISIONS: usize = 3;
 pub(crate) const GAP: f32 = 16.0;
 /// Storage key for the court view preference.
 const VIEW_KEY: &str = "basketman.view";
@@ -19,6 +21,8 @@ const VIEW_KEY: &str = "basketman.view";
 #[derive(PartialEq, Clone, Copy)]
 pub(crate) enum Tab {
     Inbox,
+    /// The month view under Home.
+    Calendar,
     Squad,
     Tactics,
     Training,
@@ -45,12 +49,21 @@ pub(crate) enum Tab {
     Film,
     /// The club's own hall: the club page with the arena card.
     Arena,
+    /// The arrival at a club: five short pages. Not in the menu.
+    Welcome,
+    /// The club's story, its people and the board's confidence in you.
+    About,
+    /// The manager's reputation, jobs and offers.
+    Career,
+    /// A job offer and the deal for it. Reached from the inbox and Career.
+    Offer,
 }
 
 impl Tab {
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    pub(crate) const ALL: [Tab; 12] = [
+    pub(crate) const ALL: [Tab; 13] = [
         Tab::Inbox,
+        Tab::Calendar,
         Tab::Squad,
         Tab::Tactics,
         Tab::Training,
@@ -67,6 +80,7 @@ impl Tab {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Tab::Inbox => "Inbox",
+            Tab::Calendar => "Calendar",
             Tab::Squad => "Squad",
             Tab::Tactics => "Tactics",
             Tab::Training => "Training",
@@ -85,6 +99,10 @@ impl Tab {
             Tab::Game => "Game",
             Tab::Film => "Film",
             Tab::Arena => "Arena",
+            Tab::Welcome => "Welcome",
+            Tab::About => "About",
+            Tab::Career => "Career",
+            Tab::Offer => "Offer",
         }
     }
 }
@@ -101,6 +119,8 @@ pub struct App {
     pub(crate) pick: usize,
     /// The club the user manages.
     pub(crate) team: TeamId,
+    /// The arrival pages, the career pages: see `club_ui.rs`.
+    pub(crate) cu: crate::club_ui::ClubUi,
     pub(crate) tab: Tab,
     /// Player whose profile is open, and the screen to go back to.
     pub(crate) profile: Option<PlayerId>,
@@ -154,7 +174,7 @@ pub struct App {
     /// `--screenshot <file> [tab]`: render a few frames, save one, quit.
     /// Lets the look be reviewed without a person at the window.
     #[cfg(not(target_arch = "wasm32"))]
-    shot: Option<(std::path::PathBuf, u32)>,
+    pub(crate) shot: Option<(std::path::PathBuf, u32)>,
 }
 
 pub(crate) fn money(v: i64) -> String {
@@ -194,17 +214,30 @@ pub(crate) fn name(text: &str) -> RichText {
 }
 
 impl App {
+    /// Whether this run is the screenshot harness (never, in the browser).
+    pub(crate) fn harness(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.shot.is_some()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            false
+        }
+    }
+
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::install(&cc.egui_ctx);
         #[allow(unused_mut)]
         let mut app = App {
-            world: World::generate(1, TEAMS),
+            world: World::generate_tiers(1, TEAMS, DIVISIONS),
             seed: 1,
             started: false,
             career: false,
             candidates: (0, Vec::new()),
             pick: 0,
             team: 0,
+            cu: Default::default(),
             tab: Tab::Inbox,
             compare: Vec::new(),
             profile: None,
@@ -306,9 +339,28 @@ impl App {
                 app.begin(club);
                 app.tab = Tab::ALL
                     .into_iter()
-                    .chain([Tab::Player, Tab::Club, Tab::Compare, Tab::Film, Tab::Arena])
+                    .chain([
+                        Tab::Player,
+                        Tab::Club,
+                        Tab::Compare,
+                        Tab::Film,
+                        Tab::Arena,
+                        Tab::Welcome,
+                        Tab::About,
+                        Tab::Career,
+                        Tab::Offer,
+                    ])
                     .find(|t| Some(t.label().to_lowercase().as_str()) == tab)
                     .unwrap_or(Tab::Inbox);
+                // `SHOT_OFFER=n` has club n lose its manager and call.
+                if let Some(n) = std::env::var("SHOT_OFFER").ok().and_then(|n| n.parse::<usize>().ok()) {
+                    app.cu.offer = app.world.stage_offer(n);
+                    app.cu.keep_set = false;
+                }
+                // `SHOT_STEP=n` opens page n (from 0) of the arrival.
+                if let Some(n) = std::env::var("SHOT_STEP").ok().and_then(|n| n.parse().ok()) {
+                    app.cu.step = n;
+                }
                 // `--screenshot file club` shows the club page; `SHOT_PAGE=n`
                 // shows club n's instead of ours.
                 if app.tab == Tab::Club {
@@ -459,16 +511,70 @@ impl App {
                     }
                 }
                 // `SHOT_ROUNDS=12` plays that many rounds instead of three.
-                let rounds = std::env::var("SHOT_ROUNDS")
+                // `SHOT_DAYS=10` instead passes that many days of the camp.
+                let days: Option<u32> = std::env::var("SHOT_DAYS")
                     .ok()
-                    .and_then(|n| n.parse().ok())
-                    .unwrap_or(3);
+                    .and_then(|n| n.parse().ok());
+                let rounds = if days.is_some() {
+                    0
+                } else {
+                    std::env::var("SHOT_ROUNDS")
+                        .ok()
+                        .and_then(|n| n.parse().ok())
+                        .unwrap_or(3)
+                };
+                // `SHOT_SCOUT=1` sends the scout to a game of another club
+                // on each of those days.
+                for _ in 0..days.unwrap_or(0) {
+                    if std::env::var("SHOT_SCOUT").is_ok() {
+                        let (me, day) = (app.team, app.world.day);
+                        // Our next opponent first, then anybody.
+                        let next = app.world.user_fixture().map(|i| {
+                            let f = &app.world.fixtures[i];
+                            if f.home == me { f.away } else { f.home }
+                        });
+                        let order = next.into_iter().chain(0..app.world.teams.len());
+                        for t in order {
+                            if t != me {
+                                let cmd = Command::AssignScout { team: t, day };
+                                if app.world.apply(cmd).is_ok() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    let _ = app.world.apply(Command::Continue);
+                }
                 for _ in 0..rounds {
                     let played = app.world.play_round();
                     app.last_game = played.into_iter().find(|&i| {
                         app.world.fixtures[i].home == app.team
                             || app.world.fixtures[i].away == app.team
                     });
+                }
+                // `SHOT_SACK=1` has the board dismiss the manager,
+                // `SHOT_RESIGN=1` has him resign, and `SHOT_ACCEPT=1` takes
+                // the first open offer (stage one with `SHOT_OFFER=n`, and
+                // `SHOT_ROUNDS=0` so it does not lapse).
+                if std::env::var("SHOT_SACK").is_ok() {
+                    app.world.stage_dismissal();
+                    app.follow_watch();
+                }
+                if std::env::var("SHOT_RESIGN").is_ok() {
+                    let _ = app.world.apply(Command::Resign);
+                    app.follow_watch();
+                }
+                if std::env::var("SHOT_ACCEPT").is_ok()
+                    && let Some(i) = app.world.open_job_offers().first().copied()
+                {
+                    let cmd = Command::AcceptJob {
+                        offer: i,
+                        bring: Vec::new(),
+                        keep: basketman_core::staff::Job::HIRED.to_vec(),
+                    };
+                    app.cu.note = app.world.apply(cmd).ok().and_then(|o| o.note);
+                    app.follow_watch();
+                    app.start_intro();
                 }
                 // `SHOT_CONDITION=0.1` sets every hall's condition and
                 // `SHOT_FILL=0.3` how full every played game's crowd was.
@@ -515,7 +621,7 @@ impl App {
                     }
                 }
                 // Let the week's mail arrive.
-                while app.world.advance() == basketman_core::inbox::Stop::Mail {}
+                while days.is_none() && app.world.advance() == basketman_core::inbox::Stop::Mail {}
                 // `--screenshot file draft` plays the season out to the draft;
                 // `--screenshot file trade` shows a deal half built.
                 if tab == Some("draft") {
@@ -551,6 +657,15 @@ impl App {
                     && let Some(n) = args.get(i + 3).and_then(|s| s.parse::<usize>().ok())
                 {
                     app.mail = app.world.inbox().get(n).map(|m| m.id);
+                }
+                // `--screenshot file inbox report` opens the latest scout report.
+                if app.tab == Tab::Inbox && args.get(i + 3).map(String::as_str) == Some("report") {
+                    app.mail = app
+                        .world
+                        .inbox()
+                        .into_iter()
+                        .find(|m| m.subject.starts_with("Scout report"))
+                        .map(|m| m.id);
                 }
                 // `--screenshot file inbox budget` opens the board's budgets letter.
                 if app.tab == Tab::Inbox && args.get(i + 3).map(String::as_str) == Some("budget") {
@@ -702,7 +817,12 @@ impl App {
                 {
                     use basketman_core::engine::Shout;
                     use basketman_core::league::LiveInput;
-                    while live.game.time() < 420.0 {
+                    // `SHOT_LIVE_TO=1500` plays that many seconds first.
+                    let to: f32 = std::env::var("SHOT_LIVE_TO")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(420.0);
+                    while live.game.time() < to && !live.game.is_over() {
                         live.step();
                     }
                     let side = live.side;
@@ -721,6 +841,10 @@ impl App {
                     app.touchline.off = bench.iter().filter(|p| p.on_court).nth(2).map(|p| p.id);
                     app.playback.time = live.game.time();
                     app.live = Some(live);
+                }
+                // `SHOT_DRAWER=scores|shots|flow|box|feed` opens that tab.
+                if let Ok(d) = std::env::var("SHOT_DRAWER") {
+                    app.sh.hud.pick(&d);
                 }
             }
         }
@@ -766,7 +890,7 @@ impl App {
 
     /// Start a new career in charge of `team` in the world of `self.seed`.
     pub(crate) fn begin(&mut self, team: TeamId) {
-        self.world = World::generate(self.seed, TEAMS);
+        self.world = World::new_career_tiers(self.seed, TEAMS, DIVISIONS);
         self.team = team;
         let _ = self.world.apply(Command::TakeCharge(team));
         self.mail = None;
@@ -782,7 +906,8 @@ impl App {
         self.history.clear();
         self.deal = Default::default();
         self.deal_note = None;
-        self.tab = Tab::Inbox;
+        self.cu = Default::default();
+        self.start_intro();
         self.started = true;
         self.career = true;
         self.confirm_new = false;
@@ -990,6 +1115,12 @@ impl App {
         bd.card(ui, |ui| {
             ui.set_width(ui.available_width());
             theme::eyebrow(ui, "Standings");
+            let division = crate::calendar::division_picker(ui, &self.world);
+            ui.label(
+                RichText::new(self.world.division_name(division))
+                    .family(theme::semibold())
+                    .color(theme::TEXT_DIM),
+            );
             ui.add_space(6.0);
             egui::Grid::new("table")
                 .striped(true)
@@ -997,7 +1128,7 @@ impl App {
                 .show(ui, |ui| {
                     header_row(ui, &["#", "Team", "W", "L", "PF", "PA", "Diff"]);
                     ui.end_row();
-                    for (rank, t) in self.world.table().into_iter().enumerate() {
+                    for (rank, t) in self.world.table_of(division).into_iter().enumerate() {
                         let s = &self.world.standings[t];
                         ui.label(theme::mono((rank + 1).to_string()).color(theme::TEXT_MUTE));
                         self.club_link(ui, t);
@@ -1022,8 +1153,12 @@ impl App {
         bd.card(ui, |ui| {
             ui.set_width(ui.available_width());
             theme::eyebrow(ui, "Fixtures and results");
+            let division = crate::calendar::viewed_division(ui, &self.world);
             ui.label(
-                RichText::new("Every game of the season. A score opens its box score.")
+                RichText::new(format!(
+                    "{}. Every game of the season. A score opens its box score.",
+                    self.world.division_name(division)
+                ))
                     .color(theme::TEXT_DIM),
             );
             ui.add_space(6.0);
@@ -1197,6 +1332,7 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
         let _perf = crate::perf::scope("frame: all ui");
+        self.follow_watch();
         // What eframe measured for the frame before: our code plus turning
         // the shapes into triangles, without the GPU's share.
         if let Some(cpu) = frame.info().cpu_usage {

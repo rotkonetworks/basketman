@@ -22,13 +22,14 @@ use crate::dressing::standing as room_words;
 use crate::engine::BoxLine;
 use crate::finance::Cat;
 use crate::health::medical;
-use crate::inbox::{OfferState, date};
+use crate::inbox::OfferState;
 use crate::instructions::Instructions;
 use crate::league::{TeamId, World};
 use crate::legal::{Waiting, waiting};
 use crate::player::{Attr, Body, Player, PlayerId, Position};
 use crate::sponsor::slot_name;
 use crate::staff::Job;
+use crate::fit::{self, Choice, Group};
 use crate::tactics::Tactics;
 use crate::training::Schedule;
 
@@ -279,6 +280,7 @@ pub struct TableRow {
 pub struct FixtureView {
     pub index: usize,
     pub round: usize,
+    pub division: usize,
     pub home: TeamId,
     pub away: TeamId,
     pub home_name: String,
@@ -373,6 +375,9 @@ pub struct ArenaView {
 pub struct ClubPublic {
     pub club: TeamId,
     pub name: String,
+    /// 0 is the top division.
+    pub division: usize,
+    pub division_name: String,
     pub wins: u16,
     pub losses: u16,
     pub place: usize,
@@ -396,8 +401,13 @@ pub struct ClubPublic {
 pub struct Calendar {
     pub season: u16,
     pub day: u32,
+    /// "Friday 9 October 2026".
     pub date: String,
+    /// "Fri 9 Oct".
+    pub date_short: String,
     pub weekday: &'static str,
+    /// "preseason", "season", "playoffs" or "offseason".
+    pub phase: &'static str,
     pub round: usize,
     pub rounds: usize,
     pub season_over: bool,
@@ -408,7 +418,15 @@ pub struct Calendar {
     pub next_stop: &'static str,
     pub next_stop_day: Option<u32>,
     pub draft_on: bool,
+    /// The day the draft is (or will be) held, once the season is over.
+    pub draft_day: Option<u32>,
     pub champion: Option<TeamId>,
+    /// The manager has a friendly today; it is played when the day passes.
+    pub friendly_today: bool,
+    /// Days of training camp before the first league week.
+    pub preseason_days: u32,
+    /// Everything on today's calendar across the league.
+    pub today: Vec<crate::calendar::CalEvent>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -418,12 +436,17 @@ pub struct NextGame {
     pub opponent: TeamId,
     pub opponent_name: String,
     pub home: bool,
+    pub day: u32,
+    pub date: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Summary {
     pub club: TeamId,
     pub name: String,
+    /// 0 is the top division.
+    pub division: usize,
+    pub division_name: String,
     pub calendar: Calendar,
     pub wins: u16,
     pub losses: u16,
@@ -496,6 +519,8 @@ pub struct MessageView {
     pub sponsor: Option<SponsorOfferView>,
     /// A sponsor's request for one of your players' time.
     pub appearance: Option<crate::view_more::AppearanceView>,
+    /// A club's offer of its job: the index for `AcceptJob`/`DeclineJob`.
+    pub job: Option<usize>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -521,6 +546,20 @@ pub struct TacticView {
     pub active: bool,
     pub familiarity_pct: u8,
     pub tactics: Tactics,
+    /// How well the five who start suit each offense, defense and press
+    /// (0..=100, with the reason), worked out from their attributes.
+    pub fits: Vec<FitView>,
+}
+
+/// One choice and how well the squad fits it.
+#[derive(Clone, Debug, Serialize)]
+pub struct FitView {
+    pub kind: &'static str,
+    pub choice: &'static str,
+    pub chosen: bool,
+    pub score: u8,
+    pub verdict: &'static str,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -578,6 +617,10 @@ pub struct OwnClub {
     pub squad: Vec<PlayerView>,
     pub reserves: Vec<PlayerView>,
     pub playbook: Vec<TacticView>,
+    /// What the assistant would set up for the tactic in use, from fit and
+    /// the matchup against the next opponent (no test possessions here;
+    /// the app's Help me choose plays those too).
+    pub assistant_proposal: Option<fit::Proposal>,
     pub training: TrainingView,
     pub staff: Vec<StaffRow>,
     pub gm: GmView,
@@ -651,8 +694,22 @@ pub struct Market {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct LeagueView {
+pub struct DivisionView {
+    pub index: usize,
+    pub name: String,
+    /// The division of the managed club.
+    pub mine: bool,
     pub table: Vec<TableRow>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct LeagueView {
+    /// The table of the managed club's division.
+    pub division: usize,
+    pub division_name: String,
+    pub table: Vec<TableRow>,
+    /// Every division's table, the top one first.
+    pub divisions: Vec<DivisionView>,
     pub fixtures: Vec<FixtureView>,
     pub playoffs: Vec<SeriesView>,
     pub history: Vec<HistoryRow>,
@@ -879,10 +936,22 @@ impl World {
             .map(|m| m.day)
             .min();
         let match_day = (!self.season_over()).then(|| self.match_day());
+        let draft_day = (self.season_over()).then(|| {
+            if self.draft_day == 0 {
+                self.default_draft_day()
+            } else {
+                self.draft_day
+            }
+        });
         let (next_stop, next_stop_day) = if self.match_today() {
             ("match_day", Some(self.day))
-        } else if self.draft.is_some() || (self.season_over() && pending_mail.is_none()) {
+        } else if self.draft.is_some() {
             ("draft", Some(self.day))
+        } else if let Some(d) = draft_day {
+            match pending_mail {
+                Some(m) if m < d => ("mail", Some(m)),
+                _ => ("draft", Some(d.max(self.day))),
+            }
         } else {
             match (pending_mail, match_day) {
                 (Some(m), Some(g)) if m <= g => ("mail", Some(m)),
@@ -891,11 +960,22 @@ impl World {
                 (None, None) => ("draft", Some(self.day)),
             }
         };
+        let phase = if self.season_over() {
+            "offseason"
+        } else if self.in_preseason() {
+            "preseason"
+        } else if self.fixtures.iter().any(|f| f.playoff) {
+            "playoffs"
+        } else {
+            "season"
+        };
         Calendar {
             season: self.season + 1,
             day: self.day,
-            date: date(self.day),
-            weekday: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][(self.day % 7) as usize],
+            date: self.day_long(self.day),
+            date_short: self.day_label(self.day),
+            weekday: self.weekday(self.day),
+            phase,
             round: self.round.min(self.rounds()),
             rounds: self.rounds(),
             season_over: self.season_over(),
@@ -904,12 +984,22 @@ impl World {
             next_stop,
             next_stop_day,
             draft_on: self.draft.is_some(),
+            draft_day,
             champion: self.champion,
+            friendly_today: self.friendly_today().is_some(),
+            preseason_days: self.preseason_days,
+            today: self.events_on(self.day),
         }
     }
 
+    /// The table of the managed club's division.
     pub fn view_table(&self) -> Vec<TableRow> {
-        self.table()
+        self.view_table_of(self.my_division())
+    }
+
+    /// Any division's table.
+    pub fn view_table_of(&self, division: usize) -> Vec<TableRow> {
+        self.table_of(division)
             .into_iter()
             .enumerate()
             .map(|(i, t)| {
@@ -932,6 +1022,7 @@ impl World {
         FixtureView {
             index: i,
             round: f.round,
+            division: f.division,
             home: f.home,
             away: f.away,
             home_name: self.teams[f.home].name.clone(),
@@ -1076,10 +1167,12 @@ impl World {
         Some(ClubPublic {
             club: t,
             name: team.name.clone(),
+            division: team.division,
+            division_name: self.division_name(team.division),
             wins: s.wins,
             losses: s.losses,
             place: self
-                .table()
+                .table_of(team.division)
                 .iter()
                 .position(|&x| x == t)
                 .map_or(0, |p| p + 1),
@@ -1130,7 +1223,8 @@ impl World {
     }
 
     pub fn view_inbox(&self, club: TeamId) -> Option<InboxView> {
-        if self.watch != Some(club) {
+        // An out-of-work manager still has his mail.
+        if self.watch != Some(club) && !self.jobless() {
             return None;
         }
         let messages = self
@@ -1139,7 +1233,7 @@ impl World {
             .map(|m| MessageView {
                 id: m.id,
                 day: m.day,
-                date: date(m.day),
+                date: self.day_label(m.day),
                 kind: kind_label(m.kind),
                 from: m.from.clone(),
                 subject: m.subject.clone(),
@@ -1171,6 +1265,7 @@ impl World {
                     .filter(|&i| i < self.econ.offers.len())
                     .map(|i| self.sponsor_offer_view(i)),
                 appearance: m.appearance.and_then(|i| self.view_appearance(i)),
+                job: m.job,
             })
             .collect();
         Some(InboxView {
@@ -1201,7 +1296,11 @@ impl World {
             .fixtures
             .iter()
             .enumerate()
-            .find(|(_, f)| f.round == self.round && (f.home == club || f.away == club));
+            .find(|(_, f)| {
+                f.round == self.round
+                    && f.result.is_none()
+                    && (f.home == club || f.away == club)
+            });
         let wages: i64 = team
             .roster
             .iter()
@@ -1210,6 +1309,8 @@ impl World {
         Some(Summary {
             club,
             name: team.name.clone(),
+            division: team.division,
+            division_name: self.division_name(team.division),
             calendar: self.view_calendar(),
             wins: s.wins,
             losses: s.losses,
@@ -1234,6 +1335,8 @@ impl World {
                     opponent: opp,
                     opponent_name: self.teams[opp].name.clone(),
                     home: f.home == club,
+                    day: f.day,
+                    date: self.day_label(f.day),
                 }
             }),
             unread: self.unread(),
@@ -1317,8 +1420,17 @@ impl World {
         })
     }
 
+    /// Scoring leaders of the managed club's division.
     pub fn view_leaders(&self, n: usize) -> Vec<Leader> {
-        let mut ids: Vec<PlayerId> = (0..self.players.len() as PlayerId)
+        self.view_leaders_in(self.my_division(), n)
+    }
+
+    /// Scoring leaders of one division.
+    pub fn view_leaders_in(&self, division: usize, n: usize) -> Vec<Leader> {
+        let mut ids: Vec<PlayerId> = self
+            .division_teams(division)
+            .into_iter()
+            .flat_map(|t| self.teams[t].roster.iter().copied())
             .filter(|&p| self.games_played[p as usize] >= 3)
             .collect();
         let ppg = |p: PlayerId| {
@@ -1358,7 +1470,17 @@ impl World {
             .filter_map(|i| self.view_box_score(i))
             .collect();
         Some(LeagueView {
+            division: self.my_division(),
+            division_name: self.division_name(self.my_division()),
             table: self.view_table(),
+            divisions: (0..self.division_count())
+                .map(|d| DivisionView {
+                    index: d,
+                    name: self.division_name(d),
+                    mine: d == self.my_division(),
+                    table: self.view_table_of(d),
+                })
+                .collect(),
             fixtures: self.view_fixtures(),
             playoffs: self
                 .playoffs
@@ -1438,8 +1560,28 @@ impl World {
                     active: i == team.active,
                     familiarity_pct: pct(s.familiarity()),
                     tactics: s.tactics.clone(),
+                    fits: [Group::Offense, Group::Defense, Group::Press]
+                        .into_iter()
+                        .flat_map(Group::choices)
+                        .map(|c| {
+                            let f = c.fit(&s.tactics, &self.players);
+                            FitView {
+                                kind: match c {
+                                    Choice::Offense(_) => "offense",
+                                    Choice::Defense(_) => "defense",
+                                    _ => "press",
+                                },
+                                choice: c.title(),
+                                chosen: c.is_on(&s.tactics),
+                                score: f.score,
+                                verdict: f.verdict(),
+                                reason: f.reason,
+                            }
+                        })
+                        .collect(),
                 })
                 .collect(),
+            assistant_proposal: Some(fit::propose(self, club, team.active, false)),
             training: TrainingView {
                 schedule: team.schedule.clone(),
                 delegated_to_assistant: team.delegate_training,

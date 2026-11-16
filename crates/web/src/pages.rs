@@ -696,10 +696,12 @@ impl App {
     // ---- Stats ----------------------------------------------------------
 
     pub(crate) fn stats(&mut self, ui: &mut Ui, bd: &Backdrop) {
+        let division = crate::calendar::division_picker(ui, &self.world);
+        ui.add_space(4.0);
         let w = &self.world;
         bd.card(ui, |ui| {
             ui.set_width(ui.available_width());
-            theme::eyebrow(ui, "Teams, per game");
+            theme::eyebrow(ui, &format!("Teams, per game / {}", w.division_name(division)));
             ui.add_space(6.0);
             egui::ScrollArea::horizontal()
                 .id_salt("team_stats_scroll")
@@ -738,7 +740,7 @@ impl App {
                             // Points allowed, turnovers and what opponents
                             // shoot are better low.
                             let low = [1, 9, 10, 11];
-                            for t in w.table() {
+                            for t in w.table_of(division) {
                                 let s = &w.team_stats[t];
                                 self.club_link(ui, t);
                                 ui.label(theme::mono(s.games.to_string()));
@@ -770,7 +772,10 @@ impl App {
             for (title, pick) in categories {
                 let per =
                     |p: usize| pick(&w.season_stats[p]) as f32 / w.games_played[p].max(1) as f32;
-                let mut leaders: Vec<usize> = (0..w.players.len())
+                let mut leaders: Vec<usize> = w
+                    .division_teams(division)
+                    .into_iter()
+                    .flat_map(|t| w.teams[t].roster.iter().map(|&p| p as usize))
                     .filter(|&p| w.games_played[p] > 0)
                     .collect();
                 leaders.sort_by(|&a, &b| per(b).total_cmp(&per(a)));

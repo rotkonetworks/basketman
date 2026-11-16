@@ -30,7 +30,7 @@ const PLAYOFF_ROUNDS: i64 = 5;
 const CARRY: i64 = 4;
 /// The most the manager can take from either budget, as a share of what
 /// the board set (in percent): the donor keeps at least the rest.
-const KEEP: i64 = 50;
+pub(crate) const KEEP: i64 = 50;
 
 impl World {
     /// Every player's yearly pay at a club, reserves included: what the
@@ -155,8 +155,9 @@ impl World {
             ov.sort_by(|a, b| b.total_cmp(a));
             ov.iter().take(8).sum::<f32>()
         };
-        let n = self.teams.len();
-        let better = (0..n).filter(|&t| strength(t) > strength(club)).count();
+        let mates = self.division_teams(self.teams[club].division);
+        let n = mates.len();
+        let better = mates.iter().filter(|&&t| strength(t) > strength(club)).count();
         if better < 3 {
             3
         } else if better < n / 2 {
@@ -200,7 +201,7 @@ impl World {
         let expect = if self.watch == Some(club) && self.desk.expectation > 0 {
             self.desk.expectation
         } else {
-            self.strength_target(club)
+            self.board_target(club)
         };
         let last_place = self.last_finish(club) + 1;
         let (income, op) = self.operating_result(club).unwrap_or((0, 0));
@@ -220,7 +221,8 @@ impl World {
                 room -= 0.02;
             }
         }
-        let room = room.clamp(-0.02, 0.15);
+        // A free-spending owner lets the budget breathe.
+        let room = (room + self.owner_room(club)).clamp(-0.02, 0.15);
         let wages = self.season_wages(club);
         let wage_budget = ((wages as f32 * (1.0 + room)) as i64 / 1000 + 1) * 1000;
         let carry = {
@@ -386,10 +388,10 @@ impl World {
     pub fn budget_move_limit(&self, team: TeamId, to_wages: bool) -> i64 {
         let b = &self.econ.books[team];
         let room = if to_wages {
-            let floor = (b.transfer_board * KEEP / 100).max(b.transfer_spent);
+            let floor = (b.transfer_board * self.keep_pct(team) / 100).max(b.transfer_spent);
             b.transfer_budget - floor - self.pending_bids(team)
         } else {
-            let floor = (b.wage_board * KEEP / 100).max(self.wage_committed(team));
+            let floor = (b.wage_board * self.keep_pct(team) / 100).max(self.wage_committed(team));
             b.wage_budget - floor
         };
         room.max(0)
@@ -445,7 +447,7 @@ impl World {
     }
 }
 
-pub(crate) fn ordinal(n: usize) -> String {
+pub fn ordinal(n: usize) -> String {
     let suffix = match (n % 10, n % 100) {
         (_, 11..=13) => "th",
         (1, _) => "st",
