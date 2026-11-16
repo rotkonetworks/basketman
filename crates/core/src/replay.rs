@@ -21,6 +21,8 @@ pub enum TurnoverKind {
     OffensiveFoul,
     ShotClock,
     Pressed,
+    /// An attacker stood in the lane for more than three seconds.
+    ThreeSeconds,
 }
 
 /// How a shot came about.
@@ -409,6 +411,9 @@ impl Event {
                     format!("Offensive foul on {}, turnover.", name(*who))
                 }
                 (TurnoverKind::ShotClock, _) => "Shot clock violation.".to_string(),
+                (TurnoverKind::ThreeSeconds, _) => {
+                    format!("Three seconds in the lane on {}.", name(*who))
+                }
                 (TurnoverKind::Pressed, Some(s)) => {
                     format!(
                         "The press gets to {}, {} comes away with it.",

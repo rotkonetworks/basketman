@@ -8,6 +8,11 @@
 use crate::court::{HOOP, LENGTH, Vec2, v};
 use crate::tactics::DefenseScheme;
 
+/// A man this close to the basket, with the ball away from the paint, is
+/// fronted, a body's width up the line to the ball.
+const FRONT_RANGE: f32 = 2.4;
+const FRONT_GAP: f32 = 0.7;
+
 pub(super) struct View {
     pub scheme: DefenseScheme,
     /// Attackers and defenders, current positions.
@@ -92,6 +97,12 @@ fn man(view: &View) -> Aims {
                 gap = 0.55;
             }
             m.toward(HOOP, gap.min(dh * 0.8))
+        } else if dh < FRONT_RANGE && view.ball.dist(HOOP) > 3.0 && view.ball.dist(m) > 2.0 {
+            // A man planted at the rim with the ball out on the floor is
+            // fronted: the defender stands on the ball side, between the
+            // passer and him, so the entry has to go over a body and a hand
+            // and the man cannot simply be fed under the basket.
+            m.toward(view.ball, FRONT_GAP)
         } else if dh < 4.0 {
             // Post player or cutter: stay attached. On the ball side that
             // means three-quarter fronting from the high side, so the entry

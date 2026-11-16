@@ -15,7 +15,7 @@ use basketman_core::tactics::{DefenseScheme, OffenseSet, Press, Role, Tactics};
 #[derive(Default, Clone, Copy)]
 pub struct Cell {
     /// Turnovers by kind: bad pass, stripped, offensive foul, shot clock, pressed.
-    pub tov_kinds: [u32; 5],
+    pub tov_kinds: [u32; 6],
     pub possessions: u32,
     pub secs: f32,
     pub line: BoxLine,
@@ -668,7 +668,7 @@ struct Totals {
     possessions: u32,
     line: Wide,
     shots: [(u32, u32); 3],
-    tov_kinds: [u32; 5],
+    tov_kinds: [u32; 6],
     sources: [(u32, u32, u32); 9],
     by_kind: [[u32; 3]; 9],
     margins: Vec<u32>,
@@ -857,6 +857,7 @@ pub fn stats(games: usize) {
                         TurnoverKind::OffensiveFoul => 2,
                         TurnoverKind::ShotClock => 3,
                         TurnoverKind::Pressed => 4,
+                        TurnoverKind::ThreeSeconds => 5,
                     }] += 1;
                 }
                 _ => {}
@@ -2374,5 +2375,58 @@ pub fn launch() {
             print!("{:>6.1}%", r * 100.0);
         }
         println!();
+    }
+}
+
+/// `basketman lab exploit [games]`: Post up with the big man drawn close to
+/// the basket, against the stock set, so the way the points come can be read.
+pub fn exploit(games: usize) {
+    use basketman_core::tactics::Board;
+    let w = World::generate(7, 12);
+    for (name, spot) in [
+        ("stock", None),
+        ("big man at (1.1, 1.7)", Some(basketman_core::court::v(1.1, 1.7))),
+        ("big man at (0.0, 1.2)", Some(basketman_core::court::v(0.0, 1.2))),
+    ] {
+        let c = cell(
+            &w,
+            &|a, b| {
+                a.offense = OffenseSet::PostUp;
+                a.defense = DefenseScheme::ManToMan;
+                b.offense = OffenseSet::Motion;
+                b.defense = DefenseScheme::ManToMan;
+                a.board = spot.map(|p| {
+                    let mut bd = Board::stock(OffenseSet::PostUp);
+                    bd.spots[4] = p;
+                    bd
+                });
+            },
+            games,
+            5,
+        );
+        let l = &c.line;
+        let shots: u32 = c.shots.iter().map(|s| s.0).sum();
+        println!(
+            "{name}: {:.3} pts/poss, {:.2} poss/game-side, FG {:.1}% FTA/poss {:.3} TOV/poss {:.3}",
+            c.ppp(),
+            c.possessions as f32 / games as f32,
+            100.0 * l.fgm as f32 / l.fga.max(1) as f32,
+            l.fta as f32 / c.possessions.max(1) as f32,
+            l.tov as f32 / c.possessions.max(1) as f32
+        );
+        print!("   by kind (share, make): ");
+        for (n, s) in ["rim", "mid", "three"].iter().zip(c.shots) {
+            print!("{n} {:.0}% {:.0}% (contest {:.2}); ", 100.0 * s.0 as f32 / shots.max(1) as f32, 100.0 * s.1 as f32 / s.0.max(1) as f32, s.2 / s.0.max(1) as f32);
+        }
+        println!();
+        print!("   by source (share, pts/shot): ");
+        let st: u32 = c.sources.iter().map(|s| s.0).sum();
+        for (src, s) in Source::ALL.iter().zip(c.sources) {
+            if s.0 * 50 >= st {
+                print!("{} {:.0}% {:.2}; ", src.label(), 100.0 * s.0 as f32 / st.max(1) as f32, s.2 as f32 / s.0.max(1) as f32);
+            }
+        }
+        println!();
+        println!("   turnovers by kind (bad pass, stripped, off foul, clock, press, 3s): {:?}", c.tov_kinds);
     }
 }

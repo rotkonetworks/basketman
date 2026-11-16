@@ -111,6 +111,7 @@ fn turnover_label(k: TurnoverKind) -> &'static str {
         TurnoverKind::OffensiveFoul => "Offensive foul",
         TurnoverKind::ShotClock => "Shot clock",
         TurnoverKind::Pressed => "Lost to the press",
+        TurnoverKind::ThreeSeconds => "Three seconds",
     }
 }
 

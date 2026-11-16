@@ -225,3 +225,64 @@ fn contested_shots_go_in_less_and_closer_ones_more() {
     println!("rim {:.1} mid {:.1} three {:.1}", all[0], all[1], all[2]);
     assert!(all[0] > all[1] + 4.0 && all[0] > all[2] + 4.0, "rim {:.1} mid {:.1} three {:.1}", all[0], all[1], all[2]);
 }
+
+/// Points per possession of a Post up side, with its big man drawn where
+/// `spot` says (or at his stock place), against the same defence, over
+/// several worlds; and the three-second violations it gave away.
+fn post_up_side(spot: Option<crate::court::Vec2>) -> (f32, f32) {
+    use crate::replay::TurnoverKind;
+    use crate::tactics::{Board, DefenseScheme, OffenseSet};
+    let (mut pts, mut poss, mut violations, mut games) = (0.0f32, 0.0f32, 0, 0);
+    for seed in [41u64, 42, 43] {
+        let w = World::generate(seed, 12);
+        for g in 0..16 {
+            let a = g % 12;
+            let b = (g * 5 + 1) % 12;
+            if a == b {
+                continue;
+            }
+            let (mut ta, mut tb) = (w.teams[a].tactics().clone(), w.teams[b].tactics().clone());
+            ta.offense = OffenseSet::PostUp;
+            ta.defense = DefenseScheme::ManToMan;
+            tb.defense = DefenseScheme::ManToMan;
+            ta.board = spot.map(|p| {
+                let mut bd = Board::stock(OffenseSet::PostUp);
+                bd.spots[4] = p;
+                bd
+            });
+            let mut hl = lineup(&w.teams[a], &w.players);
+            hl.tactics = &ta;
+            let mut al = lineup(&w.teams[b], &w.players);
+            al.tactics = &tb;
+            let (r, rec) = simulate_recorded(&hl, &al, &Rules::fiba(), &mut Rng::new(seed * 100 + g as u64));
+            pts += r.score[0] as f32;
+            poss += r.possessions[0] as f32;
+            games += 1;
+            violations += rec
+                .events
+                .iter()
+                .filter(|e| {
+                    e.offense == 0
+                        && matches!(e.kind, EventKind::Turnover { kind: TurnoverKind::ThreeSeconds, .. })
+                })
+                .count();
+        }
+    }
+    (pts / poss, violations as f32 / games as f32)
+}
+
+/// A hand-drawn spot under the basket was once worth thirty points of win
+/// percentage: the man stood there, was fed, and scored. He may not camp in
+/// the lane (three seconds) and nobody starts a play under the basket, so
+/// drawing him there is worth about what the stock set is.
+#[test]
+fn a_man_drawn_under_the_basket_is_not_a_cheat_code() {
+    let (stock, v0) = post_up_side(None);
+    for spot in [crate::court::v(1.1, 1.7), crate::court::v(0.0, 1.2)] {
+        let (drawn, v1) = post_up_side(Some(spot));
+        assert!(drawn < stock + 0.12, "drawn at {spot:?}: {drawn:.3} points a possession against {stock:.3} stock");
+        // The rule bites a set drawn into the lane now and then; it is not a
+        // habit of the stock sets.
+        assert!(v1 < 1.0 && v0 < 0.3, "three-second violations a game: {v1:.2} drawn, {v0:.2} stock");
+    }
+}

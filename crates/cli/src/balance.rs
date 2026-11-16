@@ -2995,6 +2995,45 @@ pub fn run(args: &[String]) {
     }
 }
 
+/// The drawn-play exploit of the first reading, replayed on its own: the
+/// big man's spot of Post up moved from the stock block to under the basket,
+/// everything else neutral, against the 25 neutral systems, with each
+/// defense of the five and the stock set beside it.
+pub fn exploit_section(cfg: &Cfg, r: &mut Report, sq: &Squad) {
+    out!(r, "== exploit: Post up with the big man's spot drawn under the basket ==");
+    let sys25 = systems(&[Press::None]);
+    let units = cfg.scale(6, 6);
+    let mut variants: Vec<(String, Strat)> = Vec::new();
+    for def in DefenseScheme::ALL {
+        let stock = Strat::sys(OffenseSet::PostUp, def, Press::None);
+        variants.push((format!("Post up/{} stock", def_short(def)), stock.clone()));
+        for (name, spot) in [("(1.1, 1.7)", v(1.1, 1.7)), ("(0.0, 1.2)", v(0.0, 1.2))] {
+            let mut b = Board::stock(OffenseSet::PostUp);
+            b.spots[4] = spot;
+            let mut t = stock.clone();
+            t.board = Some(b);
+            variants.push((format!("Post up/{} big man at {name}", def_short(def)), t));
+        }
+    }
+    let jobs: Vec<Job> = variants
+        .iter()
+        .flat_map(|(_, t)| sys25.iter().enumerate().map(move |(f, y)| (t, f, y)))
+        .map(|(t, f, y)| Job::new(sq, sq, t, y, 9000 + f as u64))
+        .collect();
+    let res = run_jobs(&jobs, units, mix(&[cfg.seed, 99]));
+    for (k, (name, _)) in variants.iter().enumerate() {
+        let e = mean_win(&res[k * 25..k * 25 + 25]);
+        let mut tot = Tot::default();
+        let mut g = 0.0;
+        for r_ in &res[k * 25..k * 25 + 25] {
+            tot.add(&r_.acc.x);
+            g += r_.acc.games;
+        }
+        out!(r, "  {:<44} {} win %   {:.1} pts, {:.1} FTA, {:.1} FGA per game", name, e.pct(), tot.pts / g, tot.fta / g, tot.fga / g);
+    }
+    out!(r);
+}
+
 /// All sections wanted by `cfg`, in order; returns every check.
 pub fn build(cfg: &Cfg, r: &mut Report, _log: &mut dyn FnMut(&str)) -> Vec<Check> {
     let mut checks = Vec::new();
@@ -3044,6 +3083,10 @@ pub fn build(cfg: &Cfg, r: &mut Report, _log: &mut dyn FnMut(&str)) -> Vec<Check
     if let (Some(mo), true) = (&mo, cfg.wants("search")) {
         let s = search_section(cfg, r, &base, mo);
         checks.extend(search_checks(&s));
+    }
+    // Only when asked for by name: the drawn-play exploit found by the search.
+    if cfg.sections.iter().any(|x| x == "exploit") {
+        exploit_section(cfg, r, &base);
     }
     if cfg.wants("season") {
         let s = season_section(cfg, r, mo.as_ref());

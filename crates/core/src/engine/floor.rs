@@ -12,7 +12,7 @@ use super::offense;
 use super::shot::{self, Errors};
 use super::{BoxLine, DT, GameResult, Lineup, Pause, Rules, Shout, Side};
 use crate::court::{
-    BALL_RADIUS, BOARD_HALF, BOARD_LOW, BOARD_Y, GRAVITY, HOOP, LENGTH, NO_CHARGE_RADIUS, RIM_HEIGHT, ShotKind,
+    KEY_DEPTH, KEY_HALF_WIDTH, BALL_RADIUS, BOARD_HALF, BOARD_LOW, BOARD_Y, GRAVITY, HOOP, LENGTH, NO_CHARGE_RADIUS, RIM_HEIGHT, ShotKind,
     Vec2, v,
 };
 use crate::player::{Attr, PlayerId};
@@ -64,6 +64,11 @@ const FOULED_ERR: f32 = 2.5;
 const FOULED_JUMPER: f32 = 1.5;
 /// A tip-in at the ring: how much harder than a layup (a ball in the air, a
 /// hand's width of control), and how close a defender has to be to be in the way.
+/// The lane rule, and how soon the attackers clear it of their own accord.
+const LANE_SECONDS: f32 = 3.0;
+const LANE_WARN: f32 = 2.2;
+/// Added to the crowding of a pass into a man at the rim, on top of 2.6.
+const CROWD_RIM: f32 = 3.0;
 const TIP_SCALE: f32 = 1.0;
 const TIP_CROWD: f32 = 1.5;
 const TIP_IN_RANGE: f32 = 0.8;
@@ -588,6 +593,8 @@ struct Play {
     /// has been tipped since the shot.
     def_touch: bool,
     tips: u8,
+    /// How long each attacker has stood in the lane: three seconds is a turnover.
+    lane: [f32; 5],
     /// Attacker who goes to pick up a loose ball, once it has stopped, and
     /// the play time he was sent at.
     fetcher: Option<usize>,
@@ -1448,6 +1455,29 @@ impl Game {
         if self.clock <= 0.0 {
             return Some(End::Period);
         }
+        // Three seconds: nobody camps in the lane while his team has the ball
+        // in the frontcourt. Going to the basket with the ball or going up
+        // for the shot is not camping.
+        if !matches!(self.play.phase, Phase::Advance) && self.play.wait <= 0.0 {
+            let o = self.play.o;
+            let going = matches!(
+                self.play.phase,
+                Phase::Drive { .. } | Phase::Gather { .. } | Phase::Post { .. }
+            );
+            for k in 0..5 {
+                let p = self.m[o][k].pos;
+                let inside = p.x.abs() <= KEY_HALF_WIDTH && p.y <= KEY_DEPTH;
+                if !inside || (going && self.play.holder == Some(k)) {
+                    self.play.lane[k] = 0.0;
+                    continue;
+                }
+                self.play.lane[k] += DT;
+                if self.play.lane[k] > LANE_SECONDS {
+                    self.play.lane = [0.0; 5];
+                    return self.turnover(k, TurnoverKind::ThreeSeconds, None, 0.0);
+                }
+            }
+        }
         if self.play.shot_clock <= 0.0 {
             let who = self.play.holder.unwrap_or(self.play.handler);
             self.oline(who).tov += 1;
@@ -1805,6 +1835,13 @@ impl Game {
             } else {
                 match self.play.task[k] {
                     Task::Spot => {
+                        // Two and a bit seconds in the lane: he steps out, and
+                        // the place he was drawn at is given up for this play.
+                        if self.play.lane[k] > LANE_WARN {
+                            let side = if pos.x >= 0.0 { 1.0 } else { -1.0 };
+                            self.play.spots[k] = v(side * (KEY_HALF_WIDTH + 0.9), pos.y.clamp(0.8, KEY_DEPTH));
+                            self.play.lane[k] = 0.0;
+                        }
                         let pace = if matches!(self.play.phase, Phase::Advance) {
                             0.9
                         } else {
@@ -2395,7 +2432,9 @@ impl Game {
                 // Hands around the catch (a crowded paint) are worse than a
                 // defender shading the lane.
                 let crowd = if on_lane.dist(b) < 1.2 && b.dist(HOOP) < 4.0 {
-                    2.6
+                    // The nearer the basket the more bodies and hands there are
+                    // to go through: the entry to a man at the rim is the hardest.
+                    2.6 + CROWD_RIM * (1.0 - b.dist(HOOP) / 2.4).clamp(0.0, 1.0)
                 } else {
                     1.0
                 };
@@ -2495,6 +2534,10 @@ impl Game {
             self.play.task[k] = Task::Cut(to);
         }
 
+        // He has been in the lane too long to wait: he goes up with it.
+        if self.play.lane[h] > LANE_WARN {
+            return self.gather(0.3, self.play.dribbled);
+        }
         let (kind, c, near) = self.look(h);
         let value = self.ev(h, kind, c * self.play.edge, near, self.play.dribbled);
         // A player who made the opening himself is expected to finish it.
@@ -5507,6 +5550,7 @@ impl Play {
             chase: [Chase::NONE; 10],
             def_touch: false,
             tips: 0,
+            lane: [0.0; 5],
             fetcher: None,
             fetch_t: 0.0,
             push: None,

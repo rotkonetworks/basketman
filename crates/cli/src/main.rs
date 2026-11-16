@@ -107,6 +107,7 @@ fn main() {
             Some("shots") => lab::shots(games.unwrap_or(60)),
             Some("stats") => lab::stats(games.unwrap_or(400)),
             Some("launch") => lab::launch(),
+            Some("exploit") => lab::exploit(games.unwrap_or(200)),
             Some("diag") => lab::diag(games.unwrap_or(12)),
             Some("clockviolations") => lab::clock_violations(games.unwrap_or(20)),
             Some("frames") => {
