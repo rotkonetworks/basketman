@@ -13,7 +13,7 @@ use basketman_core::command::{Command, CommandError, Outcome};
 use basketman_core::engine::{Orders, Pause};
 use basketman_core::inbox::{Deal, Stop};
 use basketman_core::instructions::{Coach, Instructions};
-use basketman_core::league::{LiveInput, LiveRound, TeamId, World};
+use basketman_core::league::{LiveInput, LiveRound, Refusal, Stoppage, TeamId, World};
 use basketman_core::player::PlayerId;
 use basketman_core::staff::Job;
 use basketman_core::save;
@@ -158,6 +158,45 @@ fn pause_name(p: Pause, me: usize) -> Value {
         Pause::PeriodEnd => json!("period_end"),
         Pause::Final => json!("final"),
     }
+}
+
+/// Whether play is live or stopped, why, and what the coach may do now.
+fn play_json(live: &LiveRound) -> Value {
+    let me = live.side;
+    let stop = live.stoppage();
+    let (state, why) = match stop {
+        None => ("live", Value::Null),
+        Some(Stoppage::Tipoff) => ("stopped", json!("tipoff")),
+        Some(Stoppage::Timeout(s)) => (
+            "stopped",
+            json!(if s == me { "timeout_yours" } else { "timeout_theirs" }),
+        ),
+        Some(Stoppage::Break { half: true, .. }) => ("stopped", json!("half_time")),
+        Some(Stoppage::Break { .. }) => ("stopped", json!("period_break")),
+        Some(Stoppage::Final) => ("over", json!("final")),
+    };
+    let (team, words) = live.talks_left();
+    let mut may = vec!["Timeout", "AutoSubs", "Swap", "CancelSwap"];
+    if matches!(stop, Some(s) if s != Stoppage::Final) {
+        may.push("Orders");
+        may.push("Brief");
+        if team > 0 || words > 0 {
+            may.push("Shout");
+        }
+    }
+    if stop == Some(Stoppage::Final) {
+        may.clear();
+    }
+    json!({
+        "state": state,
+        "stopped_for": why,
+        "may": may,
+        "stoppage_seconds": stop.map(Stoppage::seconds),
+        "talks_left": {"team": team, "players": words},
+        "note": if stop.is_none() {
+            json!("Play is live: tactics, instructions and talk are for a timeout, a break or before the tip. Call a Timeout (taken at the next dead ball), then step to it.")
+        } else { Value::Null },
+    })
 }
 
 /// What a command's outcome looks like to the agent.
@@ -711,6 +750,7 @@ impl Session {
             "away": row(1),
             "periods": res.periods,
             "players": {"yours": yours, "opponent": theirs},
+            "play": play_json(&live.round),
             "timeout_wanted": g.timeout_wanted(side),
             "auto_subs": g.auto_subs(side),
             "queued_swaps": g.queued(side),
@@ -840,15 +880,17 @@ impl Session {
             {
                 return Err(AgentError::new("out_of_range", "sliders run from 1 to 20"));
             }
-            LiveInput::Timeout
-                if live.round.game.timeouts_left(side) == 0
-                    && !live.round.game.timeout_wanted(side) =>
-            {
-                return Err(AgentError::new("refused", "no timeouts left"));
-            }
             _ => {}
         }
-        let said = live.round.input(input);
+        let said = live.round.try_input(input).map_err(|r| {
+            let kind = match r {
+                Refusal::PlayIsLive => "play_is_live",
+                Refusal::GameOver | Refusal::NoTimeouts => "refused",
+                Refusal::TeamTalkUsed | Refusal::WordsUsed => "talk_used",
+                Refusal::NotOnTheTeam => "not_your_player",
+            };
+            AgentError::new(kind, r.to_string())
+        })?;
         let mut st = self.live_state()?;
         st["reactions"] = Value::Array(
             said.iter()
