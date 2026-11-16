@@ -307,6 +307,7 @@ impl Game {
                     0
                 };
                 st.last_vel = m.vel;
+                st.peak = (st.peak - stance::PEAK_FALL * DT).max(speed);
             }
         }
         self.update_handler();

@@ -107,7 +107,9 @@ impl Game {
         let o = self.play.o;
         let m = &self.m[o][h];
         let ctrl = self.finish_control(h);
-        let v = m.vel.len();
+        // The speed he came in at, not what he has left as he gathers: a man
+        // who ran the length of the floor has it in his legs at the rim.
+        let v = 0.5 * (m.vel.len() + self.st[o][h].peak);
         let to = (HOOP - m.pos).norm();
         let speed = FIN_SPEED * (v - FIN_SPEED_FROM).max(0.0) * (1.0 - 0.5 * ctrl);
         let across = (m.vel.x * to.y - m.vel.y * to.x).abs();
@@ -173,6 +175,58 @@ impl Game {
             * (1.0 + FLOATER_ARRIVAL * self.finish_arrival(h, hand, near, c))
     }
 
+    /// A man going to the rim with the ball on a drive or a break, or gathering
+    /// for a finish: the best placed of the others, who is not his man, steps
+    /// into the lane to meet him at the rim if he can get there in time. He
+    /// goes up straight (squared to the shooter, set) to contest without a
+    /// foul, or he arrives late and moving, and the whistle is likelier.
+    pub(super) fn rim_rotation(&mut self, on_ball: Option<usize>) {
+        let o = self.play.o;
+        let d = 1 - o;
+        let Some(h) = self.play.holder else { return };
+        let me = self.m[o][h];
+        let going = match self.play.phase {
+            Phase::Drive { .. } => true,
+            Phase::Gather { .. } => self
+                .play
+                .shot
+                .is_some_and(|s| matches!(s.style, Style::Layup | Style::Dunk | Style::Floater)),
+            Phase::Advance => self.play.brk && me.vel.dot((HOOP - me.pos).norm()) > 3.0,
+            _ => false,
+        };
+        let to_rim = me.pos.dist(HOOP);
+        if !going || to_rim > RIM_HELP_RANGE || me.vel.dot((HOOP - me.pos).norm()) < 1.0 {
+            return;
+        }
+        // When he is there: the time left to the rim, at the speed he has.
+        let left = to_rim / me.vel.len().max(3.0);
+        let spot = HOOP.toward(me.pos, 1.0);
+        let mut best: Option<(f32, usize)> = None;
+        for dk in 0..5 {
+            if Some(dk) == on_ball
+                || self.play.stun[dk] > 0.0
+                || self.play.hunt.is_some_and(|(hk, _, _)| hk == dk)
+            {
+                continue;
+            }
+            let q = self.m[d][dk].pos;
+            // Nobody who is closer to his own man than to the lane leaves him
+            // for a ball that is not coming his way, and nobody who is already
+            // behind the play.
+            let t = q.dist(spot) / (self.cache.top[d * 5 + dk] * 0.95).max(1.0);
+            if t > left + RIM_HELP_SLACK || q.dist(HOOP) > RIM_HELP_RANGE + 1.5 {
+                continue;
+            }
+            if best.is_none_or(|b| t < b.0) {
+                best = Some((t, dk));
+            }
+        }
+        if let Some((_, dk)) = best {
+            self.m[d][dk].target = spot;
+            self.m[d][dk].pace = 1.0;
+        }
+    }
+
     /// Whether a man going to the rim takes a floater: a defender is waiting
     /// at the rim (the shot would be a contested layup), the man is neither
     /// a dunker with room nor a post player, and he has the touch. The
@@ -198,6 +252,11 @@ impl Game {
         c >= threshold
     }
 }
+
+/// How far from the rim a drive or a break draws a helper over, and how many
+/// seconds late he may be and still try.
+const RIM_HELP_RANGE: f32 = 6.0;
+const RIM_HELP_SLACK: f32 = 0.35;
 
 /// Distances from the rim, in metres, between which a floater is taken.
 const FLOATER_MIN: f32 = 1.3;

@@ -68,6 +68,9 @@ pub struct Stance {
     pub last_vel: Vec2,
     /// Seconds since the last cut or turn of more than a few degrees.
     pub steady: f32,
+    /// The speed he came in at: his fastest of the last second or so, falling
+    /// by `PEAK_FALL` m/s each second.
+    pub peak: f32,
 }
 
 impl Stance {
@@ -81,6 +84,7 @@ impl Stance {
             turning: 0.0,
             last_vel: Vec2::ZERO,
             steady: 1.0,
+            peak: 0.0,
         }
     }
 
@@ -329,6 +333,9 @@ impl Handler {
         self.pivot = self.pivot.flipped();
     }
 }
+
+/// How fast the memory of the speed he came in at fades, m/s per second.
+pub const PEAK_FALL: f32 = 3.0;
 
 /// Metres a ball handler may travel from where he caught it before it
 /// counts that he is dribbling (the two steps of a catch on the move).

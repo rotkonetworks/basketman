@@ -2234,6 +2234,7 @@ impl Game {
                 0.88
             };
         }
+        self.rim_rotation(aims.on_ball);
         // A ball picked off is already on its way to the thief's hand: his
         // team is running before it gets there, with whatever speed they have.
         if let Some(Flight {
@@ -3058,9 +3059,9 @@ impl Game {
 
     fn foul_chance(&self, kind: ShotKind, c: f32) -> f32 {
         let base = match kind {
-            ShotKind::Rim => 0.084 + 0.252 * c.min(1.0),
-            ShotKind::Mid => 0.021 + 0.084 * c,
-            ShotKind::Three => 0.007 + 0.028 * c,
+            ShotKind::Rim => 0.075 + 0.225 * c.min(1.0),
+            ShotKind::Mid => 0.019 + 0.075 * c,
+            ShotKind::Three => 0.006 + 0.025 * c,
         };
         base * (1.0 + 0.5 * self.def().aggression())
     }
