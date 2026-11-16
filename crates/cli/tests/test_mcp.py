@@ -164,7 +164,14 @@ def main():
         check(st["time"] > 0, "live step")
         feeds = m.ok("live_feeds", part="scores")
         check(feeds["games"] and "table" in feeds, "live_feeds scores")
-        m.ok("live_input", input="Timeout")
+        # A call may be under review by now (a few a game, and an RNG-dependent
+        # moment): the bench answers it first, and only then can ask for a timeout.
+        for _ in range(6):
+            v, err = m.tool("live_input", input="Timeout")
+            if not (err and v.get("kind") == "review_only"):
+                break
+            m.ok("live_step", seconds=1)  # let it stand
+        check(not err, f"live_input failed: {v}")
         res = m.ok("live_finish")
         check(res["games"], "live finished")
 
