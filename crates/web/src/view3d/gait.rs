@@ -173,6 +173,11 @@ pub(crate) struct Legs {
     pub hand: i8,
     /// Stride length relative to a run: short chop steps, a shuffle.
     pub stride_k: f32,
+    /// The hands as recorded, by shoulder (0 his left, 1 his right), in his
+    /// own frame: forward, left, up from the floor; and how much to trust
+    /// them (0 for a recording that has none).
+    pub hand_at: [[f32; 3]; 2],
+    pub hand_set: [f32; 2],
 }
 
 impl Default for Legs {
@@ -185,6 +190,8 @@ impl Default for Legs {
             one_hand: -1.0,
             hand: 0,
             stride_k: 1.0,
+            hand_at: [[0.0; 3]; 2],
+            hand_set: [0.0; 2],
         }
     }
 }
@@ -482,6 +489,12 @@ pub(crate) fn pose(d: &Dims, g: &Gait, ball: bool) -> Pose {
                 onball = w2;
             }
         }
+        // Where the recording has the hand, it is there.
+        if g.legs.hand_set[sd] > 0.5 {
+            let h = g.legs.hand_at[sd];
+            tw = v3(h[0], h[1], h[2]);
+            onball = onball.max(0.0);
+        }
         // The pole keeps the elbow where the pose put it.
         let mid = (sh + tw) * 0.5;
         let mut pole = el - mid;
@@ -539,6 +552,8 @@ impl Slot {
             one_hand: -1.0,
             hand: 0,
             stride_k: 1.0,
+            hand_at: [[0.0; 3]; 2],
+            hand_set: [0.0; 2],
         },
     };
 
@@ -802,6 +817,19 @@ fn compute_row(rec: &Recording, i: usize, prev: Option<&Row>, stride: StrideOf) 
             Some(b) if linked => b.legs.pivot + (pivot_goal - b.legs.pivot) * 0.5,
             _ => pivot_goal,
         };
+        // The recorded hands: offsets in court coordinates, turned into his
+        // own frame (forward, left). The right hand is on the -y side.
+        let mut hand_at = [[0.0f32; 3]; 2];
+        let mut hand_set = [0.0f32; 2];
+        for (ri, hr) in rp.hands.iter().enumerate() {
+            if hr.z == 0 {
+                continue;
+            }
+            let (dx, dy) = (hr.dx as f32 / 100.0, hr.dy as f32 / 100.0);
+            let sd = 1 - ri;
+            hand_at[sd] = [dx * face.x + dy * face.y, -dx * face.y + dy * face.x, hr.z as f32 / 100.0];
+            hand_set[sd] = 1.0;
+        }
         let legs = Legs {
             yaw,
             foot: rp.foot,
@@ -810,6 +838,8 @@ fn compute_row(rec: &Recording, i: usize, prev: Option<&Row>, stride: StrideOf) 
             one_hand,
             hand: rp.hand,
             stride_k,
+            hand_at,
+            hand_set,
         };
         out[k] = Slot {
             vel: vl,
@@ -915,6 +945,15 @@ impl Motion {
                         } else {
                             a[k].legs.one_hand
                         },
+                        hand_at: std::array::from_fn(|s| {
+                            std::array::from_fn(|c| {
+                                a[k].legs.hand_at[s][c] + (b.legs.hand_at[s][c] - a[k].legs.hand_at[s][c]) * u
+                            })
+                        }),
+                        hand_set: [
+                            a[k].legs.hand_set[0].min(b.legs.hand_set[0]),
+                            a[k].legs.hand_set[1].min(b.legs.hand_set[1]),
+                        ],
                         ..a[k].legs
                     },
                 };

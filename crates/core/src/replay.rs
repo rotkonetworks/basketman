@@ -955,6 +955,27 @@ pub struct Frame {
     pub whistler: u8,
 }
 
+/// A defender's hand on a dribbled ball.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PokeRec {
+    pub time: f32,
+    /// The side with the ball, the handler and the defender (court slots).
+    pub side: u8,
+    pub handler: u8,
+    pub defender: u8,
+    /// How far the hand was from the ball, in centimetres.
+    pub gap_cm: u16,
+    /// What came of it: the ball taken, knocked loose, or a foul.
+    pub result: PokeResult,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PokeResult {
+    Taken,
+    Loose,
+    Foul,
+}
+
 /// One pass: when, which side, who threw it and who it was meant for (court
 /// slots), where it left the thrower's hands, and whether it was a throw-in.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1039,6 +1060,9 @@ pub struct Recording {
     /// nobody passes to himself, and a throw-in starts out of bounds.
     #[serde(default)]
     pub passes: Vec<PassRec>,
+    /// Every time a defender's hand touched a dribbled ball.
+    #[serde(default)]
+    pub pokes: Vec<PokeRec>,
     /// Every whistle and every foul that should have been one, with what
     /// really happened; see `officials.rs`. Review results are filled in.
     #[serde(default)]

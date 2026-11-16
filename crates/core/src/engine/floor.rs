@@ -2022,8 +2022,11 @@ impl Game {
                 _ => None,
             };
             let (target, pace) = if let Some(aim) = receiving {
-                // Coming to the ball.
-                (aim, 0.95)
+                // Coming to the ball: running through the place it is going,
+                // not stopping short of it.
+                let go = aim - pos;
+                let dir = if go.len() > 0.4 { go.norm() } else { Vec2::ZERO };
+                (aim + dir * 1.1, 1.0)
             } else if reacting {
                 // The ball is going the other way: he turns and runs back.
                 (v(pos.x * 0.7, (pos.y + 9.0).min(LENGTH - 2.0)), 1.0)
@@ -2900,7 +2903,7 @@ impl Game {
             }
         }
         // Ahead of the ball and open: throw it.
-        let vision = 0.35 + (self.oe(h, Attr::Passing) + self.oe(h, Attr::Iq)) / 40.0 * 0.65;
+        let vision = 0.6 + (self.oe(h, Attr::Passing) + self.oe(h, Attr::Iq)) / 40.0 * 0.4;
         if p.y > 3.0
             && self.rng.chance(vision)
             && let Some(j) = self.lead_pass(h, first)
@@ -3206,7 +3209,10 @@ impl Game {
         // A man who has been in the lane for most of his three seconds is
         // not a man to throw it to: he has to leave.
         let camping = if self.play.lane[j] > 1.6 { 0.4 } else { 0.0 };
-        self.lane_risk(h, j, kind) + camping
+        // What he sees of the lane: a passer with little vision reads it
+        // as clearer than it is.
+        let sees = 0.25 + 1.5 * ((self.oe(h, Attr::Passing) + self.oe(h, Attr::Iq)) / 40.0).clamp(0.0, 1.0);
+        self.lane_risk(h, j, kind) * sees + camping
     }
 
     /// The teammate with the best look, if it beats `bar` expected points.
@@ -3293,7 +3299,7 @@ impl Game {
 
         // Overplayed on the ball side: backdoor, and the ball goes to him.
         if let Some(j) = self.read_denial(h) {
-            let vision = 0.4 + (self.oe(h, Attr::Passing) + self.oe(h, Attr::Iq)) / 40.0 * 0.6;
+            let vision = 0.65 + (self.oe(h, Attr::Passing) + self.oe(h, Attr::Iq)) / 40.0 * 0.35;
             if self.rng.chance(vision) && self.pass_risk(h, j) < 0.2 {
                 return self.pass(h, j, false);
             }
@@ -3325,7 +3331,7 @@ impl Game {
         }
         // Whatever room a dribble made is gone once he does not shoot.
         self.play.edge = 1.0;
-        let vision = 0.4 + (self.oe(h, Attr::Passing) + self.oe(h, Attr::Iq)) / 40.0 * 0.6;
+        let vision = 0.6 + (self.oe(h, Attr::Passing) + self.oe(h, Attr::Iq)) / 40.0 * 0.4;
         if self.rng.chance(vision)
             && let Some(j) = self.best_pass(h, (value + 0.08).max(bar), left)
         {
@@ -3852,7 +3858,7 @@ impl Game {
 
         let (kind, c, near) = self.look_seen(h);
         let value = self.ev(h, kind, c, near, true);
-        let vision = 0.35 + (self.oe(h, Attr::Passing) + self.oe(h, Attr::Iq)) / 40.0 * 0.65;
+        let vision = 0.6 + (self.oe(h, Attr::Passing) + self.oe(h, Attr::Iq)) / 40.0 * 0.4;
         if self.rng.chance(vision)
             && let Some(j) = self.best_pass(h, value + 0.2, left)
         {
@@ -4178,7 +4184,7 @@ impl Game {
         .clamp(0.3, 1.2);
         let (kind, c, near) = self.look_seen(h);
         let value = self.ev(h, kind, c * self.play.edge, near, false);
-        let vision = 0.3 + (self.oe(h, Attr::Passing) + self.oe(h, Attr::Iq)) / 40.0 * 0.6;
+        let vision = 0.55 + (self.oe(h, Attr::Passing) + self.oe(h, Attr::Iq)) / 40.0 * 0.4;
         if self.rng.chance(vision)
             && let Some(j) = self.best_pass(h, value + 0.05, left + 6.0)
         {

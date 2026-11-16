@@ -12,8 +12,8 @@ use crate::replay::{Dribble, HandKind, PassKind, PassOutcome, TurnoverKind};
 
 /// Metres of aim error at no distance, and per metre thrown, for a chest
 /// pass by a passer of rating 10.
-const AIM_BASE: f32 = 0.03;
-const AIM_PER_M: f32 = 0.007;
+const AIM_BASE: f32 = 0.07;
+const AIM_PER_M: f32 = 0.014;
 /// Seconds before a defender sees the ball go, before his anticipation.
 const SEE_BASE: f32 = 0.16;
 const SEE_SKILL: f32 = 0.008;
@@ -50,7 +50,7 @@ pub(super) fn spec(kind: PassKind) -> Spec {
         PassKind::Chest => Spec { speed: 11.5, err: 1.0, wind: 0.16, z: 1.30 },
         PassKind::Bounce => Spec { speed: 10.0, err: 1.15, wind: 0.20, z: 0.95 },
         PassKind::Overhead => Spec { speed: 12.5, err: 1.08, wind: 0.28, z: 1.95 },
-        PassKind::Lob => Spec { speed: 7.5, err: 1.2, wind: 0.30, z: 2.35 },
+        PassKind::Lob => Spec { speed: 7.5, err: 1.15, wind: 0.30, z: 2.05 },
         PassKind::Push => Spec { speed: 11.0, err: 1.35, wind: 0.10, z: 1.35 },
         PassKind::Handoff => Spec { speed: 4.0, err: 0.4, wind: 0.12, z: 1.20 },
         PassKind::Outlet => Spec { speed: 17.0, err: 1.4, wind: 0.24, z: 1.50 },
@@ -94,6 +94,10 @@ pub(super) struct Thrown {
     /// The ball has been inside the lines (a throw-in starts outside).
     pub entered: bool,
     pub dbg: [(Vec2, V3, V3); 5],
+    /// Where the receiver has decided to meet it, and when.
+    pub catch: Option<(V3, f32)>,
+    /// How far off the aim it was thrown, in metres.
+    pub err: f32,
 }
 
 /// A ball nobody holds, after a pass was fumbled or tipped.
@@ -160,26 +164,20 @@ impl Game {
         let skill = self.pass_skill(h);
         let lead = (0.55 + 0.45 * skill).min(1.0);
         let mut at = m.pos;
-        // Where he is going: his velocity, or the way he has been sent when
-        // he has only just started.
-        let vel = match self.play.task[j] {
-            Task::Cut(to) if m.pos.dist(to) > 0.8 => {
-                let go = (to - m.pos).norm() * (self.cache.top[o * 5 + j] * 0.85);
-                if go.dot(go) > m.vel.dot(m.vel) { go } else { m.vel }
-            }
-            _ => m.vel,
-        };
-        // Lead him by the time it takes, twice round (the time depends on
-        // where he will be).
         for _ in 0..2 {
             let t = (from.dist(at) / speed).max(0.1) + 0.1;
-            at = m.pos + vel * (t * lead);
-            if let Task::Cut(to) = self.play.task[j] {
-                // No further than where he is going.
-                if m.pos.dist(at) > m.pos.dist(to) {
-                    at = to;
+            at = match self.play.task[j] {
+                // Sent to a place: he gets up to speed on the way, so he is
+                // not as far along as a man who was already running.
+                Task::Cut(to) if m.pos.dist(to) > 0.8 => {
+                    let dir = (to - m.pos).norm();
+                    let top = self.cache.top[o * 5 + j] * 0.9;
+                    let v0 = m.vel.dot(dir).max(0.0);
+                    let dist = (v0 * t + 0.5 * 6.0 * t * t).min(top * t).min(m.pos.dist(to));
+                    m.pos + dir * (dist * lead.max(0.8))
                 }
-            }
+                _ => m.pos + m.vel * (t * lead),
+            };
         }
         v(at.x.clamp(-7.2, 7.2), at.y.clamp(0.3, LENGTH - 0.3))
     }
@@ -513,7 +511,7 @@ impl Game {
         let moving = 1.0 + 0.04 * self.m[o][h].vel.len();
         let sigma = (AIM_BASE + AIM_PER_M * d)
             * sp.err
-            * (1.55 - skill / 20.0 * 1.1).max(0.35)
+            * (1.9 - skill / 20.0 * 1.6).max(0.3)
             * pressure
             * footing
             * weak
@@ -558,7 +556,7 @@ impl Game {
             kind: FlightKind::Pass { from: h, to: j },
             path: Some(plan.path),
         });
-        self.play.thrown = Some(Thrown { kind, speed: sp.speed, attempt, receiver_seen: false, entered: rel.x.abs() <= 7.5 && rel.y >= 0.0 && rel.y <= LENGTH, dbg: std::array::from_fn(|dk| (self.dp(dk), self.hands[1 - o][dk].h[0].p, self.hands[1 - o][dk].h[1].p)) });
+        self.play.thrown = Some(Thrown { kind, speed: sp.speed, attempt, receiver_seen: false, entered: rel.x.abs() <= 7.5 && rel.y >= 0.0 && rel.y <= LENGTH, catch: None, err: (ex * ex + ey * ey + ez * ez).sqrt(), dbg: std::array::from_fn(|dk| (self.dp(dk), self.hands[1 - o][dk].h[0].p, self.hands[1 - o][dk].h[1].p)) });
         self.play.holder = None;
         self.play.tips = 0;
         self.play.def_touch = false;
@@ -622,7 +620,7 @@ impl Game {
                 return self.defender_on_pass(f, ts, dk, gap, from, to, th);
             }
             // The receiver's.
-            if ts >= (f.dur - 0.28).max(0.04) {
+            if ts >= 0.08 {
                 let kind = th.kind;
                 let mut best: Option<f32> = None;
                 for i in 0..2 {
@@ -753,8 +751,9 @@ impl Game {
         let back = (self.m[o][from].pos - me).norm();
         let looking = (self.st[o][to].gaze.dot(back) * 0.5 + 0.5).clamp(0.0, 1.0);
         let run = self.m[o][to].vel.len();
-        let base = 0.995 + 0.0008 * hands_skill;
-        let pen = 0.20 * (stretch - 0.85).max(0.0).powi(2)
+        let base = 0.996 + 0.0004 * hands_skill;
+        let pen = 0.15 * (stretch - 0.85).max(0.0).powi(2)
+            + 0.30 * ((th.err - 0.50).max(0.0) / 0.6).min(1.5)
             + 0.03 * (speed - 12.0).max(0.0) / 4.0
             + 0.02 * (1.0 - looking)
             + 0.001 * run

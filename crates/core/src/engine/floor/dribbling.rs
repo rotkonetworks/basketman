@@ -76,7 +76,7 @@ impl Game {
                 let steal = self.de(dk, Attr::Steal);
                 let p = (GO_BASE + GO_SKILL * (steal - 10.0) + GO_AGGRESSION * self.def().aggression()).clamp(0.02, 0.6)
                     * (1.3 - 0.5 * (q.dist(me) / (reach + 0.35)))
-                    * (1.0 + 0.5 * (1.0 - self.oe(h, Attr::Handling) / 20.0));
+                    * (0.7 + 1.0 * (1.0 - self.oe(h, Attr::Handling) / 20.0));
                 if self.rng.chance(p) {
                     let sig = 0.17 * (1.6 - steal / 20.0 * 1.1).max(0.4);
                     self.poke.tries[dk] = Some(crate::engine::ball::v3(
@@ -142,6 +142,20 @@ impl Game {
     }
 
     /// A defender's hand is on the dribbled ball.
+    fn note_poke(&mut self, h: usize, dk: usize, gap: f32, result: crate::replay::PokeResult) {
+        let (time, side) = (self.wall, self.play.o as u8);
+        if let Some(rec) = &mut self.rec {
+            rec.pokes.push(crate::replay::PokeRec {
+                time,
+                side,
+                handler: h as u8,
+                defender: dk as u8,
+                gap_cm: (gap * 100.0).round() as u16,
+                result,
+            });
+        }
+    }
+
     fn touch_dribble(&mut self, h: usize, dk: usize, gap: f32, bt: super::hands_hooks::Bounce) -> Option<End> {
         let o = self.play.o;
         let steal = self.de(dk, Attr::Steal);
@@ -156,18 +170,22 @@ impl Game {
             let raw = temper * self.def().foul_mult(self.def().on[dk]) * self.off().draw_mult(self.off().on[h]) / CALL_BASE;
             let hit = self.rng.chance(raw.min(0.95));
             if self.call(hit, 1.0, FoulKind::ReachIn, (1 - o, dk), (o, h)) {
+                self.note_poke(h, dk, gap, crate::replay::PokeResult::Foul);
                 return self.floor_foul(dk, h, FoulKind::ReachIn);
             }
+            self.note_poke(h, dk, gap, crate::replay::PokeResult::Loose);
             return None;
         }
         // Taken cleanly, or knocked away.
         let take = (TAKE_BASE + 0.02 * (0.6 * steal + 0.4 * hands - 0.7 * handling - 0.3 * strength) + 0.15 * (1.0 - gap / POKE_HIT)).clamp(0.05, 0.8);
         if self.rng.chance(take) {
+            self.note_poke(h, dk, gap, crate::replay::PokeResult::Taken);
             self.steal_flew = 0.0;
             self.play.ball = bt.at;
             self.play.ball_h = bt.z;
             return self.turnover(h, TurnoverKind::Stripped, Some(dk), 1.0);
         }
+        self.note_poke(h, dk, gap, crate::replay::PokeResult::Loose);
         // Poked loose: away from the man and out the way the hand pushed.
         let away = (bt.at - self.m[o][h].pos).norm();
         let dir = if away.len() < 0.2 { self.st[o][h].body } else { away };

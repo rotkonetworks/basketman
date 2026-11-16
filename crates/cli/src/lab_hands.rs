@@ -200,3 +200,96 @@ pub fn run(games: usize) {
     println!();
     let _ = by_set;
 }
+
+/// Does each rating keep its meaning? Team A of each game has one attribute
+/// moved for every man, against the same opponent and seeds; the table shows
+/// what changed for team A.
+pub fn relations(games: usize) {
+    use basketman_core::player::Attr;
+    let base = World::generate(41, 12);
+    let n = base.teams.len();
+    let rows: [(&str, Attr); 3] = [
+        ("passing", Attr::Passing),
+        ("handling", Attr::Handling),
+        ("ballcare", Attr::Handling),
+    ];
+    println!("{:<12} {:>6} | {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}", "attribute", "delta", "tov/100", "badpass", "strips", "ast/fgm", "stl/100", "pts/100", "pass/100");
+    for (name, attr) in rows {
+        for delta in [-8.0f32, 0.0, 6.0] {
+            let mut w = base.clone();
+            let (mut tov, mut bad, mut strip, mut poss) = (0u32, 0u32, 0u32, 0u32);
+            let mut outc = [0u32; 6];
+            let (mut ast, mut fgm, mut stl, mut dposs, mut pts, mut passes) = (0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
+            for g in 0..games {
+                let a = g % n;
+                let b = (g * 5 + 1 + g / n) % n;
+                if a == b {
+                    continue;
+                }
+                // Team a's players altered for this game.
+                let ids: Vec<u32> = w.teams[a].roster.iter().map(|&p| p as u32).collect();
+                for &p in &ids {
+                    let pl = &mut w.players[p as usize];
+                    pl.attrs[attr] = (base.players[p as usize].attrs[attr] + delta).clamp(1.0, 20.0);
+                    if name == "ballcare" {
+                        pl.attrs[Attr::Passing] = if delta < 0.0 { 2.0 } else { base.players[p as usize].attrs[Attr::Passing] };
+                    }
+                }
+                let (ta, tb) = (w.teams[a].tactics().clone(), w.teams[b].tactics().clone());
+                let (la, lb) = (mk(&w, &ta), mk(&w, &tb));
+                let mut rng = Rng::new(7000 + g as u64 * 31);
+                let (r, rec) = simulate_recorded(&la, &lb, &w.rules, &mut rng);
+                for &p in &ids {
+                    w.players[p as usize].attrs[attr] = base.players[p as usize].attrs[attr];
+                    w.players[p as usize].attrs[Attr::Passing] = base.players[p as usize].attrs[Attr::Passing];
+                }
+                poss += r.possessions[0] as u32;
+                dposs += r.possessions[1] as u32;
+                for (id, l) in &r.boxes[0] {
+                    let _ = id;
+                    tov += l.tov as u32;
+                    ast += l.ast as u32;
+                    fgm += l.fgm as u32;
+                    pts += l.pts as u32;
+                }
+                for (_, l) in &r.boxes[1] {
+                    let _ = l;
+                }
+                for (_, l) in &r.boxes[0] {
+                    stl += l.stl as u32;
+                }
+                passes += rec.passes.iter().filter(|p| p.side == 0).count() as u32;
+                for p in rec.passes.iter().filter(|p| p.side == 0) {
+                    outc[p.outcome as usize] += 1;
+                }
+                let mine: std::collections::HashSet<u32> = r.boxes[0].iter().map(|(id, _)| *id as u32).collect();
+                for e in &rec.events {
+                    if let EventKind::Turnover { who, kind, .. } = &e.kind
+                        && mine.contains(&(*who as u32))
+                    {
+                        match kind {
+                            TurnoverKind::BadPass => bad += 1,
+                            TurnoverKind::Stripped => strip += 1,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            let p = poss.max(1) as f32;
+            println!(
+                "{:<12} {:>+6.0} | {:>8.2} {:>8.2} {:>8.2} {:>8.3} {:>8.2} {:>8.1} {:>8.1}",
+                name,
+                delta,
+                tov as f32 / p * 100.0,
+                bad as f32 / p * 100.0,
+                strip as f32 / p * 100.0,
+                ast as f32 / fgm.max(1) as f32,
+                stl as f32 / dposs.max(1) as f32 * 100.0,
+                pts as f32 / p * 100.0,
+                passes as f32 / p * 100.0
+            );
+            let pn = passes.max(1) as f32;
+            println!("{:>20} caught {:.1} bobbled {:.1} tipped {:.1} stolen {:.1} out {:.1} missed {:.1}", "", outc[0] as f32 * 100.0 / pn, outc[1] as f32 * 100.0 / pn, outc[2] as f32 * 100.0 / pn, outc[3] as f32 * 100.0 / pn, outc[4] as f32 * 100.0 / pn, outc[5] as f32 * 100.0 / pn);
+        }
+    }
+}

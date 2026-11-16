@@ -3,6 +3,7 @@
 //! up is not down: it moves at a limited speed toward where it wants to be.
 
 use super::*;
+use crate::engine::ball::V3;
 use crate::engine::hands::{self, HandPos, Hands, LEFT, RIGHT};
 use crate::replay::{Dribble, HandKind};
 
@@ -153,9 +154,25 @@ impl Game {
                         let (ft, path, dur) = flight.map(|f| (f.t, f.path, f.dur)).unwrap_or((0.0, None, 0.0));
                         let (ap, az) = match path {
                             Some(p) => {
-                                // Where a hand can meet it, if there is such a place.
-                                let see = 0.06 + 0.25 * (1.0 - (self.st[t][k].gaze.dot((self.m[t][from].pos - me).norm()) * 0.5 + 0.5).clamp(0.0, 1.0));
-                                match self.reach_for(t, k, &p, dur, ft, see) {
+                                // Where a hand can meet it: kept once chosen
+                                // while it is still within reach, so that the
+                                // hand waits for the ball.
+                                let arm2 = arm + 0.45;
+                                let kept = self.play.thrown.and_then(|th| th.catch).filter(|(q, tau)| {
+                                    *tau + 0.06 > ft
+                                        && (0..2).any(|i| {
+                                            let d = V3 { x: q.x - sh[i].x, y: q.y - sh[i].y, z: q.z - sh[i].z };
+                                            d.len() <= arm2
+                                        })
+                                });
+                                let choice = kept.or_else(|| {
+                                    let see = 0.06 + 0.25 * (1.0 - (self.st[t][k].gaze.dot((self.m[t][from].pos - me).norm()) * 0.5 + 0.5).clamp(0.0, 1.0));
+                                    self.reach_for(t, k, &p, dur, ft, see)
+                                });
+                                if let Some(th) = self.play.thrown.as_mut() {
+                                    th.catch = choice;
+                                }
+                                match choice {
                                     Some((q, _)) => (q.xy(), q.z),
                                     None => p.at(ft + 0.10),
                                 }

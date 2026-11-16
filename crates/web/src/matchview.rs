@@ -938,7 +938,12 @@ fn paint_3d(
                 act,
             },
         );
-        if let Some(at) = at {
+        // The ball is where the recording has it; only an old recording, with
+        // no hands in it, lets the figure's own idea of the dribble place it.
+        let recorded_hands = frame.pose[side][k].hands.iter().any(|h| h.z > 0);
+        if let Some(at) = at
+            && !recorded_hands
+        {
             ball_at = at;
         }
     }
