@@ -106,6 +106,11 @@ fn main() {
             Some("roles") => lab::roles(games.unwrap_or(60)),
             Some("shots") => lab::shots(games.unwrap_or(60)),
             Some("stats") => lab::stats(games.unwrap_or(400)),
+            Some("transition") if std::env::args().nth(3).as_deref() == Some("watch") => {
+                let arg = |i: usize| std::env::args().nth(i).and_then(|s| s.parse::<usize>().ok());
+                lab::transition_watch(arg(4).unwrap_or(0), arg(5).unwrap_or(0), 8.0)
+            }
+            Some("transition") => lab::transition(games.unwrap_or(300)),
             Some("launch") => lab::launch(),
             Some("exploit") => lab::exploit(games.unwrap_or(200)),
             Some("diag") => lab::diag(games.unwrap_or(12)),
