@@ -78,6 +78,8 @@ pub(crate) struct Touchline {
     pub room: Option<StopRoom>,
     /// Play is stopped for the coach and has not been resumed.
     pub stopped: bool,
+    /// The room before the tip has been shown.
+    pub tip_seen: bool,
 }
 
 impl Touchline {
@@ -1119,7 +1121,10 @@ impl App {
     fn run_live(&mut self, ui: &Ui, live: &mut LiveRound) {
         // Before the tip, and at any stop the coach has not left yet,
         // nothing moves.
-        if live.stoppage() == Some(Stoppage::Tipoff) && !self.touchline.stopped && live.game.recording().frames.is_empty() {
+        if live.stoppage() == Some(Stoppage::Tipoff)
+            && !self.touchline.tip_seen
+            && live.game.recording().frames.is_empty()
+        {
             self.open_room(live);
         }
         if self.touchline.stopped {

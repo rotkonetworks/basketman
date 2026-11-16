@@ -205,6 +205,7 @@ impl App {
             return;
         }
         self.touchline.stopped = true;
+        self.touchline.tip_seen |= stop == Stoppage::Tipoff;
         self.touchline.notice = Some(match stop {
             Stoppage::Tipoff => "Before the tip. Space to start.".to_string(),
             _ => "Play is stopped. Space to resume.".to_string(),
