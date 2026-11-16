@@ -24,6 +24,8 @@ pub use shot::make_rate;
 mod relations_tests;
 #[cfg(test)]
 mod replay_tests;
+#[cfg(test)]
+mod transition_tests;
 pub(crate) use offense::{places, template};
 
 use serde::{Deserialize, Serialize};

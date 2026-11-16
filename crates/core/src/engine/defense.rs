@@ -446,3 +446,64 @@ fn zone32(view: &View) -> Aims {
     match_up(view, &mut a);
     a
 }
+
+/// Where five defenders run when the other team has the ball and is already
+/// coming: the one who can get in front of the ball first goes to stop it,
+/// the others find the attackers nearest the basket and get goal side of them.
+/// Nobody waits to be matched up, and nobody is held at a pickup line.
+pub(super) struct Rush {
+    /// Attackers and defenders, current positions.
+    pub o: [Vec2; 5],
+    pub d: [Vec2; 5],
+    pub ball: Vec2,
+    /// The attacker with the ball (or about to catch it).
+    pub handler: usize,
+}
+
+pub(super) struct Back {
+    pub at: [Vec2; 5],
+    /// The attacker each defender has picked up.
+    pub man: [usize; 5],
+    /// The defender who stops the ball.
+    pub stopper: usize,
+}
+
+pub(super) fn get_back(r: &Rush) -> Back {
+    let to_ball = r.ball.dist(HOOP);
+    // Where the ball will have to go through, a few metres up the line.
+    let gate = HOOP.toward(r.ball, (to_ball * 0.55).clamp(0.6, 6.0));
+    let mut stopper = 0;
+    let mut best = f32::MAX;
+    for dk in 0..5 {
+        let behind = (r.d[dk].y - r.ball.y).max(0.0);
+        let cost = r.d[dk].dist(gate) + behind * 2.0;
+        if cost < best {
+            best = cost;
+            stopper = dk;
+        }
+    }
+    let mut at = [Vec2::ZERO; 5];
+    let mut man = [0usize; 5];
+    // They cannot out-run a man to where he is going, so they run to the
+    // rim and get there first: a point on the line from the basket to the
+    // man, halfway out, where they can be goal side when he arrives.
+    let gap = (to_ball * 0.55).clamp(0.6, 6.0);
+    at[stopper] = HOOP.toward(r.ball, gap);
+    man[stopper] = r.handler;
+    // The rest: closest to the basket first, each takes the most dangerous
+    // man that is left.
+    let mut atk: Vec<usize> = (0..5).filter(|&k| k != r.handler).collect();
+    atk.sort_by(|&a, &b| r.o[a].dist(HOOP).total_cmp(&r.o[b].dist(HOOP)));
+    let mut def: Vec<usize> = (0..5).filter(|&k| k != stopper).collect();
+    def.sort_by(|&a, &b| r.d[a].dist(HOOP).total_cmp(&r.d[b].dist(HOOP)));
+    for (&dk, &k) in def.iter().zip(atk.iter()) {
+        man[dk] = k;
+        let a = r.o[k];
+        at[dk] = HOOP.toward(a, (a.dist(HOOP) * 0.5).clamp(1.0, 5.0));
+    }
+    for p in &mut at {
+        p.y = p.y.clamp(0.3, LENGTH - 0.3);
+        p.x = p.x.clamp(-7.3, 7.3);
+    }
+    Back { at, man, stopper }
+}

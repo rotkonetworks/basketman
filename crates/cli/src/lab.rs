@@ -2482,6 +2482,13 @@ pub struct TransRow {
     tag_crossed: u32,
     /// Turnovers of tagged possessions that were offensive fouls.
     tag_off_foul: u32,
+    /// Tagged possessions by why: a fast break was called, a shot came off
+    /// the early offense, or it was only a live ball that was over in eight
+    /// seconds; and the points of each.
+    why: [(u32, u32); 3],
+    /// Contest summed over tagged shots, blocked shots, dunks are not known.
+    tag_contest: f64,
+    tag_blocked: u32,
 }
 
 impl TransRow {
@@ -2515,6 +2522,12 @@ impl TransRow {
         self.tag_def += o.tag_def;
         self.tag_crossed += o.tag_crossed;
         self.tag_off_foul += o.tag_off_foul;
+        self.tag_contest += o.tag_contest;
+        self.tag_blocked += o.tag_blocked;
+        for i in 0..3 {
+            self.why[i].0 += o.why[i].0;
+            self.why[i].1 += o.why[i].1;
+        }
     }
 }
 
@@ -2637,6 +2650,8 @@ pub fn transition_rows(rec: &basketman_core::replay::Recording) -> [TransRow; 9]
         let mut tag_fouled = 0;
         let mut tag_kinds = [0u32; 3];
         let mut tag_first: Option<f32> = None;
+        let mut tag_contest = 0.0f64;
+        let mut tag_blocked = 0u32;
         let mut tov = 0;
         let mut off_fouls = 0u32;
         for e in rec
@@ -2651,6 +2666,8 @@ pub fn transition_rows(rec: &basketman_core::replay::Recording) -> [TransRow; 9]
                     source,
                     made,
                     fouled,
+                    contest,
+                    blocked_by,
                     ..
                 } => {
                     let ki = match kind {
@@ -2676,6 +2693,8 @@ pub fn transition_rows(rec: &basketman_core::replay::Recording) -> [TransRow; 9]
                     }
                     if *source == Source::Transition {
                         tagged = true;
+                        tag_contest += *contest as f64;
+                        tag_blocked += blocked_by.is_some() as u32;
                         tag_kinds[ki] += 1;
                         if *made {
                             tag_made += 1;
@@ -2705,11 +2724,35 @@ pub fn transition_rows(rec: &basketman_core::replay::Recording) -> [TransRow; 9]
         }
         let _ = my_shots;
         r.tov += tov;
+        // A live ball that is over within eight seconds, shot or no shot, is a
+        // transition possession: turnovers and fouls on the break count.
+        let called = rec.events.iter().any(|e| {
+            e.offense == o
+                && e.time >= t0 - 0.001
+                && e.time <= t1 + 0.05
+                && matches!(e.kind, EventKind::FastBreak { .. })
+        });
+        let shot_tag = tag_kinds.iter().sum::<u32>() > 0;
+        let quick_end = start <= 5 && (t1 - t0) <= 8.0;
+        if quick_end {
+            tagged = true;
+        }
         if tagged {
+            let w = if called {
+                0
+            } else if shot_tag {
+                1
+            } else {
+                2
+            };
+            r.why[w].0 += 1;
+            r.why[w].1 += pts;
             r.tagged += 1;
             r.tag_pts += pts;
             r.tag_tov += tov;
             r.tag_off_foul += off_fouls;
+            r.tag_contest += tag_contest;
+            r.tag_blocked += tag_blocked;
             r.tag_shots += tag_kinds.iter().sum::<u32>();
             r.tag_made += tag_made;
             r.tag_fouled += tag_fouled;
@@ -2741,7 +2784,7 @@ fn print_trans(rows: &[TransRow; 9], games: u32) {
         print_row(STARTS[i], r, games);
     }
     print_row("ALL", &all, games);
-    println!("  chance = possession had a shot tagged Transition or a fast-break event; quick = first shot within 8 s;");
+    println!("  chance = a live-ball possession (steal, block, defensive rebound) over within 8 s whatever the outcome, or one with a fast-break event or a shot tagged Transition; quick = first shot within 8 s;");
     println!("  att> / def< = attackers ahead of the ball / defenders goal side of it when the ball crosses half court.");
     println!(
         "  transition share of possessions {:.1}%  (of {} possessions)",
@@ -2779,6 +2822,28 @@ fn print_trans(rows: &[TransRow; 9], games: u32) {
         tags.2 += r.tag_shots;
         tags.3 += r.tag_made;
     }
+    let why = rows.iter().fold([(0u32, 0u32); 3], |mut a, r| {
+        for i in 0..3 {
+            a[i].0 += r.why[i].0;
+            a[i].1 += r.why[i].1;
+        }
+        a
+    });
+    println!(
+        "  by why: fast break called {} ({:.2} PPP), early shot tagged {} ({:.2}), live ball over within 8 s without either {} ({:.2})",
+        why[0].0,
+        avg(why[0].1 as f64, why[0].0 as f64),
+        why[1].0,
+        avg(why[1].1 as f64, why[1].0 as f64),
+        why[2].0,
+        avg(why[2].1 as f64, why[2].0 as f64)
+    );
+    println!(
+        "  transition shots: mean contest {:.2}, {:.1}% blocked, {:.1}% fouled",
+        avg(all.tag_contest, all.tag_shots as f64),
+        pc(all.tag_blocked as f64, all.tag_shots as f64),
+        pc(all.tag_fouled as f64, all.tag_shots as f64)
+    );
     let half = all.n - all.tagged;
     println!(
         "transition: {} chances ({:.2}/game), {:.2} points each, {} shots, {:.1}% made;  everything else: {:.2} points per possession",
