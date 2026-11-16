@@ -2175,21 +2175,25 @@ mod tests {
     fn a_zone_trades_shots_at_the_rim_for_threes() {
         use crate::court::ShotKind;
         use crate::tactics::DefenseScheme;
-        let w = World::generate(9, 2);
+        // Over several worlds: one world's forty games hold more luck than
+        // the few points of share that a zone moves.
         let mix = |defense: DefenseScheme| {
-            let home = lineup(&w.teams[0], &w.players);
-            let mut tactics = w.teams[1].tactics().clone();
-            tactics.defense = defense;
-            let mut away = lineup(&w.teams[1], &w.players);
-            away.tactics = &tactics;
             let (mut rim, mut three, mut all) = (0.0f32, 0.0f32, 0.0f32);
-            for seed in 0..40 {
-                let (_, rec) = simulate_recorded(&home, &away, &w.rules, &mut Rng::new(seed));
-                for e in rec.events.iter().filter(|e| e.offense == 0) {
-                    if let crate::replay::EventKind::Shot { kind, .. } = &e.kind {
-                        all += 1.0;
-                        rim += (*kind == ShotKind::Rim) as u8 as f32;
-                        three += (*kind == ShotKind::Three) as u8 as f32;
+            for world in [9u64, 10, 11] {
+                let w = World::generate(world, 2);
+                let home = lineup(&w.teams[0], &w.players);
+                let mut tactics = w.teams[1].tactics().clone();
+                tactics.defense = defense;
+                let mut away = lineup(&w.teams[1], &w.players);
+                away.tactics = &tactics;
+                for seed in 0..40 {
+                    let (_, rec) = simulate_recorded(&home, &away, &w.rules, &mut Rng::new(seed));
+                    for e in rec.events.iter().filter(|e| e.offense == 0) {
+                        if let crate::replay::EventKind::Shot { kind, .. } = &e.kind {
+                            all += 1.0;
+                            rim += (*kind == ShotKind::Rim) as u8 as f32;
+                            three += (*kind == ShotKind::Three) as u8 as f32;
+                        }
                     }
                 }
             }

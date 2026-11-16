@@ -352,8 +352,15 @@ fn conceded(change: &dyn Fn(&mut Player), games: usize) -> f32 {
 }
 
 #[test]
-fn better_footwork_defends_better() {
-    let good = conceded(&|p| p.attrs[Attr::Footwork] += 5.0, 48);
-    let bad = conceded(&|p| p.attrs[Attr::Footwork] -= 5.0, 48);
-    assert!(good < bad - 0.5, "defenders with quick feet concede {good}, slow feet {bad}");
+fn better_footwork_and_agility_defend_better() {
+    // Footwork alone moves the slide and the turn by a few percent, less than
+    // the luck of a few hundred games; footwork with the speed that goes with
+    // agility is what a quick defender is.
+    let quick = |d: f32| move |p: &mut Player| {
+        p.attrs[Attr::Footwork] += d;
+        p.attrs[Attr::Speed] += d;
+    };
+    let good = conceded(&quick(5.0), 64);
+    let bad = conceded(&quick(-5.0), 64);
+    assert!(good < bad - 1.0, "defenders with quick feet concede {good}, slow feet {bad}");
 }

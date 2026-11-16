@@ -2483,7 +2483,7 @@ impl Game {
                 let watch = {
                     let g = self.st[1 - self.play.o][dk].gaze;
                     let to_a = (a - q).norm();
-                    1.0 + 0.45 * g.dot(to_a).clamp(-0.5, 0.5) * 2.0 * 0.5
+                    1.0 + 0.3 * g.dot(to_a).clamp(-0.5, 0.5)
                 };
                 // Hands around the catch (a crowded paint) are worse than a
                 // defender shading the lane.
