@@ -186,7 +186,7 @@ fn better_defenders_leave_the_shooters_with_worse_shots() {
 fn contested_shots_go_in_less_and_closer_ones_more() {
     // [kind]: (contest, made) of every shot.
     let mut t: [Vec<(f32, bool)>; 3] = [vec![], vec![], vec![]];
-    for seed in [41u64, 42, 43] {
+    for seed in [41u64, 42, 43, 44, 45, 46, 47, 48] {
         let w = World::generate(seed, 12);
         for g in 0..40 {
             let a = g % 12;

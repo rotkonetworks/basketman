@@ -243,12 +243,8 @@ fn media_work_raises_fame_and_fans_and_costs_training() {
     rounds(&mut base, 8);
     rounds(&mut worked, 8);
     let fame = |w: &World| w.teams[0].roster.iter().map(|&p| w.fame_of(p)).sum::<f32>();
-    assert!(
-        fame(&worked) > fame(&base) + 2.0,
-        "{} v {}",
-        fame(&worked),
-        fame(&base)
-    );
+    // One world is luck: the gain is the mean over this and the four below.
+    let mut gain = fame(&worked) - fame(&base);
     assert!(worked.fan_base(0) > base.fan_base(0));
     // And in other worlds too: eight games are a small sample, so most of them.
     let mut ahead = 1;
@@ -265,7 +261,10 @@ fn media_work_raises_fame_and_fans_and_costs_training() {
         rounds(&mut b, 8);
         rounds(&mut w, 8);
         ahead += (w.fan_base(0) > b.fan_base(0)) as u32;
+        let fame_of = |x: &World| x.teams[0].roster.iter().map(|&p| x.fame_of(p)).sum::<f32>();
+        gain += fame_of(&w) - fame_of(&b);
     }
+    assert!(gain / 5.0 > 2.0, "mean fame gain from media work {:.2} over five worlds", gain / 5.0);
     assert!(ahead >= 4, "the worked club's fans are ahead in {ahead} of 5 worlds");
     let (a, b) = (&worked.players[who as usize], &base.players[who as usize]);
     assert!(

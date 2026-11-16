@@ -309,3 +309,52 @@ fn the_break_is_deterministic() {
     };
     assert_eq!(run(), run());
 }
+
+#[test]
+fn nobody_passes_to_himself_and_a_throw_in_after_a_basket_starts_out_of_bounds() {
+    let (mut passes, mut inbounds, mut baskets, mut checked) = (0, 0, 0, 0);
+    for rec in stock() {
+        for p in &rec.passes {
+            passes += 1;
+            inbounds += p.inbound as u32;
+            assert_ne!(p.from, p.to, "a pass from slot {} to himself at {:.1} s", p.from, p.time);
+        }
+        for e in &rec.events {
+            // A basket with a foul on it goes to the line, and one at the
+            // buzzer ends the period.
+            let EventKind::Shot {
+                made: true,
+                fouled: false,
+                ..
+            } = e.kind
+            else {
+                continue;
+            };
+            if e.clock < 1.0 {
+                continue;
+            }
+            baskets += 1;
+            // The next pass after the net moves, by the other side.
+            let Some(p) = rec.passes.iter().find(|p| p.time > e.time + 0.05) else {
+                continue;
+            };
+            // Not if the period ended first: that restart is at the sideline.
+            let ended = rec
+                .events
+                .iter()
+                .any(|x| x.time > e.time && x.time <= p.time && matches!(x.kind, EventKind::PeriodEnd));
+            if ended {
+                continue;
+            }
+            checked += 1;
+            let out = p.at.x < -0.05 || p.at.x > 28.05 || p.at.y < -0.05 || p.at.y > 15.05;
+            assert!(
+                out && p.inbound && p.side != e.offense,
+                "after the basket at {:.1} s the next pass (side {}, inbound {}) began at ({:.1}, {:.1})",
+                e.time, p.side, p.inbound, p.at.x, p.at.y
+            );
+        }
+    }
+    println!("{passes} passes, {inbounds} throw-ins, {baskets} baskets, {checked} followed by a throw-in");
+    assert!(passes > 10_000 && checked * 10 > baskets * 9);
+}

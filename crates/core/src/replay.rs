@@ -703,6 +703,18 @@ pub struct Frame {
     pub swish: bool,
 }
 
+/// One pass: when, which side, who threw it and who it was meant for (court
+/// slots), where it left the thrower's hands, and whether it was a throw-in.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PassRec {
+    pub time: f32,
+    pub side: u8,
+    pub from: u8,
+    pub to: u8,
+    pub at: Vec2,
+    pub inbound: bool,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Recording {
     /// Fatigue of the five on the floor, summed over ticks, and the ticks.
@@ -758,6 +770,10 @@ pub struct Recording {
     pub ball_arcs: Vec<BallArc>,
     #[serde(default)]
     pub leaned_ticks: [Vec<u32>; 2],
+    /// Every pass thrown, in court coordinates. A diagnostic and a check:
+    /// nobody passes to himself, and a throw-in starts out of bounds.
+    #[serde(default)]
+    pub passes: Vec<PassRec>,
 }
 
 /// One stretch of the ball's flight, in full-court coordinates.

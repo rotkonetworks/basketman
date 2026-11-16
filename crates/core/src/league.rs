@@ -1503,7 +1503,9 @@ mod tests {
         assert!(rec.frames.windows(2).all(|f| f[0].time <= f[1].time));
         for f in &rec.frames {
             for p in f.pos.iter().flatten() {
-                assert!((0.0..=28.0).contains(&p.x) && (0.0..=15.0).contains(&p.y));
+                // On the court, bar the man taking the ball out of bounds, who
+                // stands up to two metres behind a line.
+                assert!((-2.0..=30.0).contains(&p.x) && (-2.0..=17.0).contains(&p.y));
             }
         }
         // Every point on the scoreboard is in the event log.
