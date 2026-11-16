@@ -121,6 +121,16 @@ fn main() {
             Some("transition") => lab::transition(games.unwrap_or(300)),
             Some("league") => lab::league(games.unwrap_or(300)),
             Some("shape") => lab::shape(games.unwrap_or(40)),
+            Some("league-shape") => {
+                // Everything the "League shape" section of docs/realism.md measures
+                // beyond `basketman realism` itself.
+                let n = games.unwrap_or(20);
+                lab::level(n);
+                lab::shape(n);
+                lab::minutes(n);
+                lab::foulkinds(n / 2);
+                lab::payroll(n / 4);
+            }
             Some("level") => lab::level(games.unwrap_or(40)),
             Some("foulkinds") => lab::foulkinds(games.unwrap_or(10)),
             Some("payroll") => lab::payroll(games.unwrap_or(12)),
