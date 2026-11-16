@@ -215,14 +215,22 @@ impl Feeds {
 /// The live input a note asks for, as the touchline's command.
 pub(crate) fn command_of(live: &LiveRound, s: &SuggestedInput) -> Command {
     match s {
-        SuggestedInput::Timeout => Command::Timeout,
-        SuggestedInput::Swap { off, on } => Command::Swap(*off, *on),
-        SuggestedInput::Shout { shout, target } => Command::Shout(*shout, *target),
         SuggestedInput::Defense(d) => Command::Orders(Orders {
             defense: *d,
             ..live.game.orders(live.side)
         }),
+        other => command_of_kind(other).expect("only a defense needs the game's orders"),
     }
+}
+
+/// The commands that need nothing from the game.
+fn command_of_kind(s: &SuggestedInput) -> Option<Command> {
+    Some(match s {
+        SuggestedInput::Timeout => Command::Timeout,
+        SuggestedInput::Swap { off, on } => Command::Swap(*off, *on),
+        SuggestedInput::Shout { shout, target } => Command::Shout(*shout, *target),
+        SuggestedInput::Defense(_) => return None,
+    })
 }
 
 // ---- small drawing helpers
@@ -1086,4 +1094,32 @@ fn flow_chart(ui: &mut Ui, c: &Ctx, flow: &Flow) {
     p.line_segment([pos2(plot.left() + 74.0, ly - 8.0), pos2(plot.left() + 74.0, ly - 2.0)], Stroke::new(1.5, theme::TEXT_DIM));
     p.text(pos2(plot.left() + 80.0, ly - 4.0), Align2::LEFT_CENTER, "substitution", mono(9.5), theme::TEXT_MUTE);
     p.text(pos2(plot.right(), ly - 4.0), Align2::RIGHT_CENTER, "up: we lead", mono(9.5), theme::TEXT_MUTE);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_half_court_puts_the_basket_low_and_centred_and_keeps_to_its_rect() {
+        let rect = Rect::from_min_size(pos2(10.0, 20.0), vec2(300.0, 300.0));
+        let h = Half::new(rect);
+        let hoop = h.at(0.0, basketman_core::court::HOOP.y);
+        assert!((hoop.x - rect.center().x).abs() < 0.01);
+        assert!(hoop.y > rect.center().y, "the basket is at the bottom");
+        for (x, y) in [(-7.5, 0.0), (7.5, 0.0), (-7.5, HALF_LEN), (7.5, HALF_LEN)] {
+            assert!(rect.expand(0.01).contains(h.at(x, y)));
+        }
+        // Left of the basket for the shooter is left on the page.
+        assert!(h.at(-3.0, 5.0).x < h.at(3.0, 5.0).x);
+    }
+
+    #[test]
+    fn a_note_asks_for_the_same_live_input_the_agents_get() {
+        use basketman_core::observations::SuggestedInput;
+        assert!(matches!(
+            super::command_of_kind(&SuggestedInput::Timeout),
+            Some(Command::Timeout)
+        ));
+    }
 }

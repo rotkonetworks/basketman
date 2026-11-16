@@ -291,6 +291,8 @@ pub struct Form {
     pub heat: Option<Heat>,
     pub points: u16,
     pub fouls: u16,
+    /// Field goal attempts in all.
+    pub attempts: u16,
     /// 1 = fresh. Only for a live game.
     pub energy: Option<f32>,
 }
@@ -309,6 +311,7 @@ impl Read<'_> {
                     heat: None,
                     points: 0,
                     fouls: 0,
+                    attempts: 0,
                     energy: live.map(|p| p.energy),
                 });
             }
@@ -328,6 +331,7 @@ impl Read<'_> {
                         continue;
                     }
                     out[i].last.push(*made);
+                    out[i].attempts += 1;
                     if *made {
                         out[i].points += kind.points();
                     }

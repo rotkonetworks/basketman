@@ -6,6 +6,7 @@
 
 mod agent;
 mod export;
+mod feeds;
 mod lab;
 mod mcp;
 mod play;

@@ -77,7 +77,7 @@ def main():
         tools = m.rpc("tools/list")["result"]["tools"]
         names = {t["name"] for t in tools}
         for want in ["new_game", "load_game", "save_game", "view", "legal_actions", "apply_command", "advance",
-                     "play_round", "set_instructions", "live_kickoff", "live_step", "live_input", "live_finish"]:
+                     "play_round", "set_instructions", "live_kickoff", "live_step", "live_feeds", "live_input", "live_finish"]:
             check(want in names, f"tool {want} listed")
         for t in tools:
             check(len(t["description"]) > 40, f"{t['name']} description")
@@ -162,6 +162,8 @@ def main():
         st = m.ok("live_kickoff")
         st = m.ok("live_step", seconds=60)
         check(st["time"] > 0, "live step")
+        feeds = m.ok("live_feeds", part="scores")
+        check(feeds["games"] and "table" in feeds, "live_feeds scores")
         m.ok("live_input", input="Timeout")
         res = m.ok("live_finish")
         check(res["games"], "live finished")

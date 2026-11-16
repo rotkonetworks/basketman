@@ -100,7 +100,7 @@ const GAP: f32 = 60.0;
 const URGENT_GAP: f32 = 20.0;
 const REPEAT: f32 = 240.0;
 /// Streaks of one shooter are only worth saying once in a long while.
-const REPEAT_SHOOTER: f32 = 720.0;
+const REPEAT_SHOOTER: f32 = 480.0;
 const FIRST: f32 = 120.0;
 const MAX_NOTES: usize = 12;
 
@@ -134,12 +134,17 @@ impl Observer {
                 .filter(|s| s.0 == f.topic && s.1 == f.subject)
                 .max_by(|a, b| a.2.total_cmp(&b.2));
             if let Some(&(_, _, at, level)) = prior {
-                // Again only when long enough has passed, or it got worse
-                // and a little time has.
-                let worse = f.level > level && now - at >= GAP * 2.0;
-                let shooter = matches!(f.topic, Topic::Hot | Topic::Cold);
-                let wait = if shooter { REPEAT_SHOOTER } else { REPEAT };
-                if now - at < wait && (!worse || shooter) {
+                // What stays true is said again only when it has got
+                // clearly worse; what happens, when long enough has passed.
+                let (more, wait) = match f.topic {
+                    Topic::Tired => (3, GAP * 2.0),
+                    Topic::FoulTrouble => (1, GAP * 2.0),
+                    Topic::OpenCorner | Topic::GivingUpThrees => (2, REPEAT),
+                    Topic::Hot | Topic::Cold => (6, REPEAT_SHOOTER),
+                    Topic::Run | Topic::Streak | Topic::Turnovers => (0, REPEAT),
+                };
+                let fresh = if more == 0 { true } else { f.level >= level + more };
+                if now - at < wait || !fresh {
                     continue;
                 }
             }
@@ -193,8 +198,8 @@ fn candidates(read: &Read, set: &Setting, period: u8) -> Vec<Found> {
             out.push(Found {
                 topic: Topic::Tired,
                 subject: Some(p.id),
-                level: ((1.0 - p.energy) * 10.0) as i32,
-                urgent: true,
+                level: ((0.3 - p.energy) * 20.0) as i32 + 1,
+                urgent: p.energy < 0.2,
                 text: format!("{} is exhausted.", name(p.id)),
                 suggestion: swap(p.id),
             });
@@ -225,11 +230,13 @@ fn candidates(read: &Read, set: &Setting, period: u8) -> Vec<Found> {
             subject: None,
             level: run.points as i32 / 2,
             urgent: !ours && run.points >= 10,
-            text: if ours {
-                format!("We are on a {}-{} run.", run.points, run.against)
-            } else {
-                format!("They are on a {}-{} run.", run.points, run.against)
-            },
+            text: format!(
+                "{} on {} {}-{} run.",
+                if ours { "We are" } else { "They are" },
+                if matches!(run.points, 8 | 11 | 18) { "an" } else { "a" },
+                run.points,
+                run.against
+            ),
             suggestion: if ours { None } else { timeout() },
         });
     }
@@ -334,7 +341,7 @@ fn candidates(read: &Read, set: &Setting, period: u8) -> Vec<Found> {
             Some(Heat::Cold) if f.side as usize == me && on => out.push(Found {
                 topic: Topic::Cold,
                 subject: Some(f.id),
-                level: n as i32,
+                level: f.attempts as i32,
                 urgent: false,
                 text: format!("{} has missed {} of his last {n}.", name(f.id), n - made),
                 suggestion: Some(Suggestion {
@@ -348,7 +355,7 @@ fn candidates(read: &Read, set: &Setting, period: u8) -> Vec<Found> {
             Some(Heat::Hot) if f.side as usize == them && on => out.push(Found {
                 topic: Topic::Hot,
                 subject: Some(f.id),
-                level: made as i32,
+                level: f.attempts as i32,
                 urgent: false,
                 text: format!("{} has hit {made} of his last {n}.", name(f.id)),
                 suggestion: Some(Suggestion {

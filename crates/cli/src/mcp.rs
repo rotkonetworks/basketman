@@ -164,6 +164,12 @@ fn tools() -> Vec<Tool> {
             schema: || obj(json!({"seconds": {"type": "number", "minimum": 0}}), &[]),
         },
         Tool {
+            name: "live_feeds",
+            op: "live_feeds",
+            description: "The data feeds of a live game, the same as the match screen's Scores, Shots and Flow tabs. part=scores: the day's other games (all divisions) with score, period, clock and when they last scored, and the league table of your division (or `division`) as it stands if every game on now ended at its score, with `was` (place before today) and the promotion/playoff/relegation lines. part=shots: every attempt so far with where it was taken (x, y in metres from the basket's frame), made or missed, zone, distance, contest, assist, plus made/attempted by zone against the league average; filter with side (yours|theirs|both), player (id) and period (1-based). part=flow: the score margin over time, runs of eight points or more, timeouts and substitutions, both sides' four factors, who is hot and cold (last five shots, fouls, your players' energy) and each of your players' matchup. part=notes: what the assistant coach has pointed out so far, each with a ready `input` to send to live_input where there is something to do. Without part: scores, flow and notes. Available once the game has started (live_step).",
+            schema: || obj(json!({"part": {"type": "string", "enum": ["scores", "shots", "flow", "notes"]}, "division": {"type": "integer", "minimum": 0}, "side": {"type": "string", "enum": ["yours", "theirs", "both"]}, "player": {"type": "integer", "minimum": 0}, "period": {"type": "integer", "minimum": 1}}), &[]),
+        },
+        Tool {
             name: "live_input",
             op: "live_input",
             description: "Do something as the coach. `input` is one of: \"Timeout\" (asks for one at the next dead ball; again to wave it off), {\"AutoSubs\": false}, {\"Swap\": {\"off\": id on court, \"on\": id on bench}} (turns the assistant's substitutions off until you give them back with {\"AutoSubs\": true}), {\"CancelSwap\": index}, {\"Shout\": {\"shout\": \"Encourage|DemandMore|CalmDown|Focus|Praise\", \"target\": id or null}}, {\"Orders\": {\"orders\": {offense, defense, press, pace, three_bias, crash_boards, aggression}}} (how well the squad knows the new system is worked out by the game from your playbook).",
