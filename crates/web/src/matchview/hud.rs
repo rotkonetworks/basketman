@@ -311,6 +311,7 @@ impl App {
                 .collect();
             ui.label(theme::mono(periods.join("   ")).color(theme::TEXT_DIM));
         });
+        self.officials_box(ui, bd, g.result, &g.teams, g.live);
         for side in 0..2 {
             ui.add_space(6.0);
             bd.card(ui, |ui| {
@@ -879,6 +880,17 @@ impl App {
             if resp.clicked() {
                 self.sh.hud.drawer = Some(Drawer::Feed);
             }
+        }
+
+        // ---- the officials: the challenge prompt, whistle, review
+        {
+            let at = if narrow_top {
+                pos2((screen.left() + free_right) / 2.0, top + 52.0 + 52.0)
+            } else {
+                pos2((screen.left() + SAFE + CLUSTER_W + 10.0 + free_right) / 2.0, top + 52.0)
+            };
+            let at = if notice { at + vec2(0.0, 38.0) } else { at };
+            self.officials_layer(ui, rec, live, commands.as_deref_mut(), court_time, level, screen, at, solid);
         }
 
         // ---- a slim handle on the right edge, where the panel is not

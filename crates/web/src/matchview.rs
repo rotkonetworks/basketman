@@ -21,6 +21,7 @@ use crate::view3d::{self, Cam3, FigureSpec, Preset, Scene, Vec3, v3};
 
 mod feeds;
 mod hud;
+mod officials;
 pub(crate) use feeds::Ctx as FeedCtx;
 pub(crate) use hud::{Hud, HudPrefs};
 
@@ -58,6 +59,10 @@ pub(crate) enum Command {
     Orders(Orders),
     SkipPeriod,
     SkipAll,
+    /// Ask for the film on the call the prompt shows.
+    Challenge,
+    /// Let the call stand and carry on.
+    PlayOn,
 }
 
 #[derive(Default)]
@@ -70,6 +75,8 @@ pub(crate) struct Touchline {
     said: Option<(Shout, Vec<(PlayerId, Reaction)>)>,
     /// Why the game is stopped.
     notice: Option<String>,
+    /// The game waits on the challenge prompt.
+    pub review_open: bool,
 }
 
 impl Touchline {
@@ -543,7 +550,7 @@ pub(crate) fn paint_floor(
         return paint_3d(ui, rec, time, &mut look.cam, players, result, picked);
     }
     let angled = look.mode == ViewMode::Angled;
-    let (frame, pos, ball, ball_height, _) = blend(rec, time);
+    let (frame, pos, ball, ball_height, next) = blend(rec, time);
     let colors = [theme::ACCENT, theme::TEXT];
     let player = |side: usize, slot: u8| &players[result.boxes[side][slot as usize].0 as usize];
     let w = ui.available_width();
@@ -687,6 +694,7 @@ pub(crate) fn paint_floor(
             label = Some((target.center_top() - vec2(0.0, 4.0), text));
         }
     }
+    officials::paint_flat(&painter, &pitch, frame, next);
     if angled {
         paint_baskets(&painter, &pitch);
     }
@@ -924,6 +932,7 @@ fn paint_3d(
             ball_at = at;
         }
     }
+    officials::emit_3d(&mut scene, frame, next, ball);
     view3d::ball(&mut scene, (ball_at.x, ball_at.y), ball_at.z);
     drop(_figs);
     painter.rect_filled(rect, 4.0, hall.backdrop);
@@ -1105,6 +1114,10 @@ impl App {
                     );
                 });
             });
+            if let Some(ids) = self.next_fixture().and_then(|i| self.world.crew_of_fixture(i)) {
+                let r = Rect::from_min_size(stage.min + vec2(0.0, 160.0), vec2(w, 180.0));
+                crate::shell::panel(ui, r, "match_crew", |ui| self.crew_card(ui, bd, ids));
+            }
         }
         self.world.replay = replay;
     }
@@ -1113,6 +1126,12 @@ impl App {
     /// the coach gets a say.
     fn run_live(&mut self, ui: &Ui, live: &mut LiveRound) {
         let pb = &mut self.playback;
+        // A call against the user waits for his answer.
+        if self.touchline.review_open {
+            pb.playing = false;
+            pb.time = live.game.time();
+            return;
+        }
         if pb.playing {
             let dt = ui.input(|i| i.stable_dt).min(0.1);
             pb.time += dt * pb.speed;
@@ -1125,6 +1144,12 @@ impl App {
             let notice = match live.step() {
                 Some(Pause::Timeout(side)) if side == live.side => {
                     "Timeout. Make your changes, then resume.".to_string()
+                }
+                Some(Pause::Review(side)) if side == live.side => {
+                    self.touchline.review_open = true;
+                    pb.playing = false;
+                    pb.time = live.game.time();
+                    break;
                 }
                 Some(Pause::PeriodEnd) => {
                     let n = live.game.result().periods.len();
@@ -1178,7 +1203,17 @@ impl App {
                     familiarity,
                 });
             }
+            Command::Challenge => {
+                live.input(LiveInput::Challenge);
+                self.touchline.review_open = false;
+                self.playback.playing = true;
+            }
+            Command::PlayOn => {
+                self.touchline.review_open = false;
+                self.playback.playing = true;
+            }
             Command::SkipPeriod => {
+                self.touchline.review_open = false;
                 while !live.game.is_over() {
                     if matches!(live.step(), Some(Pause::PeriodEnd | Pause::Final)) {
                         break;
@@ -1190,6 +1225,7 @@ impl App {
                     .then(|| "Skipped to the break. Make your changes, then resume.".to_string());
             }
             Command::SkipAll => {
+                self.touchline.review_open = false;
                 live.input(LiveInput::AutoSubs(true));
                 while !live.game.is_over() {
                     live.step();
