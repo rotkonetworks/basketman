@@ -243,6 +243,12 @@ pub struct World {
     /// How many divisions there are and how many go up and down.
     #[serde(default)]
     pub tiers: crate::divisions::Tiers,
+    /// Each club's past and its people; see `club.rs`.
+    #[serde(default)]
+    pub club: crate::club::ClubBook,
+    /// The manager's reputation, jobs and offers; see `career.rs`.
+    #[serde(default)]
+    pub career: crate::career::Career,
 }
 
 const CITIES: [&str; 20] = [
@@ -402,11 +408,14 @@ impl World {
             reserve_rounds_done: 0,
             draft_day: 0,
             round_seeds: Vec::new(),
+            club: Default::default(),
+            career: Default::default(),
         };
         world.fixtures = schedule_tiers(&world.teams);
         world.date_fixtures();
         world.econ = crate::finance::Economy::generate(seed, &world);
         world.ensure_fame();
+        world.ensure_clubs();
         world.sign_first_deals();
         world
     }
@@ -777,6 +786,8 @@ impl World {
         self.after_round(&all, &before);
         self.econ_after_round();
         self.fame_week(&all);
+        self.club_after_round(&all);
+        self.career_fill_vacancies();
         if self.season_over() && self.draft_day == 0 {
             self.draft_day = self.default_draft_day();
         }

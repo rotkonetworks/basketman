@@ -157,6 +157,19 @@ pub enum Command {
     /// instructions (the assistant's own game if there are none). The game
     /// is logged as what it was, `PlayLive` or `PlayRound`.
     PlayWithInstructions,
+    /// Take the job offered at `World::career.offers[offer]`. `bring` are
+    /// the jobs whose holders on your staff you ask to come; those who are
+    /// willing do. `keep` are the jobs at the new club whose holders stay;
+    /// the others are paid off.
+    AcceptJob {
+        offer: usize,
+        bring: Vec<Job>,
+        keep: Vec<Job>,
+    },
+    /// Turn down the job offered at `World::career.offers[offer]`.
+    DeclineJob(usize),
+    /// Leave the club you manage. You are out of work until somebody calls.
+    Resign,
 }
 
 /// Why a command was not carried out.
@@ -284,6 +297,9 @@ impl World {
                 if self.watch.is_some() {
                     return Err(refused("A club is already in your charge."));
                 }
+                if !self.career.spells.is_empty() {
+                    return Err(refused("You can only take a job you are offered."));
+                }
                 if *team >= self.teams.len() {
                     return Err(CommandError::NoSuchTeam(*team));
                 }
@@ -300,6 +316,22 @@ impl World {
             Command::PlayToday => out.played = self.play_with_instructions_scoped(Scope::Day)?,
             Command::PlayLiveToday { inputs } => {
                 out.played = self.replay_live(inputs, Scope::Day)?
+            }
+            Command::AcceptJob { offer, bring, keep } => {
+                if *offer >= self.career.offers.len() {
+                    return Err(CommandError::OutOfRange("job offer"));
+                }
+                out.note = Some(self.accept_job(*offer, bring, keep).map_err(refused)?);
+            }
+            Command::DeclineJob(offer) => {
+                if *offer >= self.career.offers.len() {
+                    return Err(CommandError::OutOfRange("job offer"));
+                }
+                out.note = Some(self.decline_job(*offer).map_err(refused)?);
+            }
+            Command::Resign => {
+                self.club()?;
+                out.note = Some(self.resign().map_err(refused)?);
             }
             Command::PlayRound => {
                 if self.season_over() {

@@ -451,6 +451,7 @@ impl World {
             return;
         };
         self.desk.pledge = None;
+        self.board_pledge(pledge.bold, won);
         let (belief, mood) = match (pledge.bold, won) {
             (true, true) => (0.05, 0.04),
             (true, false) => (-0.045, -0.02),

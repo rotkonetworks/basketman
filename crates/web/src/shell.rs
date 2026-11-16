@@ -80,7 +80,7 @@ impl Group {
         match self {
             Group::Home => Tab::Inbox,
             Group::Team => Tab::Squad,
-            Group::Club => Tab::Staff,
+            Group::Club => Tab::About,
             Group::Market => Tab::Scouting,
             Group::League => Tab::League,
             Group::Match => Tab::Match,
@@ -90,9 +90,9 @@ impl Group {
     /// The pages of a group. The draft is one only while it is held.
     pub(crate) fn pages(self, draft: bool) -> Vec<Tab> {
         match self {
-            Group::Home => vec![Tab::Inbox, Tab::Calendar],
+            Group::Home => vec![Tab::Inbox, Tab::Calendar, Tab::Career],
             Group::Team => vec![Tab::Squad, Tab::Tactics, Tab::Training, Tab::Reserves],
-            Group::Club => vec![Tab::Staff, Tab::Finances, Tab::Arena],
+            Group::Club => vec![Tab::About, Tab::Staff, Tab::Finances, Tab::Arena],
             Group::Market if draft => vec![Tab::Scouting, Tab::Trade, Tab::Draft],
             Group::Market => vec![Tab::Scouting, Tab::Trade],
             Group::League => vec![Tab::League, Tab::Stats],
@@ -103,14 +103,14 @@ impl Group {
     /// The group a page belongs to, links and detail pages included.
     pub(crate) fn of(tab: Tab) -> Group {
         match tab {
-            Tab::Inbox | Tab::Calendar => Group::Home,
+            Tab::Inbox | Tab::Calendar | Tab::Career | Tab::Offer | Tab::Welcome => Group::Home,
             Tab::Squad
             | Tab::Tactics
             | Tab::Training
             | Tab::Reserves
             | Tab::Player
             | Tab::Compare => Group::Team,
-            Tab::Staff | Tab::Finances | Tab::Arena => Group::Club,
+            Tab::About | Tab::Staff | Tab::Finances | Tab::Arena => Group::Club,
             Tab::Scouting | Tab::Trade | Tab::Draft => Group::Market,
             Tab::League | Tab::Stats | Tab::Club | Tab::Game => Group::League,
             Tab::Match | Tab::Film => Group::Match,
@@ -122,6 +122,8 @@ impl Group {
 pub(crate) fn page_label(tab: Tab) -> &'static str {
     match tab {
         Tab::Arena => "Arena",
+        Tab::About => "Club",
+        Tab::Career => "Career",
         Tab::League => "Table",
         Tab::Film => "Film room",
         t => t.label(),
@@ -1060,8 +1062,8 @@ mod tests {
             }
         }
         // Twelve destinations, Film and Arena added, Draft too, and the
-        // calendar under Home.
-        assert_eq!(seen, 16);
+        // calendar, the club's story and the manager's career under Home.
+        assert_eq!(seen, 18);
         for t in Tab::ALL {
             assert!(
                 Group::ALL.iter().any(|g| g.pages(true).contains(&t)),

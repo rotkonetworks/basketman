@@ -518,6 +518,8 @@ pub struct MessageView {
     pub sponsor: Option<SponsorOfferView>,
     /// A sponsor's request for one of your players' time.
     pub appearance: Option<crate::view_more::AppearanceView>,
+    /// A club's offer of its job: the index for `AcceptJob`/`DeclineJob`.
+    pub job: Option<usize>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1202,7 +1204,8 @@ impl World {
     }
 
     pub fn view_inbox(&self, club: TeamId) -> Option<InboxView> {
-        if self.watch != Some(club) {
+        // An out-of-work manager still has his mail.
+        if self.watch != Some(club) && !self.jobless() {
             return None;
         }
         let messages = self
@@ -1243,6 +1246,7 @@ impl World {
                     .filter(|&i| i < self.econ.offers.len())
                     .map(|i| self.sponsor_offer_view(i)),
                 appearance: m.appearance.and_then(|i| self.view_appearance(i)),
+                job: m.job,
             })
             .collect();
         Some(InboxView {

@@ -15,6 +15,7 @@ use basketman_core::inbox::{Deal, Stop};
 use basketman_core::instructions::{Coach, Instructions};
 use basketman_core::league::{LiveInput, LiveRound, TeamId, World};
 use basketman_core::player::PlayerId;
+use basketman_core::staff::Job;
 use basketman_core::save;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -251,6 +252,11 @@ impl Session {
             "view" => self.view(a),
             "legal" => {
                 let w = self.world()?;
+                if w.watch.is_none() {
+                    return Ok(to_json(
+                        &w.legal_jobless().ok_or_else(|| bad("nobody is in charge of a club"))?,
+                    ));
+                }
                 let me = self.club()?;
                 Ok(to_json(&w.legal(me).ok_or_else(|| bad("no club"))?))
             }
@@ -337,6 +343,10 @@ impl Session {
         self.world = Some(w);
         if self.world()?.watch.is_some() {
             self.view(&json!({"what": "summary"}))
+        } else if self.world()?.jobless() {
+            let career = to_json(&self.world()?.view_career());
+            Ok(json!({"loaded": true, "jobless": true, "career": career,
+                      "note": "you are out of work: advance, play_round, and answer the offers that come"}))
         } else {
             Ok(json!({"loaded": true, "note": "no club is managed in this save"}))
         }
@@ -353,9 +363,49 @@ impl Session {
 
     fn view(&self, a: &Value) -> Res {
         let w = self.world()?;
-        let me = self.club()?;
         let what = get_str(a, "what")?.unwrap_or("summary");
         let none = || AgentError::new("view_unavailable", "no such thing to show");
+        // These work without a club too: an out-of-work manager reads his
+        // career and the offers.
+        match what {
+            "career" => return Ok(to_json(&w.view_career())),
+            "inbox" if w.jobless() => {
+                return Ok(to_json(&w.view_inbox(0).ok_or_else(none)?));
+            }
+            "job_offer" => {
+                let offer = need_u64(a, "offer")? as usize;
+                let jobs = |key: &str| -> Result<Vec<Job>, AgentError> {
+                    match a.get(key) {
+                        None | Some(Value::Null) => Ok(Vec::new()),
+                        Some(v) => serde_json::from_value(v.clone())
+                            .map_err(|e| bad(format!("{key} must be a list of jobs: {e}"))),
+                    }
+                };
+                let bring = jobs("bring")?;
+                // Without `keep`, everybody at the new club stays.
+                let keep = if a.get("keep").is_some_and(|k| !k.is_null()) {
+                    jobs("keep")?
+                } else {
+                    Job::HIRED.to_vec()
+                };
+                return w
+                    .view_job_offer(offer, &bring, &keep)
+                    .map(|v| to_json(&v))
+                    .map_err(|e| AgentError::new("refused", e));
+            }
+            "club_profile" => {
+                let t = match get_u64(a, "club")? {
+                    Some(t) => t as usize,
+                    None => w.watch.ok_or_else(|| bad("club is required when you have no job"))?,
+                };
+                if t >= w.teams.len() {
+                    return Err(AgentError::new("out_of_range", format!("there is no club {t}")));
+                }
+                return Ok(to_json(&w.club_summary(t)));
+            }
+            _ => {}
+        }
+        let me = self.club()?;
         Ok(match what {
             "summary" => to_json(&w.view_summary(me).ok_or_else(none)?),
             "full" => to_json(&w.view(me).ok_or_else(none)?),
@@ -459,7 +509,7 @@ impl Session {
             "appearances" => to_json(&w.view_appearances(me).ok_or_else(none)?),
             other => {
                 return Err(bad(format!(
-                    "unknown view {other}; try summary, full, own, squad, player, club, inbox, table, fixtures, box_score, market, draft, calendar, leaders, league, finance, fans, names, appearances"
+                    "unknown view {other}; try summary, full, own, squad, player, club, club_profile, career, job_offer, inbox, table, fixtures, box_score, market, draft, calendar, leaders, league, finance, fans, names, appearances"
                 )));
             }
         })
@@ -501,6 +551,10 @@ impl Session {
             v["round"] = json!(w.round);
             v["season"] = json!(w.season + 1);
             let _ = me;
+        } else if w.jobless() {
+            v["waiting"] = to_json(&basketman_core::legal::waiting(w));
+            v["jobless"] = json!(true);
+            v["season"] = json!(w.season + 1);
         }
         Ok(v)
     }

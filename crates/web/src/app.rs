@@ -49,6 +49,14 @@ pub(crate) enum Tab {
     Film,
     /// The club's own hall: the club page with the arena card.
     Arena,
+    /// The arrival at a club: five short pages. Not in the menu.
+    Welcome,
+    /// The club's story, its people and the board's confidence in you.
+    About,
+    /// The manager's reputation, jobs and offers.
+    Career,
+    /// A job offer and the deal for it. Reached from the inbox and Career.
+    Offer,
 }
 
 impl Tab {
@@ -91,6 +99,10 @@ impl Tab {
             Tab::Game => "Game",
             Tab::Film => "Film",
             Tab::Arena => "Arena",
+            Tab::Welcome => "Welcome",
+            Tab::About => "About",
+            Tab::Career => "Career",
+            Tab::Offer => "Offer",
         }
     }
 }
@@ -107,6 +119,8 @@ pub struct App {
     pub(crate) pick: usize,
     /// The club the user manages.
     pub(crate) team: TeamId,
+    /// The arrival pages, the career pages: see `club_ui.rs`.
+    pub(crate) cu: crate::club_ui::ClubUi,
     pub(crate) tab: Tab,
     /// Player whose profile is open, and the screen to go back to.
     pub(crate) profile: Option<PlayerId>,
@@ -211,6 +225,7 @@ impl App {
             candidates: (0, Vec::new()),
             pick: 0,
             team: 0,
+            cu: Default::default(),
             tab: Tab::Inbox,
             compare: Vec::new(),
             profile: None,
@@ -312,9 +327,28 @@ impl App {
                 app.begin(club);
                 app.tab = Tab::ALL
                     .into_iter()
-                    .chain([Tab::Player, Tab::Club, Tab::Compare, Tab::Film, Tab::Arena])
+                    .chain([
+                        Tab::Player,
+                        Tab::Club,
+                        Tab::Compare,
+                        Tab::Film,
+                        Tab::Arena,
+                        Tab::Welcome,
+                        Tab::About,
+                        Tab::Career,
+                        Tab::Offer,
+                    ])
                     .find(|t| Some(t.label().to_lowercase().as_str()) == tab)
                     .unwrap_or(Tab::Inbox);
+                // `SHOT_OFFER=n` has club n lose its manager and call.
+                if let Some(n) = std::env::var("SHOT_OFFER").ok().and_then(|n| n.parse::<usize>().ok()) {
+                    app.cu.offer = app.world.stage_offer(n);
+                    app.cu.keep_set = false;
+                }
+                // `SHOT_STEP=n` opens page n (from 0) of the arrival.
+                if let Some(n) = std::env::var("SHOT_STEP").ok().and_then(|n| n.parse().ok()) {
+                    app.cu.step = n;
+                }
                 // `--screenshot file club` shows the club page; `SHOT_PAGE=n`
                 // shows club n's instead of ours.
                 if app.tab == Tab::Club {
@@ -799,7 +833,8 @@ impl App {
         self.history.clear();
         self.deal = Default::default();
         self.deal_note = None;
-        self.tab = Tab::Inbox;
+        self.cu = Default::default();
+        self.start_intro();
         self.started = true;
         self.career = true;
         self.confirm_new = false;
@@ -1224,6 +1259,7 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
         let _perf = crate::perf::scope("frame: all ui");
+        self.follow_watch();
         // What eframe measured for the frame before: our code plus turning
         // the shapes into triangles, without the GPU's share.
         if let Some(cpu) = frame.info().cpu_usage {

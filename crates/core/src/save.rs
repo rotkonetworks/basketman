@@ -90,6 +90,7 @@ pub fn decode(bytes: &[u8]) -> Result<World, SaveError> {
     world.ensure_fame();
     // Saves from before the calendar get their game days.
     world.ensure_calendar();
+    world.ensure_clubs();
     Ok(world)
 }
 

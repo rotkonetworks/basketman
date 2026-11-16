@@ -140,6 +140,7 @@ impl App {
                 panel_wide(ui, stage, "film", min_w, |ui| self.film_room(ui, &bd));
             }
             Tab::League => self.screen_league(ui, &bd, stage, tier, g, full),
+            Tab::Welcome => self.screen_welcome(ui, &bd, stage, tier, g, full),
             Tab::Finances => self.screen_money(ui, &bd, stage, tier, g, full),
             _ => {
                 // Everything else is data: the hall from the concourse,
@@ -175,6 +176,7 @@ impl App {
             | Tab::Film => 640.0,
             Tab::Reserves => 600.0,
             Tab::Calendar => 340.0,
+            Tab::About | Tab::Career | Tab::Offer => 0.0,
             _ => 420.0,
         }
     }
@@ -220,6 +222,10 @@ impl App {
             Tab::Draft => self.draft_page(ui, bd),
             Tab::Game => self.game_page(ui, bd),
             Tab::Film => self.film_room(ui, bd),
+            Tab::About => self.club_story(ui, bd),
+            Tab::Career => self.career_page(ui, bd),
+            Tab::Offer => self.offer_page(ui, bd),
+            Tab::Welcome => {}
         }
     }
 

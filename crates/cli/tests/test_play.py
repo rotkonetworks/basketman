@@ -81,6 +81,19 @@ def main():
         check(kinds["Advance"]["available"] and not kinds["TakeCharge"]["available"], "legal availability")
         check(kinds["TakeCharge"]["why_not"], "reason given")
 
+        # --- the club's past and people, the manager's career --------------
+        prof = p.call("view", what="club_profile")
+        check(prof["founded"] > 1800 and prof["rival"] and prof["legends"] and prof["people"], "club profile")
+        check(0 <= prof["confidence"] <= 100 and prof["reasons"] == [], "the board starts without reasons")
+        check(len(prof["record"]) >= 20 and prof["record"][0]["played"] is False, "the record starts before the game")
+        other = p.call("view", what="club_profile", club=5)
+        check(other["name"] != prof["name"], "another club's profile")
+        car = p.call("view", what="career")
+        check(car["jobless"] is False and car["reputation"] > 0 and len(car["spells"]) == 1, "career view")
+        check(kinds["Resign"]["available"] and not kinds["AcceptJob"]["available"], "resign listed, no offer yet")
+        _, err = p.try_call("apply", command={"AcceptJob": {"offer": 0, "bring": [], "keep": []}})
+        check(err and err.kind == "out_of_range", "no such offer")
+
         # --- fog: another club's players are ranges, hidden things absent --
         club = p.call("view", what="club", club=5)
         text = json.dumps(club)
@@ -258,6 +271,40 @@ def main():
             q.close()
     finally:
         p.close()
+
+    # --- out of work: resign, wait for a call, take the job ------------------
+    q = Play(BIN)
+    try:
+        q.call("new_game", seed=7, clubs=8, club=2)
+        old = q.call("view", what="club_profile")["name"]
+        q.apply("Resign")
+        lg = q.call("legal")
+        check(lg["club"] is None, "no club when out of work")
+        ks = {a["kind"]: a for a in lg["actions"]}
+        check(ks["Advance"]["available"] and "Resign" in ks and not ks["Resign"]["available"], "jobless actions")
+        car = q.call("view", what="career")
+        check(car["jobless"] and car["spells"][0]["ended"] == "resigned", "career says out of work")
+        _, err = q.try_call("view", what="summary")
+        check(err and err.kind == "no_club", "no summary without a club")
+        offer = None
+        for _ in range(80):
+            car = q.call("view", what="career")
+            opens = [o for o in car["offers"] if o["open"]]
+            if opens:
+                offer = opens[0]["offer"]
+                break
+            r = q.call("advance")
+            if r.get("stop") == "match_day":
+                q.call("play_round")
+        check(offer is not None, "a club called")
+        jo = q.call("view", what="job_offer", offer=offer, bring=[], keep=["Assistant"])
+        check(jo["summary"]["name"] and jo["terms"]["release"] is not None, "the offer shows the new club")
+        q.apply({"AcceptJob": {"offer": offer, "bring": [], "keep": ["Assistant", "Skills", "Fitness", "Scout", "Press"]}})
+        s2 = q.call("view", what="summary")
+        check(s2["name"] != old and q.call("view", what="career")["club"] is not None, "a new club")
+        check(q.call("legal")["club"] is not None, "legal is back")
+    finally:
+        q.close()
 
     # --- determinism --------------------------------------------------------
     one, two = Play(BIN), Play(BIN)

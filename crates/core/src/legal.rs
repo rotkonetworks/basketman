@@ -36,6 +36,8 @@ pub enum Waiting {
     Offer { message: u32, offer: usize },
     /// A question from the press is open. It lapses after the next round.
     Press { question: usize },
+    /// Another club has offered you its job: `AcceptJob` or `DeclineJob`.
+    JobOffer { offer: usize },
     /// A sponsor's proposal is open.
     SponsorOffer { offer: usize },
     /// A sponsor wants one of your players at an event: `AnswerAppearance`.
@@ -47,8 +49,9 @@ pub enum Waiting {
     Nothing,
 }
 
-/// Everything waiting, most urgent first. Never empty: ends with
-/// `MatchDay` or `Nothing`.
+/// Everything waiting, most urgent first. Never empty: `MatchDay` or
+/// `Nothing` comes after everything that holds the calendar, and only job
+/// offers follow it.
 pub fn waiting_all(w: &World) -> Vec<Waiting> {
     let mut out = Vec::new();
     if w.draft.as_ref().is_some_and(|d| d.on_clock() == w.watch) && w.watch.is_some() {
@@ -89,6 +92,11 @@ pub fn waiting_all(w: &World) -> Vec<Waiting> {
     } else {
         Waiting::Nothing
     });
+    // A club's offer of its job waits for nobody and blocks nothing, so it
+    // comes after the day's business and is never the first thing.
+    for offer in w.open_job_offers() {
+        out.push(Waiting::JobOffer { offer });
+    }
     out
 }
 
@@ -114,7 +122,8 @@ pub struct ActionSpec {
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Legal {
-    pub club: TeamId,
+    /// `None` when you are out of work.
+    pub club: Option<TeamId>,
     pub waiting: Waiting,
     /// Everything waiting, most urgent first.
     pub pending: Vec<Waiting>,
@@ -152,11 +161,101 @@ impl World {
         }
         let pending = waiting_all(self);
         Some(Legal {
-            club,
+            club: Some(club),
             waiting: pending[0].clone(),
             pending,
             actions: self.action_specs(club),
         })
+    }
+
+    /// What an out-of-work manager can do: let time pass, read his mail and
+    /// answer the offers that come.
+    pub fn legal_jobless(&self) -> Option<Legal> {
+        if !self.jobless() {
+            return None;
+        }
+        let pending = waiting_all(self);
+        let mut actions = Vec::new();
+        actions.push(spec(
+            "Advance",
+            "Let the calendar run until a game, new mail or the draft. Returns why it stopped.",
+            None,
+            json!({}),
+            Some(Command::Advance),
+        ));
+        let over = self.season_over().then(|| "The season is over.".to_string());
+        actions.push(spec(
+            "PlayRound",
+            "Play this round's games. You manage nobody, so all are played by the assistants.",
+            over,
+            json!({}),
+            Some(Command::PlayRound),
+        ));
+        let unread: Vec<u32> = self.inbox().iter().filter(|m| !m.read).map(|m| m.id).collect();
+        actions.push(spec(
+            "MarkRead",
+            "Mark a message read.",
+            None,
+            json!({"message": {"choices": unread}}),
+            unread.first().map(|&id| Command::MarkRead(id)),
+        ));
+        actions.extend(self.job_specs());
+        Some(Legal {
+            club: None,
+            waiting: pending[0].clone(),
+            pending,
+            actions,
+        })
+    }
+
+    /// The career commands: answering a job offer, resigning.
+    fn job_specs(&self) -> Vec<ActionSpec> {
+        let open = self.open_job_offers();
+        let list: Vec<Value> = open
+            .iter()
+            .map(|&i| {
+                let o = &self.career.offers[i];
+                json!({"offer": i, "club": o.club, "club_name": self.teams[o.club].name,
+                       "stature": self.stature(o.club), "why": o.why})
+            })
+            .collect();
+        let draft = self
+            .draft
+            .is_some()
+            .then(|| "The draft is on. Finish it first.".to_string());
+        let mut out = Vec::new();
+        out.push(spec(
+            "AcceptJob",
+            "Take another club's job. `bring`: jobs on your staff whose holders you ask to come (those who are willing do, the rest stay); `keep`: jobs at the new club whose holders stay (the others are paid off; a loyal owner limits how many). See view job_offer for what each says before you sign.",
+            draft.clone(),
+            json!({"offer": {"choices": list},
+                   "bring": {"jobs": ["Assistant", "Skills", "Fitness", "Scout", "Press"]},
+                   "keep": {"jobs": ["Assistant", "Skills", "Fitness", "Scout", "Press"]}}),
+            open.first().map(|&offer| Command::AcceptJob {
+                offer,
+                bring: Vec::new(),
+                keep: Job::HIRED.to_vec(),
+            }),
+        ));
+        out.push(spec(
+            "DeclineJob",
+            "Turn down a job offer.",
+            None,
+            json!({"offer": {"choices": list}}),
+            open.first().map(|&i| Command::DeclineJob(i)),
+        ));
+        out.push(spec(
+            "Resign",
+            "Leave your club. You are out of work until somebody calls, and your reputation is untouched.",
+            if self.watch.is_none() {
+                Some("You have no job to leave.".to_string())
+            } else {
+                draft
+            },
+            json!({}),
+            Some(Command::Resign),
+        ));
+        out
     }
 
     /// A rotation `SetTactics` accepts: the assistant's own choice of the
@@ -820,6 +919,7 @@ impl World {
                 },
             })),
         ));
+        out.extend(self.job_specs());
         out
     }
 }
@@ -872,6 +972,10 @@ mod tests {
     fn what_it_lists_is_accepted_and_what_it_refuses_is_refused() {
         let mut w = World::generate(31, 8);
         w.apply(Command::TakeCharge(2)).unwrap();
+        // The board's patience is not what this test is about: this club
+        // finishes last without a manager's hand on it.
+        w.club.clubs[2].board.owner.patience = 20;
+        w.club.clubs[2].board.chairman = None;
         assert_eq!(w.legal(0), None);
         let n = check(&w);
         assert!(n >= 15, "only {n} examples");
