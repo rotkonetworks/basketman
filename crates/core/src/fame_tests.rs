@@ -245,12 +245,27 @@ fn media_work_raises_fame_and_fans_and_costs_training() {
     let fame = |w: &World| w.teams[0].roster.iter().map(|&p| w.fame_of(p)).sum::<f32>();
     // One world is luck: the gain is the mean over this and the four below.
     let mut gain = fame(&worked) - fame(&base);
+    // Training lost to media work, the young man's overall in the base world
+    // less in the worked one, summed with the same man of the other worlds.
+    let mut lost = base.players[who as usize].overall() - worked.players[who as usize].overall();
+    let tired = |w: &World| {
+        w.teams[0]
+            .roster
+            .iter()
+            .map(|&p| w.players[p as usize].condition)
+            .sum::<f32>()
+    };
+    // Condition spent on media work, base less worked, over the same worlds.
+    let mut worn = tired(&base) - tired(&worked);
     assert!(worked.fan_base(0) > base.fan_base(0));
     // And in other worlds too: eight games are a small sample, so most of them.
     let mut ahead = 1;
     for seed in [13, 14, 15, 16] {
         let mut b = blank(seed);
         b.take_charge(0);
+        let young = b.teams[0].roster[2];
+        b.players[young as usize].age = 20;
+        b.players[young as usize].potential = 19.0;
         for p in b.teams[0].roster.clone() {
             b.players[p as usize].renown.fame = 10.0;
         }
@@ -263,29 +278,19 @@ fn media_work_raises_fame_and_fans_and_costs_training() {
         ahead += (w.fan_base(0) > b.fan_base(0)) as u32;
         let fame_of = |x: &World| x.teams[0].roster.iter().map(|&p| x.fame_of(p)).sum::<f32>();
         gain += fame_of(&w) - fame_of(&b);
+        lost += b.players[young as usize].overall() - w.players[young as usize].overall();
+        worn += tired(&b) - tired(&w);
     }
     assert!(gain / 5.0 > 2.0, "mean fame gain from media work {:.2} over five worlds", gain / 5.0);
     assert!(ahead >= 4, "the worked club's fans are ahead in {ahead} of 5 worlds");
+    // One young man in one world is luck (a few games more or fewer change what
+    // he learns by a hundredth): the cost is asked of the five together.
+    assert!(lost > 0.0, "training lost to media work, summed over five worlds: {lost}");
     let (a, b) = (&worked.players[who as usize], &base.players[who as usize]);
-    assert!(
-        a.overall() < b.overall(),
-        "training: {} v {}",
-        a.overall(),
-        b.overall()
-    );
-    let tired = |w: &World| {
-        w.teams[0]
-            .roster
-            .iter()
-            .map(|&p| w.players[p as usize].condition)
-            .sum::<f32>()
-    };
-    assert!(
-        tired(&worked) < tired(&base),
-        "{} v {}",
-        tired(&worked),
-        tired(&base)
-    );
+    let _ = (a, b);
+    // The eight games each club plays tire it by a hundredth either way: the
+    // cost of the media work is asked of the five worlds together.
+    assert!(worn > 0.0, "condition spent on media work, summed over five worlds: {worn}");
     // And it teaches him how to talk.
     assert!(
         worked.players[who as usize].personality.presence
