@@ -174,7 +174,7 @@ pub struct App {
     /// `--screenshot <file> [tab]`: render a few frames, save one, quit.
     /// Lets the look be reviewed without a person at the window.
     #[cfg(not(target_arch = "wasm32"))]
-    shot: Option<(std::path::PathBuf, u32)>,
+    pub(crate) shot: Option<(std::path::PathBuf, u32)>,
 }
 
 pub(crate) fn money(v: i64) -> String {

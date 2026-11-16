@@ -53,6 +53,27 @@ fn last_name(p: &Player) -> &str {
     p.name.rsplit(' ').next().unwrap_or(&p.name)
 }
 
+/// A man's name among the five: his surname, with an initial (and his
+/// position) when somebody else of the five would read the same.
+fn nm(five: &[&Player], p: &Player) -> String {
+    let last = last_name(p);
+    let twins = five.iter().filter(|o| o.id != p.id && last_name(o) == last);
+    let mut same_surname = false;
+    let mut same_name = false;
+    for o in twins {
+        same_surname = true;
+        same_name |= o.name == p.name;
+    }
+    let initial = p.name.chars().next().unwrap_or(' ');
+    if same_name {
+        format!("{initial}. {last} ({})", p.position.label())
+    } else if same_surname {
+        format!("{initial}. {last}")
+    } else {
+        last.to_string()
+    }
+}
+
 /// The five at the places of the board, point guard first, and falling back
 /// to the first five of the rotation when the cast cannot be worked out.
 pub fn starters<'a>(t: &Tactics, players: &'a [Player]) -> Vec<&'a Player> {
@@ -228,7 +249,7 @@ impl OffenseSet {
                     score: pts(norm(m)),
                     reason: format!(
                         "Passing and IQ average {m:.0} across your five; the weak link is {} at {:.0}.",
-                        last_name(weak),
+                        nm(five, weak),
                         -w
                     ),
                 }
@@ -248,8 +269,8 @@ impl OffenseSet {
                     score: pts(score),
                     reason: format!(
                         "{} handles it at {hv:.0}, {} finishes at {bv:.0}; needs two shooters, you have {}.",
-                        last_name(h),
-                        last_name(big),
+                        nm(five, h),
+                        nm(five, big),
                         n
                     ),
                 }
@@ -261,7 +282,7 @@ impl OffenseSet {
                     score: pts(0.7 * norm(pv) + 0.3 * size),
                     reason: format!(
                         "{} is your post man: post moves and strength {pv:.0}, {:.0} cm tall.",
-                        last_name(post),
+                        nm(five, post),
                         post.body.height_cm
                     ),
                 }
@@ -280,12 +301,12 @@ impl OffenseSet {
                     reason: if gap >= 1.5 {
                         format!(
                             "{} is a real scorer, {gap:.1} points of skill above the other four.",
-                            last_name(star)
+                            nm(five, star)
                         )
                     } else {
                         format!(
                             "Nobody stands out: your best scorer, {}, is only {gap:.1} above the rest.",
-                            last_name(star)
+                            nm(five, star)
                         )
                     },
                 }
@@ -366,7 +387,7 @@ impl DefenseScheme {
                     score: pts(norm(m)),
                     reason: format!(
                         "Defense averages {m:.0} across the five; the weakest, {}, is {:.0} at his best.",
-                        last_name(weak),
+                        nm(five, weak),
                         -w
                     ),
                 }
@@ -390,8 +411,8 @@ impl DefenseScheme {
                     score: pts(0.7 * norm(rim) + 0.3 * norm(iq)),
                     reason: format!(
                         "{} and {} guard the rim at {rim:.0}; team IQ {iq:.0}. It gives up threes.",
-                        last_name(bigs[0]),
-                        last_name(bigs[1])
+                        nm(five, bigs[0]),
+                        nm(five, bigs[1])
                     ),
                 }
             }

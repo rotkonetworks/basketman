@@ -170,7 +170,16 @@ fn short_names(world: &World, ids: &[PlayerId]) -> BTreeMap<PlayerId, String> {
             let l = last(id);
             let twin = ids.iter().any(|&o| o != id && last(o) == l);
             let n = &world.players[id as usize].name;
-            let s = if twin {
+            let same = ids
+                .iter()
+                .any(|&o| o != id && world.players[o as usize].name == *n);
+            let s = if same {
+                format!(
+                    "{}. {l} ({})",
+                    n.chars().next().unwrap_or(' '),
+                    world.players[id as usize].position.label()
+                )
+            } else if twin {
                 format!("{}. {l}", n.chars().next().unwrap_or(' '))
             } else {
                 l
