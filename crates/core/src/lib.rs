@@ -29,6 +29,7 @@ pub mod inbox;
 pub mod income;
 pub mod instructions;
 pub mod league;
+pub mod live_feed;
 pub mod legal;
 pub mod media;
 pub mod ops;

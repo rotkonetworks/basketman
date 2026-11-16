@@ -67,7 +67,7 @@ impl World {
         self.skip_to(day);
         let (played, seeds) = self.draw_block(day);
         let last = self.last_day_of(&played);
-        let out = self.complete_block(played, seeds, None);
+        let out = self.complete_block(played, seeds, Vec::new());
         self.settle_to(last);
         out
     }
@@ -117,7 +117,7 @@ impl World {
         }
         let (played, seeds) = self.draw_block(day);
         if !played.is_empty() {
-            self.complete_block(played, seeds, None);
+            self.complete_block(played, seeds, Vec::new());
         }
         if day < self.preseason_days && day % 7 == 6 {
             self.camp_week(day / 7 + 1);

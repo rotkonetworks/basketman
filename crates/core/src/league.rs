@@ -493,7 +493,7 @@ impl World {
         self.run_up_to_round();
         let (played, seeds) = self.draw_block(u32::MAX);
         let last = self.last_day_of(&played);
-        let out = self.complete_block(played, seeds, None);
+        let out = self.complete_block(played, seeds, Vec::new());
         self.settle_to(last);
         out
     }
@@ -530,6 +530,36 @@ impl World {
         let n = played.iter().position(|&i| i == fixture)?;
         let f = &self.fixtures[fixture];
         let side = if f.home == team { 0 } else { 1 };
+        // The other games of the block are played now, from their own seeds,
+        // so the day around the user's game can be shown as it goes. The
+        // results are kept for `complete_block`; only the games of today
+        // keep a score timeline.
+        let today = f.day;
+        let others: Vec<usize> = played.iter().copied().filter(|&i| i != fixture).collect();
+        let jobs: Vec<(TeamId, TeamId, u64, bool)> = others
+            .iter()
+            .map(|&i| {
+                let g = &self.fixtures[i];
+                let i_n = played.iter().position(|&j| j == i).unwrap_or(0);
+                let record = g.day == today || self.watch == Some(g.home) || self.watch == Some(g.away);
+                (g.home, g.away, seeds[i_n], record)
+            })
+            .collect();
+        let mut pre = Vec::new();
+        let mut around = Vec::new();
+        for (&i, (result, recording)) in others.iter().zip(self.simulate_batch(&jobs)) {
+            if self.fixtures[i].day == today
+                && let Some(rec) = &recording
+            {
+                around.push(crate::live_feed::Other {
+                    fixture: i,
+                    timeline: crate::live_feed::Timeline::of(rec),
+                });
+            }
+            // Only a game the user's club plays in keeps its recording.
+            let keep = self.watch == Some(self.fixtures[i].home) || self.watch == Some(self.fixtures[i].away);
+            pre.push((i, result, recording.filter(|_| keep)));
+        }
         let game = LiveMatch::new(
             &lineup(&self.teams[f.home], &self.players),
             &lineup(&self.teams[f.away], &self.players),
@@ -546,12 +576,21 @@ impl World {
             played,
             seeds,
             scope,
+            pre,
+            around,
+            log_len: self.log.len(),
+            round: self.round,
         })
     }
 
     /// Book a finished live game and play the rest of its round. What the
     /// coach did is appended to `log` as `Command::PlayLive`.
-    pub fn full_time(&mut self, live: LiveRound) -> Vec<usize> {
+    pub fn full_time(&mut self, mut live: LiveRound) -> Vec<usize> {
+        // If the world was changed while the game was on, the other games
+        // played ahead of time are not what they would now have been.
+        if self.log.len() != live.log_len || self.round != live.round {
+            live.pre.clear();
+        }
         let inputs = live.inputs.clone();
         self.log.push(match live.scope {
             Scope::Round => Command::PlayLive { inputs },
@@ -590,11 +629,9 @@ impl World {
     fn book(&mut self, live: LiveRound) -> Vec<usize> {
         let (result, recording) = live.game.finish();
         let last = self.last_day_of(&live.played);
-        let out = self.complete_block(
-            live.played,
-            live.seeds,
-            Some((live.fixture, result, recording)),
-        );
+        let mut pre = live.pre;
+        pre.push((live.fixture, result, Some(recording)));
+        let out = self.complete_block(live.played, live.seeds, pre);
         self.settle_to(last);
         out
     }
@@ -675,7 +712,7 @@ impl World {
         &mut self,
         played: Vec<usize>,
         seeds: Vec<u64>,
-        live: Option<(usize, GameResult, Recording)>,
+        mut pre: Vec<(usize, GameResult, Option<Recording>)>,
     ) -> Vec<usize> {
         let round = self.round;
         let first = !self
@@ -689,11 +726,10 @@ impl World {
             self.econ_round_start(&all);
         }
         self.econ_gates(&played);
-        let skip = live.as_ref().map(|l| l.0);
         let jobs: Vec<(TeamId, TeamId, u64, bool)> = played
             .iter()
             .zip(&seeds)
-            .filter(|(i, _)| Some(**i) != skip)
+            .filter(|(i, _)| !pre.iter().any(|p| p.0 == **i))
             .map(|(&i, &seed)| {
                 let f = &self.fixtures[i];
                 let record = self.watch == Some(f.home) || self.watch == Some(f.away);
@@ -701,13 +737,14 @@ impl World {
             })
             .collect();
         let mut simulated = self.simulate_batch(&jobs).into_iter();
-        let mut live = live.map(|(_, result, recording)| (result, Some(recording)));
 
         for &i in &played {
-            let Some((result, recording)) = (if Some(i) == skip {
-                live.take()
-            } else {
-                simulated.next()
+            let Some((result, recording)) = (match pre.iter().position(|p| p.0 == i) {
+                Some(n) => {
+                    let (_, result, recording) = pre.swap_remove(n);
+                    Some((result, recording))
+                }
+                None => simulated.next(),
             }) else {
                 continue;
             };
@@ -882,6 +919,13 @@ pub struct LiveRound {
     seeds: Vec<u64>,
     /// What the rest of the block holds.
     pub scope: Scope,
+    /// The block's other games, already played from their seeds: result and
+    /// recording (kept only where the user's club plays).
+    pub(crate) pre: Vec<(usize, GameResult, Option<Recording>)>,
+    /// The games of today besides the user's, as scores over the clock.
+    pub around: Vec<crate::live_feed::Other>,
+    log_len: usize,
+    round: usize,
 }
 
 /// Something the coach does during a live game.
