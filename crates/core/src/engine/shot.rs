@@ -46,6 +46,12 @@ pub(super) fn ideal(from: V3, style: Style) -> (V3, bool) {
             let vh = (0.5 * GRAVITY * d * d / (a * d - drop).max(0.1)).sqrt();
             (direct(d / vh), false)
         }
+        Style::Floater => {
+            // High and soft: steeper than any jumper, from wherever he is.
+            let a = if d < 2.0 { 2.1 } else { 1.9 };
+            let vh = (0.5 * GRAVITY * d * d / (a * d - drop).max(0.1)).sqrt();
+            (direct(d / vh), false)
+        }
         _ => {
             // A launch slope that falls with distance: high for a free
             // throw, flatter from far out.
@@ -104,6 +110,7 @@ pub(super) fn base(style: Style, rim: bool, d: f32) -> (f32, f32) {
     match style {
         Style::Dunk => (0.02, 0.03),
         Style::Layup => (0.065, 0.13),
+        Style::Floater => (0.075 + 0.012 * d, 0.16 + 0.02 * d),
         _ if rim => (0.065, 0.13),
         _ => (0.05 + 0.004 * d, 0.10 + 0.003 * d),
     }
@@ -123,6 +130,19 @@ impl Errors {
     /// The errors that put the ball `lat` metres to the side and `depth`
     /// metres long or short (one standard deviation) at the ring, for a shot
     /// from `d` metres.
+    /// For a ball that flies only `flown` metres before the ring (a finish at
+    /// the rim): `lat` and `depth` are metres at the ring, whatever the
+    /// distance, as far as the launch can make them.
+    pub fn at_ring(flown: f32, lat: f32, depth: f32) -> Errors {
+        let f = flown.max(0.12);
+        let speed = (depth / (2.0 * f)).min(0.7);
+        Errors {
+            dir: (lat / f).min(0.9),
+            speed,
+            elev: speed * 0.5,
+        }
+    }
+
     pub fn at_rim(d: f32, lat: f32, depth: f32) -> Errors {
         let d = d.max(0.5);
         // However bad his shot, a man does not throw it twice as hard.

@@ -358,7 +358,7 @@ impl Game {
                 let layup = self
                     .play
                     .shot
-                    .is_some_and(|s| matches!(s.style, Style::Layup | Style::Dunk));
+                    .is_some_and(|s| matches!(s.style, Style::Layup | Style::Dunk | Style::Floater));
                 // A finish may carry him all the way to the rim (the engine
                 // starts it earlier than the two steps of a real gather).
                 self.handler.radius = if layup {
@@ -420,6 +420,13 @@ impl Game {
         pose.foot = st.foot;
         pose.planted = st.planted;
         pose.balance = (st.balance * 100.0).round() as u8;
+        // The hand he finishes with, from the gather to the release.
+        if t == self.play.o
+            && let Some(plan) = self.play.shot.filter(|s| s.shooter == k && s.hand != 0)
+            && self.play.t >= plan.start
+        {
+            pose.hand = plan.hand;
+        }
         if self.handler.who == Some((t, k)) {
             pose.dribble = self.handler.state;
             if self.handler.state == Dribble::Live {
@@ -443,7 +450,7 @@ impl Game {
         let st = &self.st[o][h];
         let m = &self.m[o][h];
         let to = (HOOP - m.pos).norm();
-        let finish = matches!(style, Style::Layup | Style::Dunk);
+        let finish = matches!(style, Style::Layup | Style::Dunk | Style::Floater);
         // At the rim the line to it means nothing (he is under it): a finish
         // was squared when he left the floor.
         let at_rim = finish && (m.pos.dist(HOOP) < 0.4 || (m.pos.dist(HOOP) < 1.3 && m.vel.len() > 1.5));
@@ -468,14 +475,14 @@ impl Game {
         };
         let key = match style {
             Style::Hook => self.oe(h, Attr::PostMoves),
-            Style::Layup | Style::Dunk => self.oe(h, Attr::CloseShot),
+            Style::Layup | Style::Dunk | Style::Floater => self.oe(h, Attr::CloseShot),
             _ if how == ShotHow::Fadeaway || how == ShotHow::Sideways => {
                 0.5 * (self.oe(h, Attr::Handling) + self.oe(h, Attr::MidRange))
             }
             _ => self.oe(h, Attr::Handling),
         };
         let skill = ((0.5 * (key + self.oe(h, Attr::Footwork)) - 8.0) / 12.0).clamp(0.0, 1.0);
-        let scale = if matches!(style, Style::Layup | Style::Dunk) { 0.6 } else { 1.0 };
+        let scale = if matches!(style, Style::Layup | Style::Dunk | Style::Floater) { 0.6 } else { 1.0 };
         (how, stance::shot_multiplier(eff, fwd_pen, side, st.balance, skill, scale * SHOT_STANCE))
     }
 

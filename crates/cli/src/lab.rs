@@ -2428,7 +2428,7 @@ pub fn launch() {
     use basketman_core::court::HOOP;
     use basketman_core::engine::make_rate;
     use basketman_core::replay::Style;
-    let spots: [(&str, f32, f32, f32, Style); 10] = [
+    let spots: [(&str, f32, f32, f32, Style); 16] = [
         ("free throw 4.2", 0.0, HOOP.y + 4.2, 2.6, Style::Jumper),
         ("mid 3.0 straight", 0.0, HOOP.y + 3.0, 2.9, Style::Jumper),
         ("mid 5.0 straight", 0.0, HOOP.y + 5.0, 2.9, Style::Jumper),
@@ -2439,6 +2439,12 @@ pub fn launch() {
         ("three 9.0", 0.0, HOOP.y + 9.0, 3.0, Style::Jumper),
         ("layup front", 0.0, HOOP.y + 1.0, 3.2, Style::Layup),
         ("layup side", 1.4, HOOP.y + 0.4, 3.2, Style::Layup),
+        ("layup front 1.6", 0.0, HOOP.y + 1.6, 3.2, Style::Layup),
+        ("layup side 1.6", 1.2, HOOP.y + 1.0, 3.2, Style::Layup),
+        ("layup front 2.1", 0.0, HOOP.y + 2.1, 3.2, Style::Layup),
+        ("floater 1.4", 0.0, HOOP.y + 1.4, 2.9, Style::Floater),
+        ("floater 2.2", 0.0, HOOP.y + 2.2, 2.9, Style::Floater),
+        ("floater 3.0 wing", 1.8, HOOP.y + 2.4, 2.9, Style::Floater),
     ];
     let unit: Vec<f32> = std::env::var("LAUNCH")
         .ok()
@@ -3170,7 +3176,7 @@ pub fn finish(games: usize) {
     const BANDS: [&str; 4] = ["<3 ft", "3-10 ft", "10-16 ft", "16 ft+ 2pt"];
     const STYLES: [&str; 6] = ["jumper", "layup", "dunk", "hook", "fade", "floater"];
     // [band][style] -> (att, made, fouled, speed sum, contest sum)
-    let mut t = [[(0u32, 0u32, 0u32, 0f32, 0f32); 6]; 4];
+    let mut t = [[(0u32, 0u32, 0u32, 0f32, 0f32, 0u32, 0u32); 6]; 4];
     let mut by_src = [[0u32; 3]; 9];
     let (mut fga, mut fta_shots, mut pts_tot) = (0u32, 0u32, 0u32);
     for g in 0..games {
@@ -3182,7 +3188,7 @@ pub fn finish(games: usize) {
         let away = lineup(&w.teams[b], &w.players);
         let (_, rec) = simulate_recorded(&home, &away, &w.rules, &mut Rng::new(2300 + g as u64 * 7919));
         for e in &rec.events {
-            let EventKind::Shot { kind, made, contest, fouled, source, .. } = &e.kind else {
+            let EventKind::Shot { kind, made, contest, fouled, source, blocked_by, .. } = &e.kind else {
                 continue;
             };
             let i = rec.frame_at(e.time);
@@ -3201,9 +3207,6 @@ pub fn finish(games: usize) {
             } else {
                 fga += 1;
             }
-            if *fouled && !*made && *kind != ShotKind::Three {
-                // Not a field goal attempt, but a finish that drew the whistle.
-            }
             if *kind == ShotKind::Three {
                 continue;
             }
@@ -3220,11 +3223,15 @@ pub fn finish(games: usize) {
             let prev = &rec.frames[i.saturating_sub(1)];
             let sp = f.pos[o][k].dist(prev.pos[o][k]) / 0.1;
             let c = &mut t[band][st];
+            // A fouled miss is a trip to the line, not an attempt; it still
+            // counts in the share of finishes that drew the whistle.
             if *fouled && !*made {
                 c.2 += 1;
+                c.5 += 1;
                 continue;
             }
             c.0 += 1;
+            c.6 += blocked_by.is_some() as u32;
             c.1 += *made as u32;
             c.2 += *fouled as u32;
             c.3 += sp;
@@ -3254,10 +3261,11 @@ pub fn finish(games: usize) {
                 continue;
             }
             println!(
-                "    {sn:<8} {:>6}  {:>5.1}%  fouled {:>4.1}%  speed {:>4.1}  contest {:.2}",
+                "    {sn:<8} {:>6}  {:>5.1}%  fouled {:>4.1}%  blocked {:>4.1}%  speed {:>4.1}  contest {:.2}",
                 c.0,
                 100.0 * c.1 as f32 / c.0 as f32,
-                100.0 * c.2 as f32 / c.0 as f32,
+                100.0 * c.2 as f32 / (c.0 + c.5) as f32,
+                100.0 * c.6 as f32 / c.0 as f32,
                 c.3 / c.0 as f32,
                 c.4 / c.0 as f32
             );

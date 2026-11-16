@@ -27,6 +27,7 @@ use crate::replay::{
 use crate::rng::Rng;
 use crate::tactics::{Brief, DefenseScheme, OffenseSet, Press};
 
+mod finish;
 mod stance_hooks;
 
 // ---- the shot's error model -------------------------------------------
@@ -39,7 +40,7 @@ const GAME: f32 = 1.14;
 /// the base error shape does not carry.
 const MID_SCALE: f32 = 0.85;
 const THREE_SCALE: f32 = 0.93;
-const RIM_SCALE: f32 = 1.40;
+const RIM_SCALE: f32 = 0.75;
 /// What each point of rating above 10 takes off the error of a jump shot,
 /// of a finish at the rim, and of a free throw.
 const SKILL_SLOPE: f32 = 0.035;
@@ -51,7 +52,7 @@ const FT_SLOPE: f32 = 0.045;
 /// skill above 10 adds to that.
 const CONTEST_THREE: f32 = 0.45;
 const CONTEST_MID: f32 = 0.35;
-const CONTEST_RIM: f32 = 1.5;
+const CONTEST_RIM: f32 = 1.1;
 const DUNK_CONTEST: f32 = 1.5;
 const GUARD_SLOPE: f32 = 0.04;
 /// A dunk from the very top of his reach is shaky: what each metre short
@@ -94,9 +95,10 @@ const BEAT_IQ: f32 = 0.006;
 const BEAT_LOST: f32 = 0.15;
 /// Chance, at neutral tempo, that the receiver of a throw-in pushes the ball.
 const PUSH_OFF_INBOUND: f32 = 0.35;
-/// Extra error on a rim finish for each m/s above a stride on the break.
-const SPRINT_ERR: f32 = 0.7;
-const SPRINT_FROM: f32 = 1.0;
+/// Distance from the rim a post player turns into a hook from, not a layup.
+const POST_HOOK_FROM: f32 = 1.1;
+/// How high a floater goes, as a share of the best his Vertical allows.
+const FLOATER_LIFT: f32 = 0.75;
 /// How much more of a contest a defender running a shooter down gives.
 const CHASE: f32 = 0.55;
 /// Fatigue above which a man does not run the floor.
@@ -606,6 +608,8 @@ struct ShotPlan {
     hand_z: f32,
     /// How far round he had to turn to square to the rim, in radians.
     turned: f32,
+    /// The hand he finishes with: 1 right, -1 left, 0 not a finish.
+    hand: i8,
 }
 
 /// How the next possession begins.
@@ -2023,7 +2027,12 @@ impl Game {
                     Phase::Post { .. } => (pos.toward(HOOP, 0.8), POST_PUSH),
                     Phase::Gather { .. } => {
                         let style = self.play.shot.map_or(Style::Jumper, |s| s.style);
-                        if matches!(style, Style::Layup | Style::Dunk) {
+                        if style == Style::Floater {
+                            // Off one foot or two, with the stride he has: a short
+                            // way on, not all the way to the rim.
+                            let go = self.m[o][k].vel.norm();
+                            (pos + go * 0.6, 0.5)
+                        } else if matches!(style, Style::Layup | Style::Dunk) {
                             // He keeps going to the basket, a step past it.
                             (HOOP + (HOOP - pos).norm() * 0.45, 0.8)
                         } else if style == Style::Fadeaway {
@@ -3049,9 +3058,9 @@ impl Game {
 
     fn foul_chance(&self, kind: ShotKind, c: f32) -> f32 {
         let base = match kind {
-            ShotKind::Rim => 0.06 + 0.18 * c.min(1.0),
-            ShotKind::Mid => 0.015 + 0.06 * c,
-            ShotKind::Three => 0.005 + 0.02 * c,
+            ShotKind::Rim => 0.084 + 0.252 * c.min(1.0),
+            ShotKind::Mid => 0.021 + 0.084 * c,
+            ShotKind::Three => 0.007 + 0.028 * c,
         };
         base * (1.0 + 0.5 * self.def().aggression())
     }
@@ -3089,6 +3098,17 @@ impl Game {
             _ => 0.0,
         };
         1.18 + 0.40 * (left - 12.0) / 12.0 - pace - (usage - 0.9) * 0.06 + told
+    }
+
+    /// Seconds a ball picked off at `from` takes to reach defender `dk`'s hand:
+    /// a quick hand, but the ball does not fly faster than a thrown pass can,
+    /// counting the way he runs from it (a man breaking up the floor is
+    /// further away when it arrives than when it was thrown).
+    fn steal_time(&self, from: Vec2, dk: usize) -> f32 {
+        let q = self.dp(dk);
+        let dist = from.dist(q);
+        let away = self.m[1 - self.play.o][dk].vel.dot((q - from).norm()).max(0.0);
+        Self::pass_time(dist).min(0.5).max(dist / (20.0 - away).max(8.0))
     }
 
     fn pass_time(len: f32) -> f32 {
@@ -3477,13 +3497,14 @@ impl Game {
                 let end = self.turnover(h, TurnoverKind::BadPass, Some(thief.0), 0.62);
                 if let Some(End::Live(dk)) = end {
                     // The ball goes to his hand and he takes it from there.
-                    self.steal_flew = Self::pass_time(a.dist(self.dp(dk))).min(0.5).max(a.dist(self.dp(dk)) / 20.0);
+                    let dur = self.steal_time(a, dk);
+                    self.steal_flew = dur;
                     self.play.flight = Some(Flight {
                         from: a,
                         to: self.dp(dk),
                         t: 0.0,
                         // A quick hand, but the ball does not fly faster than a thrown pass can.
-                        dur: Self::pass_time(a.dist(self.dp(dk))).min(0.5).max(a.dist(self.dp(dk)) / 20.0),
+                        dur,
                         kind: FlightKind::Steal { to: dk },
                         path: None,
                     });
@@ -4168,6 +4189,10 @@ impl Game {
         };
         let mut style = if free_throw {
             Style::Jumper
+        } else if self.play.source == Source::Post && d >= POST_HOOK_FROM {
+            // A post player turns into a short hook rather than laying it up
+            // from a step out.
+            Style::Hook
         } else if d < 2.2 {
             Style::Layup
         } else if self.play.source == Source::Post {
@@ -4175,6 +4200,19 @@ impl Game {
         } else {
             Style::Jumper
         };
+        // Going to the rim past a protector: the floater is the shot that is
+        // not there to be blocked.
+        if !free_throw
+            && matches!(style, Style::Layup | Style::Jumper)
+            && self.play.source != Source::Post
+            && d >= 1.0
+            && d <= 3.2
+        {
+            let (_, c, _) = self.look(h);
+            if self.takes_floater(h, d, c) {
+                style = Style::Floater;
+            }
+        }
         // A pull-up with a hand in his face: the better handlers step back or
         // fade away to make room, at a price in balance.
         if style == Style::Jumper
@@ -4185,6 +4223,11 @@ impl Game {
         {
             style = Style::Fadeaway;
         }
+        let hand = if matches!(style, Style::Layup | Style::Floater) {
+            self.finish_hand(h)
+        } else {
+            0
+        };
         if style == Style::Layup && reach + max_lift >= RIM_HEIGHT + DUNK_CLEAR {
             let (_, c, _) = self.look(h);
             if c < DUNK_TRAFFIC {
@@ -4196,7 +4239,7 @@ impl Game {
             Style::Dunk => 1.0,
             Style::Layup => LIFT_LAYUP,
             Style::Hook | Style::Fadeaway => 0.4,
-            Style::Floater => 0.55,
+            Style::Floater => FLOATER_LIFT,
             Style::Jumper => {
                 if kind == ShotKind::Three {
                     LIFT_JUMPER - 0.05
@@ -4210,7 +4253,7 @@ impl Game {
         let t0 = self.play.t;
         let speed = self.m[o][h].vel.len();
         let lead = match style {
-            Style::Layup | Style::Dunk => STEP_IN,
+            Style::Layup | Style::Dunk | Style::Floater => STEP_IN,
             _ => {
                 (speed / (ACCEL * BRAKE)).min(0.4) + DIP + if free_throw { FT_ROUTINE } else { 0.0 }
             }
@@ -4226,12 +4269,12 @@ impl Game {
                 Style::Hook => (ang - 1.5708).abs(),
                 // A finish from a driver already faces the rim; a post player
                 // with his back to it has to turn first.
-                Style::Layup | Style::Dunk
+                Style::Layup | Style::Dunk | Style::Floater
                     if p.dist(HOOP) < 0.4 || (p.dist(HOOP) < 1.3 && speed > 1.5) || ang < 0.6 =>
                 {
                     0.0
                 }
-                Style::Layup | Style::Dunk => ang - 0.3,
+                Style::Layup | Style::Dunk | Style::Floater => ang - 0.3,
                 _ if self.play.source == Source::Forced => 0.0,
                 _ => (ang - 0.25).max(0.0),
             };
@@ -4258,6 +4301,7 @@ impl Game {
             peak,
             hand_z,
             turned,
+            hand,
         });
         if !free_throw {
             // Hands go up with the shot, each timed to top out near the
@@ -4347,21 +4391,24 @@ impl Game {
         verdict: &Verdict,
         reach_edge: f32,
         stance_mult: f32,
+        hand: i8,
     ) -> Errors {
-        let rim = matches!(style, Style::Layup | Style::Dunk) || kind == ShotKind::Rim;
+        let rim = matches!(style, Style::Layup | Style::Dunk) || (kind == ShotKind::Rim && style != Style::Floater);
         let (lat, depth) = shot::base(style, rim, d);
         let comp = self.oe(h, Attr::Composure) - 10.0;
-        // Taking it to the rim at a full sprint off a break: the faster he
-        // comes the less of the finish is his to place.
-        let sprint = if self.play.live_origin && self.play.t < BREAK_SECONDS {
-            SPRINT_ERR * (self.m[self.play.o][h].vel.len() - SPRINT_FROM).max(0.0)
-        } else {
-            0.0
-        };
+        // How he arrives (speed, angle, hand) is one term, for every finish
+        // and every break alike: the faster he comes the less of the finish
+        // is his to place.
+        let arrival = self.finish_arrival(h, hand, near, c);
         let mut m = if style == Style::Dunk {
-            // The hand carries it through: only a body in the way, or the
-            // top of his reach, spoils it.
-            1.0 + DUNK_CONTEST * c + DUNK_EDGE * (0.15 - reach_edge).max(0.0) + sprint
+            // The hand carries it through: a body in the way, a bump, the
+            // top of his reach, losing his legs, or a jump too far out spoils it.
+            1.0 + DUNK_CONTEST * c
+                + DUNK_EDGE * (0.15 - reach_edge).max(0.0)
+                + self.dunk_trouble(h, d, verdict.contact || verdict.fouled)
+                + 0.5 * arrival
+        } else if style == Style::Floater {
+            self.floater_error(h, hand, c, near)
         } else if rim {
             let finish = 0.6 * self.oe(h, Attr::CloseShot)
                 + 0.2 * self.oe(h, Attr::Vertical)
@@ -4370,8 +4417,8 @@ impl Game {
                 0.5 * self.de(dk, Attr::InteriorD) + 0.5 * self.de(dk, Attr::Block)
             });
             (1.0 - FINISH_SLOPE * (finish - 10.0)).clamp(0.4, 2.0)
-                * (1.0 + CONTEST_RIM * c * (1.0 + GUARD_SLOPE * (protect - 10.0)).max(0.3))
-                * (1.0 + sprint)
+                * (1.0 + CONTEST_RIM * c.min(1.0) * (1.0 + GUARD_SLOPE * (protect - 10.0)).max(0.3))
+                * (1.0 + arrival)
         } else {
             let touch = if kind == ShotKind::Three {
                 self.oe(h, Attr::ThreePoint)
@@ -4395,6 +4442,7 @@ impl Game {
         };
         m *= match (style, rim, kind) {
             (Style::Dunk, _, _) => 1.0,
+            (Style::Floater, _, _) => finish::FLOATER_SCALE,
             (_, true, _) => RIM_SCALE,
             (_, _, ShotKind::Three) => THREE_SCALE,
             _ => MID_SCALE,
@@ -4411,6 +4459,17 @@ impl Game {
             m *= CONTACT_ERR;
         }
         m *= stance_mult;
+        // Close in the ball travels a hand's length: an error that is a launch
+        // angle would vanish with it. A finish's error is where the ball
+        // meets the ring (a hand in the way, the shoulder, the glass), so it
+        // is set there, whatever the distance flown.
+        if matches!(style, Style::Layup | Style::Floater | Style::Dunk) {
+            let flown = match style {
+                Style::Dunk => d - 0.5,
+                _ => d - 0.22,
+            };
+            return Errors::at_ring(flown, lat * m * GAME, depth * m * GAME);
+        }
         Errors::at_rim(d, lat * m * GAME, depth * m * GAME)
     }
 
@@ -4491,6 +4550,7 @@ impl Game {
                 peak: 0.3,
                 hand_z: 2.6,
                 turned: 0.0,
+                hand: 0,
             });
         let to_rim = p.dist(HOOP);
         if plan.style == Style::Dunk && to_rim > DUNK_RANGE {
@@ -4547,6 +4607,7 @@ impl Game {
             &verdict,
             reach_edge,
             stance_mult,
+            plan.hand,
         );
         let start = ball::clear_start(v3(from.x, from.y, z0));
         let (ideal, _) = shot::ideal(start, style);
@@ -6015,6 +6076,7 @@ impl Game {
             peak: 0.1,
             hand_z: 2.4,
             turned: 0.0,
+            hand: 0,
         });
         let from = p + (HOOP - p).norm() * 0.2;
         let d = from.dist(HOOP);
