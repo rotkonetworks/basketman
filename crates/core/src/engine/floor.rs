@@ -5104,6 +5104,11 @@ impl Game {
     /// through: his body stops against it.
     fn hold_off_glass(&mut self, t: usize, k: usize) {
         if self.play.ball_h > BOARD_LOW - 0.15 {
+            // Behind the glass he brings it down; he is not shoved through it.
+            if self.m[t][k].pos.y < BOARD_Y - 0.15 {
+                self.play.ball_h = BOARD_LOW - 0.2;
+                return;
+            }
             let m = &mut self.m[t][k];
             if m.pos.y < BOARD_Y + BALL_RADIUS && m.pos.x.abs() < BOARD_HALF + BALL_RADIUS {
                 m.pos.y = BOARD_Y + BALL_RADIUS;
@@ -5217,7 +5222,9 @@ impl Game {
             // A ball that has come down and is still moving: whoever is
             // near goes to it where it is.
             let late = now > c.arrive + 0.2;
-            if late && pos.dist(ball) < 6.0 {
+            // A ball loose after a pass or a dribble is everybody's.
+            let hustle = if self.play.scramble.is_some() { 16.0 } else { 6.0 };
+            if late && pos.dist(ball) < hustle {
                 let m = &mut self.m[t][k];
                 m.target = ball;
                 m.pace = 1.0;

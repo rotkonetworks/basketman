@@ -50,8 +50,37 @@ pub fn run(games: usize) {
         let (la, lb) = (mk(&w, &ta), mk(&w, &tb));
         let mut rng = Rng::new(900 + g as u64 * 7919);
         let t0 = std::time::Instant::now();
-        let (r, rec) = simulate_recorded(&la, &lb, &w.rules, &mut rng);
+        let (r, rec) = if let Ok(spec) = std::env::var("HANDS_TRACE")
+            && spec.split(':').next().and_then(|s| s.parse::<usize>().ok()) == Some(g)
+        {
+            // The configuration of the engine's own tests.
+            let b2 = {
+                let b = (g * 5 + 1 + g / 12) % 12;
+                if g % 12 == b { (b + 1) % 12 } else { b }
+            };
+            let hl = basketman_core::league::lineup(&w.teams[g % 12], &w.players);
+            let al = basketman_core::league::lineup(&w.teams[b2], &w.players);
+            simulate_recorded(&hl, &al, &w.rules, &mut Rng::new(300 + g as u64))
+        } else {
+            simulate_recorded(&la, &lb, &w.rules, &mut rng)
+        };
         secs += t0.elapsed().as_secs_f64();
+        if let Ok(spec) = std::env::var("HANDS_TRACE") {
+            let mut it = spec.split(':');
+            let (tg, tt): (usize, f32) = (it.next().and_then(|s| s.parse().ok()).unwrap_or(0), it.next().and_then(|s| s.parse().ok()).unwrap_or(0.0));
+            if tg == g {
+                for f in &rec.frames {
+                    if f.time > tt - 1.5 && f.time < tt + 0.5 {
+                        println!("t {:.2} cut {} holder {:?} ball {:.1},{:.1} z {:.2} offense {}", f.time, f.cut, f.holder, f.ball.x, f.ball.y, f.ball_height, f.offense);
+                    }
+                }
+                for e in &rec.events {
+                    if e.time > tt - 3.0 && e.time < tt + 0.5 {
+                        println!("event {:.2} {:?}", e.time, e.kind);
+                    }
+                }
+            }
+        }
         poss += (r.possessions[0] + r.possessions[1]) as u32;
         for side in 0..2 {
             let team_pts: u32 = r.boxes[side].iter().map(|(_, l)| l.pts as u32).sum();

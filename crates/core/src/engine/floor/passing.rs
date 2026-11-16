@@ -7,6 +7,7 @@
 
 use super::*;
 use crate::engine::hands::{self, LEFT, RIGHT};
+use crate::court::BOARD_HIGH;
 use crate::replay::{Dribble, HandKind, PassKind, PassOutcome, TurnoverKind};
 
 /// Metres of aim error at no distance, and per metre thrown, for a chest
@@ -334,6 +335,20 @@ impl Game {
                 safe *= 1.0 - 0.55 * k * k;
             }
         }
+        // Through the glass is no way to throw it.
+        {
+            let mut tau = 0.0;
+            let mut last = plan.path.at(0.0);
+            while tau < plan.dur {
+                tau += 0.03;
+                let (bp, bz) = plan.path.at(tau);
+                if last.0.y >= BOARD_Y && bp.y < BOARD_Y && bp.x.abs() < BOARD_HALF && bz > BOARD_LOW && bz < BOARD_HIGH {
+                    safe *= 0.2;
+                    break;
+                }
+                last = (bp, bz);
+            }
+        }
         let mut risk = 1.0 - safe;
         // Even an open lane has a ball that can be fumbled or thrown wide.
         let len = from.dist(plan.aim);
@@ -509,7 +524,7 @@ impl Game {
         let ey = shot::gauss(&mut self.rng) * sigma;
         let ez = shot::gauss(&mut self.rng) * sigma * 0.5;
         let aim_err = v((aim.x + ex).clamp(-7.35, 7.35), (aim.y + ey).clamp(0.2, LENGTH - 0.2));
-        let plan = self.plan_pass(kind, rel, aim_err, (sp.z + ez).clamp(0.5, 2.9));
+        let plan = self.plan_pass(kind, rel, aim_err, (sp.z + ez).clamp(0.5, 2.6));
         // The defenders see it go: who goes for it, and where.
         let mut attempt = [None; 5];
         for dk in 0..5 {
@@ -563,11 +578,32 @@ impl Game {
         let mut entered = th.entered;
         let t1 = f.t;
         let t0 = (t1 - DT).max(0.0);
+        let mut before = path.at(t0);
         for s in 1..=steps {
             let u = s as f32 / steps as f32;
             let ts = t0 + (t1 - t0) * u;
             let (bp, bz) = path.at(ts);
             let ball = v3(bp.x, bp.y, bz);
+            // The glass: a ball that reaches the backboard is off it.
+            if before.0.y >= BOARD_Y
+                && bp.y < BOARD_Y
+                && bp.x.abs() < BOARD_HALF
+                && bz > BOARD_LOW
+                && bz < BOARD_HIGH
+            {
+                let (_, _, bv, bvz) = path.state(ts);
+                self.cut_log(ts - f.t);
+                self.play.flight = None;
+                self.play.thrown = None;
+                self.note_pass(PassOutcome::Missed, 0.0, None);
+                self.play.scramble = Some(Scramble { passer: from, to, tipped_by: None, kind: th.kind, cause: TurnoverKind::BadPass });
+                let mut np = Path::new();
+                np.fall_open(v(bp.x, BOARD_Y + 0.05), bz, -bvz.abs() * 0.3, v(bv.x * 0.4, bv.y.abs() * 0.4 + 0.5));
+                self.play.ball = bp;
+                self.play.ball_h = bz;
+                return self.go_live(np, 0.0, false);
+            }
+            before = (bp, bz);
             // A defender's hand on it.
             let mut hit: Option<(usize, f32)> = None;
             for dk in 0..5 {
@@ -734,7 +770,7 @@ impl Game {
             self.play.flight = None;
             self.play.thrown = None;
             self.play.ball = bp;
-            self.play.ball_h = bz;
+            self.play.ball_h = bz.min(2.4);
             return self.land(f);
         }
         // A bobble: it comes off his hands and is loose where he stands.
@@ -821,7 +857,7 @@ impl Game {
         self.play.after = None;
         let (bp, bz, _, _) = a.path.state(ts);
         self.play.ball = bp;
-        self.play.ball_h = bz;
+        self.play.ball_h = bz.min(2.4);
         if who >= 5 {
             // A defender has it: the pass was lost.
             let dk = who - 5;
