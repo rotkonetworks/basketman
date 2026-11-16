@@ -219,3 +219,50 @@ themselves significant.
   the training/scouting layers are not explored. Drawn sets only by random jitter of spots and runs.
 * The equilibrium solver reads noisy matrices; supports are upper bounds.
 * Hidden causes in findings 1 to 4 are readings of the code, not experiments.
+
+## After physics shots (2026-11-16)
+
+Quick mode, seed 1, 16-team league, `basketman balance` on the branch `physics-shots` after the ball
+physics for shots, tip-ins, the lane rule and the exploit fix described below. Measured, not tuned.
+Report: 16 of 23 checks fail (16 of 23 before as well, but not the same ones).
+
+* **Matchup equilibrium.** Before: Iso/Pack 50%, Iso/3-2 40%, Iso/Man 10%. Now: **Iso/3-2 67%, Post/3-2
+  27%, Motion/3-2 7%** (effective 1.9 systems, support 3). Strongest system Iso/3-2 70.5 +- 2.0
+  (was Iso/Pack 58.4), then Post/3-2 69.5, Iso/2-3 64.4, Motion/3-2 63.4; weakest PnR/Switch 25.6
+  (was 43.8), PnR/Man 30.7. Spread 44.8 points (was 14.6). The zones, above all the 3-2, are now the
+  best defenses; Pack line is no longer on top. Pooled offense-by-defense table: Isolation has the best
+  ppp against every defense again (1.002 to 1.121), the 3-2 allows least to every offense
+  (0.849 to 1.002), offense and defense equilibria are each a single choice (Isolation 100%).
+* **Dominated systems.** **23 of 25** (was 21 of 25), almost all by Iso/3-2; only Iso/3-2 and Iso/2-3
+  are at least even against everything.
+* **Sliders** (lift over neutral, +-4.9): tempo 20 +5.8 (was +11.3), three-point bias 15 +6.0 (20: +4.2;
+  was +12.2), crash has its optimum at neutral and 20 costs 6.2 (was +9.8 at 20: no longer a free
+  lever), aggression best at 5 (+2.7; 20 costs 7.2), press never helps (three-quarter -7.5, full
+  court -9.5; was +5.5), briefs: Attack the rim +5.2, Move the ball -13.3. Starters-only minutes cost
+  about 18 points, deep rotations are +1.3. `no-always-best-setting` and `sliders-matter` pass.
+* **Other readings.** Familiarity 0 costs 38.3 points (was 31, target 5 to 25). A talent gap of
+  d = 0.5 wins 57.8% (was 67.2%, target 60%). Seasons: r = 0.54 between squad quality and win % (was
+  0.79; target 0.55 to 0.85), spread of win % 0.236.
+* **The drawn-play exploit.** Before this branch: Post up with the big man at (1.1, 1.7) won 88 to 90%
+  against the 25 systems. On the physics engine as merged it was *worse*: with `basketman balance
+  --sections exploit` (six units against each of the 25 systems, four games a unit) the big man at
+  (1.1, 1.7) won **93.7 / 94.2 / 97.8 / 97.5 / 94.7%** with Man / Switch / 2-3 / 3-2 / Pack, at (0.0, 1.2)
+  **99.8 to 100%** (140 points a game), the stock set 52 to 69%. Why: the man standing a metre from
+  the rim was fed (entry pass risk is a few percent), could not be hurt for camping (only the roller had a
+  three-second rule) and finished at 66 to 93% from a point where the shot is almost a tip-in; the defender
+  on him stood behind him. The fixes are rules of the game, not odds: (1) the offensive three-second
+  rule for every attacker (a turnover, `TurnoverKind::ThreeSeconds`; the man steps out at 2.2 s and gives
+  up that spot for the play; the ball handler going to the basket or posting is exempt); (2) a man planted
+  within 2.4 m of the rim with the ball out on the floor is fronted by his defender; (3) a pass into a man
+  at the rim is judged more crowded the closer he is to the rim; (4) a drawn spot closer than 2.1 m to the
+  hoop is moved out along the line from the rim (stock sets untouched). Test:
+  `a_man_drawn_under_the_basket_is_not_a_cheat_code` (it fails with (1) and (4) off: 1.43 points a possession against
+  1.17 stock). After: **59.8 / 56.0 / 72.3 / 74.2 / 59.3%** with the big man drawn at (1.1, 1.7)
+  (identical at (0.0, 1.2), since both are moved to the same place), against stock 57.5 / 49.7 / 63.2 / 71.0 / 57.8.
+  The quick search no longer finds it: best found 73.2 +- 3.0 (Post/3-2 with sliders, 6.8 +- 4.3 over Iso/3-2, 66.5);
+  moving only the big man's spot is worth +0.2. `no-exploit` still fails on the +6.8 (limit 4) and on
+  stat lines (threes attempted 5.2 for, free throws 26.9, blocks 10.4 a game for the found strategy).
+* **What this reading does not say.** The matrix moved a lot (zones up, pressure and pace down) and this
+  run cannot tell which change caused which: the shot physics, the tip-ins, the lane rule and fronting all
+  went in between the pre-physics reading and this one. Do not tune from it before a reading with the
+  changes in separate runs.
