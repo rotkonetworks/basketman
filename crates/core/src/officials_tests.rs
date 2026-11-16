@@ -274,3 +274,33 @@ fn a_game_with_challenges_replays_exactly_from_its_log() {
     }
     assert!(found, "no challenge was made in six games");
 }
+
+#[test]
+fn a_review_allows_only_the_challenge_and_only_once() {
+    use crate::league::Refusal;
+    let mut seen = 0;
+    for seed in 0..12 {
+        let mut w = World::generate(seed, 8);
+        let mut live = w.kickoff(0).unwrap();
+        // Outside a review there is nothing to challenge.
+        assert_eq!(live.check(&LiveInput::Challenge), Err(Refusal::NothingToChallenge));
+        let mut spent = false;
+        let mut guard = 0u32;
+        while !live.game.is_over() && guard < 400_000 {
+            guard += 1;
+            if let Some(Pause::Review(_)) = live.step() {
+                seen += 1;
+                assert_eq!(live.stoppage(), Some(crate::league::Stoppage::Review));
+                assert_eq!(live.check(&LiveInput::Timeout), Err(Refusal::ReviewOnly));
+                assert_eq!(live.check(&LiveInput::AutoSubs(true)), Err(Refusal::ReviewOnly));
+                assert_eq!(live.talks_left(), (0, 0));
+                assert!(!spent, "a second review was offered after the challenge was spent");
+                if live.try_input(LiveInput::Challenge).is_ok() {
+                    spent = true;
+                    assert_eq!(live.game.challenges_left(live.side), 0);
+                }
+            }
+        }
+    }
+    assert!(seen > 0, "no review came up in twelve games");
+}

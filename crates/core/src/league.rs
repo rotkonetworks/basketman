@@ -1619,8 +1619,11 @@ mod tests {
     /// Step to the next stoppage (or the end).
     fn to_stop(live: &mut LiveRound) -> Option<Pause> {
         while !live.game.is_over() {
-            if let Some(p) = live.step() {
-                return Some(p);
+            match live.step() {
+                // A call under review is not a stoppage for tactics or
+                // talk: stepping on lets it stand.
+                None | Some(Pause::Review(_)) => {}
+                Some(p) => return Some(p),
             }
         }
         None
