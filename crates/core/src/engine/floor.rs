@@ -99,6 +99,8 @@ const PUSH_OFF_INBOUND: f32 = 0.35;
 const POST_HOOK_FROM: f32 = 1.1;
 /// How high a floater goes, as a share of the best his Vertical allows.
 const FLOATER_LIFT: f32 = 0.75;
+/// Closer to the rim than this at the release, a floater is a layup.
+const FLOATER_MIN_RELEASE: f32 = 0.9;
 /// How much more of a contest a defender running a shooter down gives.
 const CHASE: f32 = 0.55;
 /// Fatigue above which a man does not run the floor.
@@ -4555,6 +4557,10 @@ impl Game {
             });
         let to_rim = p.dist(HOOP);
         if plan.style == Style::Dunk && to_rim > DUNK_RANGE {
+            plan.style = Style::Layup;
+        }
+        // A floater that carried him under the rim is a layup.
+        if plan.style == Style::Floater && to_rim < FLOATER_MIN_RELEASE {
             plan.style = Style::Layup;
         }
         self.play.shot = Some(plan);

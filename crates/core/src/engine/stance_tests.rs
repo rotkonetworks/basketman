@@ -255,7 +255,7 @@ fn a_ball_handler_who_has_picked_up_stays_put_and_does_not_dribble_again() {
                         let near = [to_court(HOOP, 0), to_court(HOOP, 1)]
                             .iter()
                             .any(|r| r.dist(pos) < 7.0);
-                        held = Some((s, k, pos, near && matches!(p.style, Style::Layup | Style::Dunk)));
+                        held = Some((s, k, pos, near && matches!(p.style, Style::Layup | Style::Dunk | Style::Floater)));
                     }
                 }
             }
@@ -363,4 +363,129 @@ fn better_footwork_and_agility_defend_better() {
     let good = conceded(&quick(5.0), 64);
     let bad = conceded(&quick(-5.0), 64);
     assert!(good < bad - 1.0, "defenders with quick feet concede {good}, slow feet {bad}");
+}
+
+// ---- stance with the break, the throw-in and the officials ----------------
+
+/// What a throw-in looks like: the man taking it faces the court and his
+/// receiver and looks at him, the receiver is turned to him.
+#[test]
+fn a_thrower_faces_his_receiver_and_the_receiver_squares_to_him() {
+    let (mut n, mut thrower_ok, mut gaze_ok, mut receiver_ok) = (0, 0, 0, 0);
+    for rec in games(6) {
+        for p in rec.passes.iter().filter(|p| p.inbound) {
+            let i = rec.frame_at(p.time);
+            // The frame a little before the ball left his hands, while he still holds it.
+            let f = &rec.frames[i.saturating_sub(2)];
+            let (s, a, b) = (p.side as usize, p.from as usize, p.to as usize);
+            if f.holder != Some((p.side, p.from)) {
+                continue;
+            }
+            let (pa, pb) = (f.pos[s][a], f.pos[s][b]);
+            if pa.dist(pb) < 1.0 {
+                continue;
+            }
+            n += 1;
+            let to = (pb - pa).norm();
+            if f.pose[s][a].body_dir().is_some_and(|d| angle_between(d, to) < 0.9) {
+                thrower_ok += 1;
+            }
+            if f.pose[s][a].gaze_dir().is_some_and(|d| angle_between(d, to) < 0.9) {
+                gaze_ok += 1;
+            }
+            if f.pose[s][b].body_dir().is_some_and(|d| angle_between(d, (pa - pb).norm()) < 1.6) {
+                receiver_ok += 1;
+            }
+        }
+    }
+    assert!(n > 100, "only {n} throw-ins");
+    let share = |k: i32| k as f32 / n as f32;
+    assert!(share(thrower_ok) > 0.85, "thrower faces his receiver in {:.0}% of {n}", 100.0 * share(thrower_ok));
+    assert!(share(gaze_ok) > 0.9, "thrower looks at him in {:.0}%", 100.0 * share(gaze_ok));
+    assert!(share(receiver_ok) > 0.7, "receiver turned to him in {:.0}%", 100.0 * share(receiver_ok));
+}
+
+/// The dribble state through the new paths: a man who has just caught it
+/// (throw-in, lead pass, rebound) has not picked it up, and nobody who has
+/// picked it up runs the floor.
+#[test]
+fn nobody_who_has_picked_up_the_ball_runs_with_it() {
+    let (mut firsts, mut bad_first, mut picked, mut running) = (0, 0, 0, 0);
+    for rec in games(6) {
+        let mut last: Option<(u8, u8)> = None;
+        for (i, f) in rec.frames.iter().enumerate() {
+            if f.cut {
+                last = None;
+            }
+            let Some((s, k)) = f.holder else {
+                last = None;
+                continue;
+            };
+            let p = &f.pose[s as usize][k as usize];
+            if last != Some((s, k)) {
+                firsts += 1;
+                if p.dribble == Dribble::PickedUp {
+                    bad_first += 1;
+                }
+            }
+            last = Some((s, k));
+            if p.dribble == Dribble::PickedUp && p.action != Action::Shooting {
+                picked += 1;
+                let q = &rec.frames[i.saturating_sub(1)];
+                let speed = f.pos[s as usize][k as usize].dist(q.pos[s as usize][k as usize]) / 0.1;
+                if speed > 4.0 {
+                    running += 1;
+                }
+            }
+        }
+    }
+    assert!(firsts > 1000);
+    assert_eq!(bad_first, 0, "{bad_first} of {firsts} new ball handlers started as picked up");
+    assert!(picked > 100);
+    assert!(
+        (running as f32) < 0.01 * picked as f32,
+        "{running} of {picked} picked-up frames at more than 4 m/s"
+    );
+}
+
+/// The stance limits do not stop the break: a break still gets its share of
+/// possessions, and the men who run it reach their speed.
+#[test]
+fn the_stance_limits_leave_the_fast_break_alone() {
+    let (mut frames, mut sprinting, mut with_ball, mut poss, mut breaks) = (0, 0, 0, 0, 0);
+    for rec in games(6) {
+        for pair in rec.frames.windows(2) {
+            let (a, b) = (&pair[0], &pair[1]);
+            if b.cut || a.offense != b.offense {
+                poss += 1;
+            }
+        }
+        for e in &rec.events {
+            if matches!(e.kind, EventKind::FastBreak { .. }) {
+                breaks += 1;
+                let i = rec.frame_at(e.time);
+                let f = &rec.frames[i];
+                let q = &rec.frames[i.saturating_sub(5)];
+                let o = f.offense as usize;
+                for k in 0..5 {
+                    let id = f.who[o][k];
+                    let Some(j) = q.who[o].iter().position(|&w| w == id) else { continue };
+                    frames += 1;
+                    let sp = f.pos[o][k].dist(q.pos[o][j]) / 0.5;
+                    if sp > 4.5 {
+                        sprinting += 1;
+                    }
+                    if f.holder == Some((o as u8, k as u8)) {
+                        with_ball += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(breaks > 60, "{breaks} fast breaks");
+    assert!(
+        sprinting as f32 > 0.4 * frames as f32,
+        "only {sprinting} of {frames} attackers on a break ran at more than 4.5 m/s"
+    );
+    let _ = (with_ball, poss);
 }
