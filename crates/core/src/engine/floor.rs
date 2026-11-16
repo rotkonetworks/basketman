@@ -3028,7 +3028,10 @@ impl Game {
     /// on a man who has been shooting, and his look is the tighter for it.
     fn look_seen(&self, k: usize) -> (ShotKind, f32, Option<usize>) {
         let (kind, c, near) = self.look(k);
-        (kind, (c + HEAT_CONTEST * self.heat_of(k)).min(1.4), near)
+        // Nobody shoots from beyond the top of the arc unless the clock makes
+        // him: a catch up the floor is a man to bring the ball into the set.
+        let far = if self.op(k).y > 12.5 { 1.4 } else { 0.0 };
+        (kind, (c + HEAT_CONTEST * self.heat_of(k) + far).min(1.4), near)
     }
 
     fn heat_of(&self, k: usize) -> f32 {
