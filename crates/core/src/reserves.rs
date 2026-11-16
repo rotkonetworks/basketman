@@ -190,6 +190,18 @@ impl World {
             self.reserve_table = vec![Standing::default(); self.teams.len()];
         }
         let regulation = (self.rules.periods as u32 * self.rules.period_secs) as f32;
+        // Each game touches only its own two clubs' players, so all of the
+        // round's games can be played at once and their results taken in
+        // order. Forfeits first, then the games, across threads when the
+        // build has them.
+        struct Game {
+            round: usize,
+            home: TeamId,
+            away: TeamId,
+            seed: u64,
+            sides: [Vec<PlayerId>; 2],
+        }
+        let mut games: Vec<Game> = Vec::new();
         for (&i, &seed) in played.iter().zip(&seeds) {
             let f = &self.fixtures[i];
             if f.playoff {
@@ -207,33 +219,44 @@ impl World {
                 }
                 continue;
             }
-            let result = {
-                let squad = |side: &[PlayerId]| -> Vec<&Player> {
-                    side.iter().map(|&p| &self.players[p as usize]).collect()
-                };
-                let (a, b) = (squad(&sides[0]), squad(&sides[1]));
-                let (ta, tb) = (Tactics::auto(&a), Tactics::auto(&b));
-                let line = |t: &Tactics| -> Vec<&Player> {
-                    t.rotation
-                        .iter()
-                        .map(|s| &self.players[s.player as usize])
-                        .collect()
-                };
-                // Thrown together on the day: nobody knows the system well.
-                let lineup = |t| Lineup {
-                    tactics: t,
-                    players: line(t),
-                    familiarity: 0.6,
-                    belief: 0.55,
-                    coach: 8,
-                };
-                simulate_game(
-                    &lineup(&ta),
-                    &lineup(&tb),
-                    &self.rules,
-                    &mut Rng::new(seed ^ 0x2E5E_27E5),
-                )
+            games.push(Game { round, home, away, seed, sides });
+        }
+        let play = |g: &Game| {
+            let squad = |side: &[PlayerId]| -> Vec<&Player> {
+                side.iter().map(|&p| &self.players[p as usize]).collect()
             };
+            let (a, b) = (squad(&g.sides[0]), squad(&g.sides[1]));
+            let (ta, tb) = (Tactics::auto(&a), Tactics::auto(&b));
+            let line = |t: &Tactics| -> Vec<&Player> {
+                t.rotation
+                    .iter()
+                    .map(|s| &self.players[s.player as usize])
+                    .collect()
+            };
+            // Thrown together on the day: nobody knows the system well.
+            let lineup = |t| Lineup {
+                tactics: t,
+                players: line(t),
+                familiarity: 0.6,
+                belief: 0.55,
+                coach: 8,
+            };
+            simulate_game(
+                &lineup(&ta),
+                &lineup(&tb),
+                &self.rules,
+                &mut Rng::new(g.seed ^ 0x2E5E_27E5),
+            )
+        };
+        #[cfg(feature = "parallel")]
+        let results: Vec<_> = {
+            use rayon::prelude::*;
+            games.par_iter().map(play).collect()
+        };
+        #[cfg(not(feature = "parallel"))]
+        let results: Vec<_> = games.iter().map(play).collect();
+        for (g, result) in games.iter().zip(results) {
+            let (round, home, away) = (g.round, g.home, g.away);
             let mut star: Option<(PlayerId, BoxLine)> = None;
             for (side, team) in [home, away].into_iter().enumerate() {
                 let s = &mut self.reserve_table[team];
