@@ -1633,8 +1633,7 @@ mod tests {
         let away = lineup(&w.teams[1], &w.players);
         let mut airborne = 0;
         let mut shots_seen = 0;
-        let (mut touching, mut apart) = (0u32, 0u32);
-        for seed in 0..3 {
+        for seed in 0..30 {
             let (res, rec) = simulate_recorded(&home, &away, &w.rules, &mut Rng::new(seed));
             let player = |f: &crate::replay::Frame, s: usize, k: usize| {
                 &w.players[res.boxes[s][f.who[s][k] as usize].0 as usize]
@@ -1659,24 +1658,22 @@ mod tests {
                             let q = player(f, s2 as usize, k2 as usize);
                             let reach = radius(&p.body) + radius(&q.body);
                             let d = f.pos[s][k].dist(f.pos[s2 as usize][k2 as usize]);
-                            // Two bodies that touched may be a little apart by
-                            // the end of the tick when a third pushed one of
-                            // them (a scramble under the basket): rare, and small.
-                            touching += 1;
-                            if d > reach + 0.05 {
-                                apart += 1;
-                            }
-                            assert!(d <= reach + 0.25, "{d} > {reach}");
+                            assert!(d <= reach + 0.05, "{d} > {reach}");
                         }
                     }
                 }
             }
             // Every shot has its shooter up for it around the time it is taken.
             for e in &rec.events {
-                let EventKind::Shot { who, .. } = &e.kind else {
+                let EventKind::Shot { who, source, .. } = &e.kind else {
                     continue;
                 };
                 shots_seen += 1;
+                // A tip-in is a shot by a man in his rebounding jump.
+                let up = |a: Action| {
+                    a == Action::Shooting
+                        || (*source == crate::replay::Source::Putback && a == Action::Rebounding)
+                };
                 let tagged = rec
                     .frames
                     .iter()
@@ -1684,7 +1681,7 @@ mod tests {
                     .any(|f| {
                         let s = e.offense as usize;
                         (0..5).any(|k| {
-                            player(f, s, k).id == *who && f.pose[s][k].action == Action::Shooting
+                            player(f, s, k).id == *who && up(f.pose[s][k].action)
                         })
                     });
                 assert!(tagged, "no shooting pose near the shot at {}", e.time);
@@ -1694,7 +1691,6 @@ mod tests {
             airborne > 100 && shots_seen > 100,
             "{airborne} {shots_seen}"
         );
-        assert!(touching > 500 && apart * 100 < touching, "{apart} of {touching} touches apart");
     }
 
     /// Fouls carry what they were for, offensive ones are turnovers, the

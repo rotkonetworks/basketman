@@ -92,18 +92,24 @@ fn every_make_goes_through_the_ring_and_no_miss_does() {
     let rims = rims();
     let (mut makes, mut misses) = (0, 0);
     for rec in games(6) {
-        for e in &rec.events {
+        for (n, e) in rec.events.iter().enumerate() {
             let EventKind::Shot { made, .. } = &e.kind else {
                 continue;
             };
             // The ball's own recorded path, a few milliseconds at a time (the
             // 10 Hz frames are too coarse to see a rattle-in): does it cross
             // the height of the ring going down, inside it?
+            // The ball is this shot's until somebody shoots it again: a tip-in
+            // of the miss is a shot of its own, with its own event.
+            let until = rec.events[n + 1..]
+                .iter()
+                .find(|x| matches!(x.kind, EventKind::Shot { .. }))
+                .map_or(e.time + 6.0, |x| x.time.min(e.time + 6.0));
             let rim = rims[e.offense as usize];
             let mut through = false;
             let mut last: Option<(Vec2, f32)> = None;
             let mut t = e.time;
-            while t < e.time + 6.0 {
+            while t < until {
                 let Some(now) = rec.ball_at(t) else {
                     if t > e.time + 0.3 {
                         break;
@@ -383,17 +389,23 @@ fn the_recorded_ball_path_is_the_physical_one() {
         for w in rec.ball_arcs.windows(2) {
             assert!(w[1].t0 >= w[0].t0 - 1e-3, "arcs out of order");
         }
-        for e in &rec.events {
+        for (n, e) in rec.events.iter().enumerate() {
             let EventKind::Shot { made, blocked_by, .. } = &e.kind else {
                 continue;
             };
+            // The ball is this shot's until somebody shoots it again: a tip-in
+            // of the miss is a shot of its own, with its own event.
+            let until = rec.events[n + 1..]
+                .iter()
+                .find(|x| matches!(x.kind, EventKind::Shot { .. }))
+                .map_or(e.time + 6.0, |x| x.time.min(e.time + 6.0));
             let rim = rims[e.offense as usize];
             // Sample the recorded path finely from the release for 6 s.
             let mut t = e.time;
             let mut last: Option<(Vec2, f32)> = None;
             let mut down_through = false;
             let mut iron_dive = false;
-            while t < e.time + 6.0 {
+            while t < until {
                 let Some((p, z)) = rec.ball_at(t) else {
                     // The ball was taken by a hand: the flight is over.
                     if t > e.time + 0.2 {
@@ -410,7 +422,9 @@ fn the_recorded_ball_path_is_the_physical_one() {
                     iron_dive = true;
                 }
                 if let Some((q, y)) = last {
-                    if y > RIM_HEIGHT - 0.2 && z <= RIM_HEIGHT - 0.2 && q.dist(rim) < RING_RADIUS && p.dist(rim) < RING_RADIUS {
+                    // Down through the plane of the ring, inside it: a ball tipped
+                    // about under the basket never crossed it from above.
+                    if y > RIM_HEIGHT && z <= RIM_HEIGHT && q.dist(rim) < RING_RADIUS && p.dist(rim) < RING_RADIUS {
                         down_through = true;
                     }
                     // Per 2 ms the ball does not jump.
@@ -439,3 +453,69 @@ fn the_recorded_ball_path_is_the_physical_one() {
 
 
 
+
+/// A man hit in the act can still score (an and-one), and an attacker
+/// who gets a hand on a miss at the ring can put it back in (a tip-in):
+/// both happen, at rates a basketball person would believe.
+#[test]
+fn and_ones_and_tip_ins_happen_at_believable_rates() {
+    let n = 20;
+    let (mut and_ones, mut fouled, mut tip_ins, mut tip_fouls) = (0, 0, 0, 0);
+    let mut by_kind = [(0, 0); 3];
+    for rec in games(n) {
+        for (i, e) in rec.events.iter().enumerate() {
+            let EventKind::Shot {
+                who,
+                made,
+                fouled: f,
+                kind,
+                source,
+                ..
+            } = &e.kind
+            else {
+                continue;
+            };
+            if *f {
+                fouled += 1;
+                and_ones += *made as u32;
+                let k = match kind {
+                    crate::court::ShotKind::Rim => 0,
+                    crate::court::ShotKind::Mid => 1,
+                    crate::court::ShotKind::Three => 2,
+                };
+                by_kind[k].0 += 1;
+                by_kind[k].1 += *made as u32;
+            }
+            // A tip-in is its own board and basket: the same man, the same instant.
+            let tip = *source == crate::replay::Source::Putback
+                && i > 0
+                && matches!(&rec.events[i - 1].kind,
+                    EventKind::Rebound { who: w, offensive: true } if w == who)
+                && (rec.events[i - 1].time - e.time).abs() < 0.05;
+            if tip && *made {
+                tip_ins += 1;
+                tip_fouls += *f as u32;
+            }
+        }
+    }
+    let per = |x: u32| x as f32 / n as f32;
+    // About a quarter to a half of shooting fouls are on shots that go in
+    // (nearly all at the rim), a handful a game.
+    assert!(
+        per(and_ones) > 1.5 && per(and_ones) < 6.0,
+        "{:.2} and-ones a game of {:.2} fouled shots",
+        per(and_ones),
+        per(fouled)
+    );
+    assert!(
+        and_ones * 5 > fouled && and_ones * 2 < fouled,
+        "{and_ones} of {fouled} fouled shots went in"
+    );
+    assert!(by_kind[1].1 > 0, "no and-one from mid-range in {n} games: {by_kind:?}");
+    // Tip-ins: a few a game, never most of the offensive boards.
+    assert!(
+        per(tip_ins) > 0.3 && per(tip_ins) < 4.0,
+        "{:.2} tip-ins a game ({tip_fouls} fouled)",
+        per(tip_ins)
+    );
+}

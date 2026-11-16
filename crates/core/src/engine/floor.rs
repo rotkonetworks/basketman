@@ -27,13 +27,13 @@ use crate::tactics::{Brief, DefenseScheme, OffenseSet, Press};
 /// Scale of the error of an average shooter's open shot in play, against
 /// the free throw's `FT_SCALE`: a live shot is taken on the run of a play,
 /// with a crowd and a clock.
-const GAME: f32 = 1.12;
+const GAME: f32 = 1.14;
 /// What a live two, a three and a finish at the rim add or take off the
 /// error, on top of their own base: the part of in-game difficulty that
 /// the base error shape does not carry.
 const MID_SCALE: f32 = 0.96;
 const THREE_SCALE: f32 = 0.96;
-const RIM_SCALE: f32 = 1.27;
+const RIM_SCALE: f32 = 1.22;
 /// What each point of rating above 10 takes off the error of a jump shot,
 /// of a finish at the rim, and of a free throw.
 const SKILL_SLOPE: f32 = 0.035;
@@ -60,7 +60,13 @@ const COMPOSURE: f32 = 0.004;
 const RHYTHM: f32 = 0.06;
 const HOME: f32 = 0.016;
 /// A hand on the shooter that was called, and one that was not.
-const FOULED_ERR: f32 = 25.0;
+const FOULED_ERR: f32 = 2.5;
+const FOULED_JUMPER: f32 = 1.5;
+/// A tip-in at the ring: how much harder than a layup (a ball in the air, a
+/// hand's width of control), and how close a defender has to be to be in the way.
+const TIP_SCALE: f32 = 1.0;
+const TIP_CROWD: f32 = 1.5;
+const TIP_IN_RANGE: f32 = 0.8;
 const CONTACT_ERR: f32 = 1.35;
 /// A defender who has not jumped still has a hand up: how much of a
 /// contest he is, against one in the air.
@@ -121,7 +127,7 @@ const FT_LINEUP: f32 = 3.0;
 const SPOT_NEAR: f32 = 0.5;
 /// Seconds from a dead ball to the ball being in play, counting what the ball
 /// spends dropping through the net (it was 3.6 when that took no time).
-const INBOUND_WAIT: f32 = 3.2;
+const INBOUND_WAIT: f32 = 2.95;
 /// How much lower the bar is for a man who has just taken an offensive
 /// board: the ball is already at the basket and he goes straight back up.
 const PUTBACK_EDGE: f32 = 0.25;
@@ -3598,7 +3604,7 @@ impl Game {
         }
         // A hand on the arm or the body: whether or not it was called, he felt it.
         if verdict.fouled {
-            m *= FOULED_ERR;
+            m *= if rim { FOULED_ERR } else { FOULED_JUMPER };
         } else if verdict.contact {
             m *= CONTACT_ERR;
         }
@@ -4415,6 +4421,18 @@ impl Game {
         // Tipped: it goes up and away off his fingers and is live again.
         self.play.tips += 1;
         self.play.def_touch = who >= 5;
+        // An attacker's hand on a ball at the ring that he cannot hold is a
+        // tip-in: he puts it back up towards the basket, and it is a shot like
+        // any other, only a rushed one.
+        if who < 5
+            && !free_throw
+            && bp.dist(HOOP) < TIP_IN_RANGE
+            && bz > RIM_HEIGHT - 0.3
+            && bz < RIM_HEIGHT + 0.9
+            && self.lift_at(self.play.o, who, 0.0) > 0.0
+        {
+            return self.tip_in(a, ts, (bp, bz), who);
+        }
         // A direction from a unit square, no trigonometry; a ball knocked
         // about off the glass goes away from the basket (a tip is not a
         // shot: it is not scored if it happens to drop).
@@ -4435,6 +4453,122 @@ impl Game {
         // The rest of this tick on the new path.
         let skip = a.t - ts;
         self.log_path(&flown.path, 0.0, -skip);
+        self.play.after = Some(After {
+            kind: a.kind,
+            path: flown.path,
+            t: skip,
+            end: flown.path.total(),
+        });
+        self.plan_chase(&flown.path, skip);
+        None
+    }
+
+    /// A tip at the ring by attacker `who`: a launch from where his hand
+    /// met the ball, aimed at the ring, with the error of a hurried finish
+    /// (his close touch and rebounding, grown by the hands that are on him).
+    /// Whether it goes in is up to the ball.
+    fn tip_in(&mut self, a: After, ts: f32, at: (Vec2, f32), who: usize) -> Option<End> {
+        let (bp, bz) = at;
+        let o = self.play.o;
+        let finish = 0.4 * self.oe(who, Attr::OffRebound)
+            + 0.4 * self.oe(who, Attr::CloseShot)
+            + 0.2 * self.oe(who, Attr::Vertical);
+        // Hands and bodies around the ball.
+        let mut c = 0.0f32;
+        for dk in 0..5 {
+            let d = self.m[1 - o][dk].pos.dist(bp);
+            if d < TIP_CROWD {
+                c += 0.5 * (1.0 - d / TIP_CROWD);
+            }
+        }
+        let c = c.min(1.2);
+        let m = (1.0 - FINISH_SLOPE * (finish - 10.0)).clamp(0.4, 2.0)
+            * TIP_SCALE
+            * (1.0 + CONTEST_RIM * c);
+        // A hand on a man going up for it: the same whistle as for any shot.
+        let near = (0..5)
+            .map(|dk| (dk, self.m[1 - o][dk].pos.dist(bp)))
+            .filter(|&(_, d)| d < TIP_CROWD)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(dk, _)| dk);
+        let contact = near.is_some_and(|dk| {
+            let raw = self.foul_chance(ShotKind::Rim, c.min(1.0))
+                * self.def().foul_mult(self.def().on[dk])
+                * self.off().draw_mult(self.off().on[who])
+                * self.verticality(dk, bp)
+                / CALL_BASE;
+            self.rng.chance(raw.min(0.95))
+        });
+        let fouled = contact && self.called(1.0);
+        let m = if fouled {
+            m * FOULED_ERR
+        } else if contact {
+            m * CONTACT_ERR
+        } else {
+            m
+        };
+        let start = ball::clear_start(v3(bp.x, bp.y, bz));
+        let (ideal, _) = shot::ideal(start, Style::Layup);
+        let (lat, depth) = shot::base(Style::Layup, true, bp.dist(HOOP));
+        let e = shot::Errors::at_rim(bp.dist(HOOP), lat * m, depth * m);
+        let launch = shot::perturb(ideal, e, &mut self.rng);
+        let flown = ball::fly(Ball { p: start, v: launch }, &[]);
+        let made = flown.made;
+        if made || !fouled {
+            self.oline(who).fga += 1;
+        }
+        let id = self.oid(who);
+        if made {
+            // A tip-in is the rebound and the basket at once: the book
+            // gives him the board.
+            self.oline(who).orb += 1;
+            self.event(EventKind::Rebound {
+                who: id,
+                offensive: true,
+            });
+        }
+        self.event(EventKind::Shot {
+            who: id,
+            kind: ShotKind::Rim,
+            source: Source::Putback,
+            made,
+            contest: c.min(1.0),
+            defender: near.map(|dk| self.did(dk)),
+            assist: None,
+            blocked_by: None,
+            fouled,
+        });
+        if fouled && let Some(dk) = near {
+            self.defensive_foul(dk, who, if made { 1 } else { 2 }, FoulKind::Shooting);
+        }
+        self.cut_log(ts - a.t);
+        let skip = a.t - ts;
+        self.log_path(&flown.path, 0.0, -skip);
+        if made {
+            let line = self.oline(who);
+            line.fgm += 1;
+            line.pts += 2;
+            self.sides[o].score += 2;
+            self.swish = true;
+            if fouled {
+                self.play.task = [Task::Spot; 5];
+            }
+            self.after_path(
+                AfterKind::Drop {
+                    shooter: who,
+                    then: fouled as u16,
+                },
+                flown.path,
+                skip,
+            );
+            return None;
+        }
+        if fouled {
+            // Hit going up: a dead ball, and two shots.
+            self.play.task = [Task::Spot; 5];
+            self.after_path(AfterKind::Fall { shooter: who, shots: 2 }, flown.path, skip);
+            return None;
+        }
         self.play.after = Some(After {
             kind: a.kind,
             path: flown.path,

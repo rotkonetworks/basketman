@@ -687,6 +687,20 @@ struct Totals {
     charges: Vec<(u32, u32)>,
     frames: u64,
     secs: f64,
+    /// Shots on which the shooter was fouled, and how many of those went in
+    /// (and-ones), by kind; rebounds taken, offensive ones, and the putbacks
+    /// and tip-ins that followed.
+    fouled: [(u32, u32); 3],
+    rebounds: (u32, u32),
+    tipped: (u32, u32),
+    /// Seconds and counts: shot to rebound after a miss (defensive, offensive), shot to the
+    /// next shot, turnover or foul after a make, rebound to the next such event.
+    gaps: [(f64, u32); 5],
+    /// All shots by source, and the ones that drew a shooting foul.
+    foul_src: [(u32, u32); 9],
+    foul_shots: [u32; 8],
+    /// Tip-ins made and missed attempts counted by their own board.
+    tip_ins: (u32, u32),
 }
 
 /// `basketman lab stats [games]`: league-wide numbers over many games of
@@ -794,6 +808,17 @@ pub fn stats(games: usize) {
                     fouled,
                     ..
                 } => {
+                    let ki = match kind {
+                        ShotKind::Rim => 0,
+                        ShotKind::Mid => 1,
+                        ShotKind::Three => 2,
+                    };
+                    t.foul_src[*source as usize].0 += 1;
+                    t.foul_src[*source as usize].1 += *fouled as u32;
+                    if *fouled {
+                        t.fouled[ki].0 += 1;
+                        t.fouled[ki].1 += *made as u32;
+                    }
                     if *fouled && !*made {
                         continue;
                     }
@@ -814,8 +839,13 @@ pub fn stats(games: usize) {
                     by.1 += *made as u32;
                     by.2 += if *made { kind.points() as u32 } else { 0 };
                 }
-                EventKind::Foul { kind, on, .. } => {
+                EventKind::Rebound { offensive, .. } => {
+                    t.rebounds.0 += 1;
+                    t.rebounds.1 += *offensive as u32;
+                }
+                EventKind::Foul { kind, on, shots, .. } => {
                     t.fouls[*kind as usize] += 1;
+                    t.foul_shots[*kind as usize] += *shots as u32;
                     if *kind == basketman_core::replay::FoulKind::Charging {
                         t.charges.push((*on, g as u32));
                     }
@@ -830,6 +860,50 @@ pub fn stats(games: usize) {
                     }] += 1;
                 }
                 _ => {}
+            }
+        }
+        for (i, e) in rec.events.iter().enumerate() {
+            if let EventKind::Shot { who, made, source, fouled, .. } = &e.kind
+                && *source == Source::Putback
+                && *made
+                && i > 0
+                && matches!(&rec.events[i - 1].kind, EventKind::Rebound { who: w, offensive: true } if w == who)
+                && (rec.events[i - 1].time - e.time).abs() < 0.05
+            {
+                t.tip_ins.0 += 1;
+                t.tip_ins.1 += *fouled as u32;
+            }
+        }
+        {
+            let ev = &rec.events;
+            let live = |k: &EventKind| matches!(k, EventKind::Shot { .. } | EventKind::Turnover { .. } | EventKind::Foul { .. } | EventKind::PeriodEnd);
+            for (i, e) in ev.iter().enumerate() {
+                if let EventKind::Shot { made, fouled, .. } = &e.kind {
+                    if *fouled {
+                        continue;
+                    }
+                    let next = ev[i + 1..].iter().find(|n| live(&n.kind) || matches!(n.kind, EventKind::Rebound { .. }));
+                    let Some(n) = next else { continue };
+                    if n.period != e.period {
+                        continue;
+                    }
+                    if *made {
+                        if live(&n.kind) {
+                            t.gaps[2].0 += (n.time - e.time) as f64;
+                            t.gaps[2].1 += 1;
+                        }
+                    } else if let EventKind::Rebound { offensive, .. } = &n.kind {
+                        let g = &mut t.gaps[*offensive as usize];
+                        g.0 += (n.time - e.time) as f64;
+                        g.1 += 1;
+                        // And on to what happens next.
+                        if let Some(m) = ev[i + 1..].iter().skip(1).find(|m| live(&m.kind)) && m.period == e.period {
+                            let g = &mut t.gaps[3 + *offensive as usize];
+                            g.0 += (m.time - n.time) as f64;
+                            g.1 += 1;
+                        }
+                    }
+                }
             }
         }
         // Body overlap: every pair of the ten, every frame.
@@ -862,7 +936,7 @@ pub fn stats(games: usize) {
     let l = &t.line;
     let fga = l.fga.max(1) as f32;
     let per100 = |x: f32| 100.0 * x / p;
-    println!("games {}  possessions/game {:.1}", t.games, p / g);
+    println!("games {}  possessions/game {:.1}  FGA/game {:.1}  fouled/FGA {:.2}%  FTA/game {:.1}", t.games, p / g, l.fga as f32 / g, 100.0 * t.fouled.iter().map(|f| f.0).sum::<u32>() as f32 / fga, l.fta as f32 / g);
     println!(
         "points/100 poss {:.2}  FG% {:.2}  3PA rate {:.2}%  FTA/100 {:.2}  FT% {:.2}",
         per100(l.pts as f32),
@@ -931,6 +1005,48 @@ pub fn stats(games: usize) {
         t.worst,
         t.frames
     );
+    {
+        let (n, m): (u32, u32) = t.fouled.iter().fold((0, 0), |a, f| (a.0 + f.0, a.1 + f.1));
+        println!(
+            "fouled shots {:.2}/game, and-ones {:.2}/game ({:.1}% of them go in; {:.1}% of makes); rim {}/{} mid {}/{} three {}/{}",
+            n as f32 / g,
+            m as f32 / g,
+            100.0 * m as f32 / n.max(1) as f32,
+            100.0 * m as f32 / l.fgm.max(1) as f32,
+            t.fouled[0].1, t.fouled[0].0, t.fouled[1].1, t.fouled[1].0, t.fouled[2].1, t.fouled[2].0
+        );
+        let put = t.sources[Source::Putback as usize];
+        println!(
+            "rebounds {:.1}/game, offensive {:.1}; putback shots {:.2}/game = {:.0}% of offensive boards, {:.2}% of shots",
+            t.rebounds.0 as f32 / g,
+            t.rebounds.1 as f32 / g,
+            put.0 as f32 / g,
+            100.0 * put.0 as f32 / t.rebounds.1.max(1) as f32,
+            100.0 * put.0 as f32 / stotal.max(1) as f32
+        );
+    }
+    {
+        let m = |i: usize| t.gaps[i].0 / t.gaps[i].1.max(1) as f64;
+        println!(
+            "seconds: miss to defensive board {:.2} ({}), to offensive board {:.2} ({}); make to next event {:.2}; defensive board to next event {:.2}, offensive board to next {:.2}",
+            m(0), t.gaps[0].1, m(1), t.gaps[1].1, m(2), m(3), m(4)
+        );
+    }
+    println!(
+        "tip-ins made {:.2}/game ({:.2}/game of them fouled)",
+        t.tip_ins.0 as f32 / g,
+        t.tip_ins.1 as f32 / g
+    );
+    print!("shooting fouls per shot by source:");
+    for (s, c) in Source::ALL.iter().zip(t.foul_src) {
+        print!(" {} {:.1}% of {:.1}/game;", s.label(), 100.0 * c.1 as f32 / c.0.max(1) as f32, c.0 as f32 / g);
+    }
+    println!();
+    print!("free throws awarded per game by foul kind:");
+    for (k, n) in basketman_core::replay::FoulKind::ALL.iter().zip(t.foul_shots) {
+        print!(" {} {:.2};", k.label(), n as f32 / g);
+    }
+    println!();
     print!("fouls per game by kind:");
     for (k, n) in basketman_core::replay::FoulKind::ALL.iter().zip(t.fouls) {
         print!(" {} {:.2};", k.label(), n as f32 / g);
