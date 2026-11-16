@@ -595,3 +595,92 @@ fn home_court_stays_realistic_with_travel() {
     }
     assert!(mar1 - mar0 < 1.0, "travel adds {}", mar1 - mar0);
 }
+
+#[test]
+fn the_agenda_lists_games_trips_training_scouting_and_why_time_waits() {
+    use crate::agenda::AgendaItem;
+    let mut w = World::new_career(5, 12);
+    w.apply(Command::TakeCharge(0)).unwrap();
+    while w.day < crate::calendar::PRESEASON_DAYS - 3 {
+        w.apply(Command::Continue).unwrap();
+    }
+    let a = w.agenda(21);
+    assert_eq!(a.days.len(), 21);
+    assert!(a.days[0].today);
+    // Our games are there: the opening game and the first league weeks.
+    let games: Vec<_> = a
+        .days
+        .iter()
+        .flat_map(|d| d.items.iter())
+        .filter_map(|i| if let AgendaItem::Game(g) = i { Some(g) } else { None })
+        .collect();
+    assert!(games.iter().any(|g| g.competition == "league"));
+    let first = games.iter().find(|g| g.competition == "league").unwrap();
+    assert_eq!(first.city, w.city_of(first.opponent));
+    assert!(first.trip.is_some() == !first.home);
+    // The scout can still be sent to games of theirs before we meet.
+    assert!(first.watch.iter().all(|g| g.day >= w.day));
+    // Training days are Monday to Friday and preparation is marked.
+    w.apply(Command::SetSession { slot: 6, session: crate::training::Session::MatchPrep }).unwrap();
+    assert!(w.apply(Command::SetSession { slot: 6, session: crate::training::Session::MatchPrep }).is_err());
+    assert!(w.apply(Command::SetSession { slot: 10, session: crate::training::Session::Rest }).is_err());
+    let a = w.agenda(14);
+    let thu = a.days.iter().find(|d| w.weekday(d.day) == "Thu").unwrap();
+    assert!(thu.items.iter().any(|i| matches!(i, AgendaItem::Training(t) if t.prep[0] && t.sessions[0] == "Match preparation")));
+    assert!(a.days.iter().filter(|d| w.weekday(d.day) == "Sat").all(|d| !d.items.iter().any(|i| matches!(i, AgendaItem::Training(_)))));
+    // A scout assignment shows on its day.
+    let day = crate::calendar::FRIENDLY_DAYS[3];
+    let other = w.friendlies.iter().find(|f| f.day == day && f.home != 0 && f.away != 0).unwrap().home;
+    w.apply(Command::AssignScout { team: other, day }).unwrap();
+    let a = w.agenda(14);
+    assert!(a.days.iter().any(|d| d.items.iter().any(|i| matches!(i, AgendaItem::Scout { team, .. } if *team == other))));
+    // Why it waits: nothing, then a game.
+    assert!(a.hold.reason.starts_with("Nothing") || a.hold.reason.contains("message"), "{}", a.hold.reason);
+    while !w.match_today() {
+        w.apply(Command::Continue).unwrap();
+    }
+    let hold = w.agenda(3).hold;
+    assert!(hold.reason.starts_with("A game is waiting"), "{}", hold.reason);
+    assert!(hold.can.contains(&"Play match"));
+    // And it serialises for the agents.
+    assert!(serde_json::to_string(&w.agenda(21)).unwrap().contains("\"kind\":\"game\""));
+}
+
+#[test]
+fn what_the_scout_sees_of_the_next_opponent_can_be_acted_on() {
+    // The assignment from the agenda's own list of games works.
+    let mut w = World::new_career(8, 12);
+    w.apply(Command::TakeCharge(0)).unwrap();
+    let a = w.agenda(45);
+    let g = a.days.iter().flat_map(|d| d.items.iter()).find_map(|i| match i {
+        crate::agenda::AgendaItem::Game(g) if g.competition == "league" => Some(g.clone()),
+        _ => None,
+    }).unwrap();
+    let pick = g.watch.iter().find(|x| x.before_meeting).expect("one of their games before ours");
+    w.apply(Command::AssignScout { team: g.opponent, day: pick.day }).unwrap();
+    let again = w.agenda(45);
+    let g2 = again.days.iter().flat_map(|d| d.items.iter()).find_map(|i| match i {
+        crate::agenda::AgendaItem::Game(g) if g.competition == "league" => Some(g.clone()),
+        _ => None,
+    }).unwrap();
+    assert!(g2.watch.iter().any(|x| x.assigned && x.day == pick.day));
+}
+
+/// A digest of a managed season with the scout out every day and
+/// preparation set, to compare between the serial and parallel builds.
+#[test]
+#[ignore]
+fn career_digest() {
+    let mut w = career(21, 14);
+    for slot in [6usize, 7] {
+        w.apply(Command::SetSession { slot, session: crate::training::Session::MatchPrep }).unwrap();
+    }
+    drive(&mut w, 12);
+    let text = format!("{:?}", w.fixtures.iter().map(|f| f.result.as_ref().map(|r| (r.score, r.possessions))).collect::<Vec<_>>());
+    let reports = format!("{:?}", w.scouting.opponent_reports.iter().map(|r| (r.team, r.day, r.confidence, r.offense, r.defense, r.through.clone())).collect::<Vec<_>>());
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in text.bytes().chain(reports.bytes()) {
+        h = (h ^ b as u64).wrapping_mul(0x100000001b3);
+    }
+    eprintln!("CAREER DIGEST {h:016x} reports {}", w.scouting.opponent_reports.len());
+}

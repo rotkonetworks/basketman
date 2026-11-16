@@ -287,7 +287,7 @@ impl App {
             ui.label(RichText::new(format!("From {}", m.from)).color(theme::TEXT_DIM));
             ui.add_space(14.0);
             ui.scope(|ui| {
-                ui.set_max_width(720.0);
+                ui.set_max_width(ui.available_width().min(720.0));
                 ui.spacing_mut().item_spacing.y = 10.0;
                 // Tables (results, standings) keep their columns in mono.
                 for part in m.body.split("\n\n") {

@@ -511,7 +511,20 @@ impl App {
                         .and_then(|n| n.parse().ok())
                         .unwrap_or(3)
                 };
+                // `SHOT_SCOUT=1` sends the scout to a game of another club
+                // on each of those days.
                 for _ in 0..days.unwrap_or(0) {
+                    if std::env::var("SHOT_SCOUT").is_ok() {
+                        let (me, day) = (app.team, app.world.day);
+                        for t in 0..app.world.teams.len() {
+                            if t != me {
+                                let cmd = Command::AssignScout { team: t, day };
+                                if app.world.apply(cmd).is_ok() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
                     let _ = app.world.apply(Command::Continue);
                 }
                 for _ in 0..rounds {
@@ -626,6 +639,15 @@ impl App {
                     && let Some(n) = args.get(i + 3).and_then(|s| s.parse::<usize>().ok())
                 {
                     app.mail = app.world.inbox().get(n).map(|m| m.id);
+                }
+                // `--screenshot file inbox report` opens the latest scout report.
+                if app.tab == Tab::Inbox && args.get(i + 3).map(String::as_str) == Some("report") {
+                    app.mail = app
+                        .world
+                        .inbox()
+                        .into_iter()
+                        .find(|m| m.subject.starts_with("Scout report"))
+                        .map(|m| m.id);
                 }
                 // `--screenshot file inbox budget` opens the board's budgets letter.
                 if app.tab == Tab::Inbox && args.get(i + 3).map(String::as_str) == Some("budget") {

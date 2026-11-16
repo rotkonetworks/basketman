@@ -100,6 +100,13 @@ pub enum Command {
         intensity: Intensity,
     },
     SetSchedule(Schedule),
+    /// Set one session of the weekly plan: `slot` 0..=9 is Monday morning,
+    /// Monday afternoon, ... Friday afternoon. `Session::MatchPrep` is the
+    /// preparation for the next opponent.
+    SetSession {
+        slot: usize,
+        session: crate::training::Session,
+    },
     DelegateTraining(bool),
     /// The assistant plans the week and every player's training.
     AskAssistantToPlan,
@@ -243,6 +250,7 @@ fn replaces(last: &Command, next: &Command) -> bool {
         | (Command::RenameTactic { slot: a, .. }, Command::RenameTactic { slot: b, .. }) => a == b,
         (Command::SetTraining { player: a, .. }, Command::SetTraining { player: b, .. }) => a == b,
         (Command::SetSchedule(_), Command::SetSchedule(_)) => true,
+        (Command::SetSession { slot: a, .. }, Command::SetSession { slot: b, .. }) => a == b,
         (Command::SetTicketPrice(_), Command::SetTicketPrice(_)) => true,
         (Command::SetMedia { player: a, .. }, Command::SetMedia { player: b, .. }) => a == b,
         _ => false,
@@ -523,6 +531,16 @@ impl World {
                     return Err(CommandError::NothingToDo);
                 }
                 self.teams[me].schedule = schedule.clone();
+            }
+            Command::SetSession { slot, session } => {
+                let me = self.club()?;
+                if *slot >= crate::training::SESSIONS_PER_WEEK {
+                    return Err(CommandError::OutOfRange("training slot"));
+                }
+                if self.teams[me].schedule.sessions[*slot] == *session {
+                    return Err(CommandError::NothingToDo);
+                }
+                self.teams[me].schedule.sessions[*slot] = *session;
             }
             Command::DelegateTraining(on) => {
                 let me = self.club()?;

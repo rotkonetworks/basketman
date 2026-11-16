@@ -62,7 +62,7 @@ impl App {
         }
     }
 
-    pub(crate) fn calendar_page(&mut self, ui: &mut Ui, _bd: &Backdrop) {
+    pub(crate) fn calendar_page(&mut self, ui: &mut Ui, bd: &Backdrop) {
         let narrow = ui.available_width() < 520.0;
         let today = self.world.day;
         let today_date = self.world.date_of(today);
@@ -255,6 +255,8 @@ impl App {
         // ---- the chosen day -----------------------------------------------
         let day = self.sh.cal_day.unwrap_or(today);
         theme::eyebrow(ui, &self.world.day_long(day));
+        // Our own entries for the day, with their actions.
+        self.day_actions(ui, bd, day);
         let on = self.world.events_on(day);
         if on.is_empty() {
             ui.label(

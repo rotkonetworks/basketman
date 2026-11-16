@@ -4,6 +4,7 @@
 //! same save produces the same results natively and in wasm. Keep it that way:
 //! avoid `powf`/`exp`/`ln` and friends in sim code (libm differs per target).
 
+pub mod agenda;
 pub mod arena;
 pub mod assistant;
 pub mod board;

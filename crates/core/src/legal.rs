@@ -584,6 +584,45 @@ impl World {
             },
         ));
 
+        // The scout's game, preparation and training sessions.
+        let scout_example = (|| {
+            let first = self.agenda(30).days.into_iter().flat_map(|d| d.items).find_map(|i| match i {
+                crate::agenda::AgendaItem::Game(g) if g.competition != "friendly" => Some(g),
+                _ => None,
+            })?;
+            let pick = first.watch.iter().find(|x| x.before_meeting && x.busy_with.is_none() && !x.assigned)?;
+            Some(Command::AssignScout { team: first.opponent, day: pick.day })
+        })();
+        let no_scout = team
+            .office
+            .staffer(Job::Scout)
+            .is_none()
+            .then(|| "You have no chief scout.".to_string());
+        out.push(spec(
+            "AssignScout",
+            "Send the chief scout to watch a club play on a day: he files an opponent report after the game (view reports). One game a day; replaces what he was to do that day. While at a game he does no player scouting elsewhere. The agenda lists, for each of our games, the opponent's games he can still watch before we meet.",
+            no_scout,
+            json!({"team": "the club to watch (not yours)", "day": "day number of a game of that club still to play, today or later"}),
+            scout_example,
+        ));
+        out.push(spec(
+            "UnassignScout",
+            "Take the chief scout off his assignment on a day.",
+            None,
+            json!({"day": {"choices": self.scouting.assignments.iter().map(|a| a.day).collect::<Vec<_>>()}}),
+            self.scouting.assignments.first().map(|a| Command::UnassignScout { day: a.day }),
+        ));
+        out.push(spec(
+            "SetSession",
+            "Set one session of the weekly training plan; slot 0..9 is Monday morning, Monday afternoon ... Friday afternoon. Use MatchPrep for match preparation: in the week of a league game these sessions prepare for the next opponent and help only as far as the scout's report on them is right (an edge of up to a quarter of a point of belief for four sessions and a fully right report), and they build nothing else. Sessions on a day lost to a long trip do not count.",
+            None,
+            json!({"slot": {"range": [0, 9]}, "session": names(&Session::ALL), "now": team.schedule.sessions}),
+            Some(Command::SetSession {
+                slot: 7,
+                session: if team.schedule.sessions[7] == Session::MatchPrep { Session::Tactics } else { Session::MatchPrep },
+            }),
+        ));
+
         // Draft.
         let ours = self
             .draft
