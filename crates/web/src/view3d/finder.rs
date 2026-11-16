@@ -159,6 +159,69 @@ pub(crate) fn moments(rec: &Recording, what: &str) -> Vec<f32> {
                 _ => None,
             })
             .collect(),
+        // A catch that is turned to the rim before the shot (the body well off
+        // the line to the basket in the second before the release).
+        "turnshoot" => {
+            let mut out = Vec::new();
+            for (i, f) in rec.frames.iter().enumerate().skip(12) {
+                let o = f.offense as usize;
+                for k in 0..5 {
+                    let (p, q) = (&rec.frames[i - 1].pose[o][k], &f.pose[o][k]);
+                    if q.action == Action::Shooting
+                        && q.stage == ShotStage::Release
+                        && p.stage != ShotStage::Release
+                        && q.style == Style::Jumper
+                        && rec.frames[i - 12..i].iter().any(|g| g.holder.is_none())
+                    {
+                        let rim = basketman_core::replay::to_court(basketman_core::court::HOOP, o);
+                        let g = &rec.frames[i - 10];
+                        if let Some(b) = g.pose[o][k].body_dir()
+                            && b.dot((rim - g.pos[o][k]).norm()) < 0.3
+                        {
+                            out.push(f.time - 1.0);
+                        }
+                    }
+                }
+            }
+            out
+        }
+        // A finish with a defender running him down from behind.
+        "chase" => {
+            let mut out = Vec::new();
+            for (i, f) in rec.frames.iter().enumerate().skip(6) {
+                let o = f.offense as usize;
+                let rim = basketman_core::replay::to_court(basketman_core::court::HOOP, o);
+                for k in 0..5 {
+                    let (p, q) = (&rec.frames[i - 1].pose[o][k], &f.pose[o][k]);
+                    if q.action == Action::Shooting
+                        && q.stage == ShotStage::Release
+                        && p.stage != ShotStage::Release
+                        && matches!(q.style, Style::Layup | Style::Floater)
+                    {
+                        let me = f.pos[o][k];
+                        let chaser = (0..5).any(|d| {
+                            let c = f.pos[1 - o][d];
+                            c.dist(me) < 2.5 && c.dist(rim) > me.dist(rim) + 0.2 && f.pose[1 - o][d].speed() > 3.0
+                        });
+                        if chaser {
+                            out.push(f.time - 0.6);
+                        }
+                    }
+                }
+            }
+            out
+        }
+        // The man who lost the ball turns and runs back.
+        "getback" => rec
+            .events
+            .iter()
+            .filter_map(|e| match e.kind {
+                EventKind::Turnover { stolen_by: Some(_), .. } => Some(e.time - 0.2),
+                _ => None,
+            })
+            .collect(),
+        // A throw-in.
+        "inbound" => rec.passes.iter().filter(|p| p.inbound).map(|p| p.time - 1.4).collect(),
         "ft" => rec
             .events
             .iter()
@@ -174,6 +237,127 @@ pub(crate) fn moments(rec: &Recording, what: &str) -> Vec<f32> {
 /// A camera fixed on the action at `time`: from the side, from behind the
 /// shooter towards the basket, or close to the basket from the side.
 pub(crate) fn viewpoint(
+    rec: &Recording,
+    time: f32,
+    how: &str,
+) -> Option<(super::Vec3, super::Vec3)> {
+    follow_or_fixed(rec, time, time, how, "")
+}
+
+/// Who a moment of kind `what` is about, at `time`: a player `(side, k)` or
+/// an official `(2, i)`.
+fn subject(rec: &Recording, what: &str, time: f32) -> Option<(usize, usize)> {
+    let i = rec.frame_at(time + 0.4);
+    let f = rec.frames.get(i)?;
+    match what {
+        "whistle" => {
+            let f = rec.frames.get(rec.frame_at(time + 0.1))?;
+            (f.whistler > 0).then(|| (2, f.whistler as usize - 1))
+        }
+        // The man who had the ball when it was lost, a moment before.
+        "getback" => {
+            let f = rec.frames.get(rec.frame_at(time + 0.05))?;
+            f.holder.map(|(s, k)| (s as usize, k as usize))
+        }
+        "inbound" => rec.passes.iter().find(|p| p.inbound && (p.time - 1.4 - time).abs() < 0.01).map(|p| (p.side as usize, p.from as usize)),
+        "chase" => {
+            let f = rec.frames.get(rec.frame_at(time + 0.6))?;
+            let o = f.offense as usize;
+            (0..5).find(|&k| f.pose[o][k].action == Action::Shooting).map(|k| (o, k))
+        }
+        _ => {
+            let wanted = |a: Action, legs: Footwork| match what {
+                "slide" => legs == Footwork::Slide,
+                "closeout" => legs == Footwork::Closeout,
+                "backpedal" => legs == Footwork::Backpedal,
+                "pivot" => legs == Footwork::Pivot,
+                "post" => a == Action::PostingUp,
+                "defreb" | "offreb" => a == Action::Rebounding,
+                "block" => a == Action::Blocking,
+                _ => a == Action::Shooting,
+            };
+            // Shots are looked for a second on from the start of the moment.
+            let (from, to) = match what {
+                "turnshoot" | "catchshoot" => (time + 0.6, time + 1.6),
+                _ => (time - 0.3, time + 0.4),
+            };
+            for g in &rec.frames[rec.frame_at(from)..=rec.frame_at(to)] {
+                for side in 0..2 {
+                    for k in 0..5 {
+                        if wanted(g.pose[side][k].action, g.pose[side][k].foot) {
+                            return Some((side, k));
+                        }
+                    }
+                }
+            }
+            let _ = f;
+            None
+        }
+    }
+}
+
+/// `SHOT_VIEWPOINT=follow`: the camera stays level with one man, side-on to
+/// the line from him to the basket, at a fixed distance, whatever the replay
+/// time `at` is. The man is the one the moment of kind `what` found at `time`.
+fn follow_or_fixed(
+    rec: &Recording,
+    time: f32,
+    at: f32,
+    how: &str,
+    what: &str,
+) -> Option<(super::Vec3, super::Vec3)> {
+    use super::v3;
+    if how == "follow" {
+        let (side, k) = subject(rec, what, time)?;
+        let f0 = rec.frames.get(rec.frame_at(time + 0.3))?;
+        let f = rec.frames.get(rec.frame_at(at))?;
+        let hoop = if f0.offense == 0 { (26.425, 7.5) } else { (1.575, 7.5) };
+        let p = if side == 2 { f.officials[k] } else { f.pos[side][k] };
+        // Whose man, by his id, in case he was substituted: the court slot.
+        let toward = (hoop.0 - p.x, hoop.1 - p.y);
+        let len = (toward.0 * toward.0 + toward.1 * toward.1).sqrt().max(0.5);
+        let (ux, uy) = (toward.0 / len, toward.1 / len);
+        // Side-on, 6 m out, on whichever side has fewer bodies in the way.
+        let blocked = |sign: f32| -> usize {
+            let p0 = if side == 2 { f0.officials[k] } else { f0.pos[side][k] };
+            let e = (p0.x + sign * uy * 6.0, p0.y - sign * ux * 6.0);
+            let mut n = 0;
+            for sd in 0..2 {
+                for q in 0..5 {
+                    if sd == side && q == k {
+                        continue;
+                    }
+                    let b = f0.pos[sd][q];
+                    // Distance of `b` from the segment eye to him.
+                    let (dx, dy) = (p0.x - e.0, p0.y - e.1);
+                    let l2 = (dx * dx + dy * dy).max(0.01);
+                    let u = (((b.x - e.0) * dx + (b.y - e.1) * dy) / l2).clamp(0.0, 1.0);
+                    let (cx, cy) = (e.0 + u * dx, e.1 + u * dy);
+                    if (b.x - cx).hypot(b.y - cy) < 0.9 {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+        let sign = if blocked(-1.0) < blocked(1.0) { -1.0 } else { 1.0 };
+        let eye = v3(p.x + sign * uy * 6.0, p.y - sign * ux * 6.0, 2.2);
+        return Some((eye, v3(p.x, p.y, 1.0)));
+    }
+    viewpoint_fixed(rec, time, how)
+}
+
+pub(crate) fn viewpoint_at(
+    rec: &Recording,
+    time: f32,
+    at: f32,
+    how: &str,
+    what: &str,
+) -> Option<(super::Vec3, super::Vec3)> {
+    follow_or_fixed(rec, time, at, how, what)
+}
+
+fn viewpoint_fixed(
     rec: &Recording,
     time: f32,
     how: &str,

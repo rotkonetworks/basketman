@@ -812,8 +812,20 @@ impl App {
                         app.playback.time = (t + t0).max(0.0);
                         // `SHOT_VIEWPOINT=side|behind|close` pins the camera at the
                         // moment, so that the frames of a sequence can be compared.
+                        // `follow` keeps one man in the middle, side-on, at the
+                        // time of the picture (use with `SHOT_T0` steps).
                         if let Ok(vp) = std::env::var("SHOT_VIEWPOINT") {
-                            app.look.cam.fixed = crate::view3d::finder::viewpoint(rec, *t, &vp);
+                            app.look.cam.fixed = crate::view3d::finder::viewpoint_at(
+                                rec,
+                                *t,
+                                (t + t0).max(0.0),
+                                &vp,
+                                &what,
+                            );
+                        }
+                        // `SHOT_HUD=clean` takes every panel off the picture.
+                        if std::env::var("SHOT_HUD").as_deref() == Ok("clean") {
+                            app.sh.hud.prefs.level = 2;
                         }
                     }
                 }

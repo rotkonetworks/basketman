@@ -209,6 +209,16 @@ pub(super) fn emit_3d(scene: &mut Scene, frame: &Frame, next: Option<(&Frame, f3
             stance: 0.0,
             phase,
             dribble: 0.0,
+            // He walks or jogs where he is going and stands facing the ball; the
+            // recording has no legwork for him, so the plain run decides.
+            legs: view3d::gait::Legs {
+                foot: if speed > 0.4 {
+                    basketman_core::replay::Footwork::Run
+                } else {
+                    basketman_core::replay::Footwork::Stand
+                },
+                ..Default::default()
+            },
         };
         scene.ground_disc((p.x, p.y), 0.4, 0.32, Color32::from_black_alpha(60));
         view3d::emit_official(scene, i as u8, p, gait, frame.whistler as usize == i + 1);
