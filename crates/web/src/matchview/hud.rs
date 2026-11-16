@@ -12,6 +12,9 @@ use crate::shell::{Tier, glass, panel_with, tab_row};
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub(crate) enum Drawer {
     Feed,
+    Scores,
+    Shots,
+    Flow,
     Bench,
     Shout,
     Orders,
@@ -19,20 +22,39 @@ pub(crate) enum Drawer {
     Box,
 }
 
+impl Hud {
+    /// Open the tab called `key` (the screenshot harness).
+    pub fn pick(&mut self, key: &str) {
+        let d = Drawer::LIVE.iter().find(|d| d.label().eq_ignore_ascii_case(key));
+        if let Some(&d) = d {
+            self.drawer = Some(d);
+            self.phone = Some(d);
+            self.chosen = true;
+        }
+    }
+}
+
 impl Drawer {
-    const LIVE: [Drawer; 6] = [
+    /// The first five are what is happening, the rest what the coach does.
+    const LIVE: [Drawer; 9] = [
         Drawer::Feed,
+        Drawer::Scores,
+        Drawer::Shots,
+        Drawer::Flow,
+        Drawer::Box,
         Drawer::Bench,
         Drawer::Shout,
         Drawer::Orders,
         Drawer::Rival,
-        Drawer::Box,
     ];
-    const REPLAY: [Drawer; 2] = [Drawer::Feed, Drawer::Box];
+    const REPLAY: [Drawer; 4] = [Drawer::Feed, Drawer::Shots, Drawer::Flow, Drawer::Box];
 
     fn label(self) -> &'static str {
         match self {
             Drawer::Feed => "Feed",
+            Drawer::Scores => "Scores",
+            Drawer::Shots => "Shots",
+            Drawer::Flow => "Flow",
             Drawer::Bench => "Bench",
             Drawer::Shout => "Shout",
             Drawer::Orders => "Orders",
@@ -53,10 +75,15 @@ pub(crate) struct Hud {
     last: Option<Drawer>,
     /// The open tab of the panel under the court on a phone.
     pub phone: Option<Drawer>,
+    /// What the data tabs remember: the assistant's notes, filters, marks.
+    pub feeds: super::feeds::Feeds,
 }
 
 /// What one frame of the match screen knows about the game.
 struct Game<'a> {
+    fixture: usize,
+    /// The side the user's club plays, 0 = home.
+    me: usize,
     teams: [String; 2],
     clubs: [usize; 2],
     rec: &'a Recording,
@@ -64,6 +91,42 @@ struct Game<'a> {
     duration: f32,
     live: bool,
     colors: [Color32; 2],
+}
+
+/// What the data tabs need to know about the game on screen.
+fn ctx_of<'a>(
+    world: &'a basketman_core::league::World,
+    ui: &Ui,
+    g: &'a Game,
+    time: f32,
+    live: Option<&'a LiveRound>,
+) -> super::feeds::Ctx<'a> {
+    super::feeds::Ctx {
+        world,
+        rec: g.rec,
+        result: g.result,
+        fixture: g.fixture,
+        me: g.me,
+        time,
+        live,
+        colors: g.colors,
+        teams: &g.teams,
+        wall: ui.input(|i| i.time),
+    }
+}
+
+/// Tabs in rows of five at most: the first row is what is happening, the
+/// second what the coach does. Returns the tab picked.
+fn tab_rows(ui: &mut Ui, tabs: &[Drawer], cur: Drawer, narrow: bool) -> Option<Drawer> {
+    let mut pick = None;
+    for (r, row) in tabs.chunks(5).enumerate() {
+        let labels: Vec<&str> = row.iter().map(|d| d.label()).collect();
+        let idx = row.iter().position(|d| *d == cur).unwrap_or(usize::MAX);
+        if let Some(i) = tab_row(ui, &labels, idx, narrow) {
+            pick = Some(tabs[r * 5 + i]);
+        }
+    }
+    pick
 }
 
 fn event_line(
@@ -106,10 +169,27 @@ fn event_color(e: &basketman_core::replay::Event, colors: &[Color32; 2]) -> Colo
 impl App {
     /// The play-by-play, newest first, each line a link to the player it is
     /// about.
-    fn feed_list(&self, ui: &mut Ui, g: &Game, time: f32, lines: usize, big: bool) {
+    #[allow(clippy::too_many_arguments)]
+    fn feed_list(
+        &self,
+        ui: &mut Ui,
+        g: &Game,
+        time: f32,
+        lines: usize,
+        big: bool,
+        live: Option<&LiveRound>,
+        commands: &mut Option<&mut Vec<Command>>,
+    ) {
         let upto = g.rec.events.partition_point(|e| e.time <= time);
         let players = &self.world.players;
+        let ctx = ctx_of(&self.world, ui, g, time, live);
+        let notes = &self.sh.hud.feeds.notes;
+        // The assistant's notes newest first, spoken in between the events.
+        let mut pending = notes.iter().rev().filter(|n| n.time <= time).peekable();
         for (n, e) in g.rec.events[..upto].iter().rev().take(lines).enumerate() {
+            while let Some(note) = pending.next_if(|note| note.time >= e.time) {
+                self.sh.hud.feeds.note_line(ui, &ctx, note, commands, big);
+            }
             let color = event_color(e, &g.colors);
             let line = event_line(e, &g.teams, players);
             ui.horizontal_top(|ui| {
@@ -194,6 +274,8 @@ impl App {
         let f = &self.world.fixtures[fixture];
         let duration = live.map_or(rec.duration(), |l| l.game.time());
         let g = Game {
+            fixture,
+            me: usize::from(f.home != self.team),
             teams: [
                 self.world.teams[f.home].name.clone(),
                 self.world.teams[f.away].name.clone(),
@@ -206,6 +288,10 @@ impl App {
             colors: [theme::ACCENT, theme::TEXT],
         };
         let round = f.round;
+        if live.is_some() {
+            let ctx = ctx_of(&self.world, ui, &g, self.playback.time, live);
+            self.sh.hud.feeds.tick(&ctx);
+        }
         let crowd = self
             .world
             .econ
@@ -247,7 +333,14 @@ impl App {
                     stage.max,
                 ));
             } else {
-                let h = (area.width() * 0.78).min(area.height() * 0.46).round();
+                // The charts of the data tabs need the room more than the
+                // court does while they are open.
+                let data = matches!(
+                    self.sh.hud.phone,
+                    Some(Drawer::Scores | Drawer::Shots | Drawer::Flow)
+                );
+                let share = if data { 0.34 } else { 0.46 };
+                let h = (area.width() * 0.78).min(area.height() * share).round();
                 court = Rect::from_min_size(area.min, vec2(area.width(), h));
                 phone_panel = Some(Rect::from_min_max(
                     pos2(stage.left(), court.bottom() + 6.0),
@@ -539,8 +632,6 @@ impl App {
                     .phone
                     .filter(|d| tabs.contains(d))
                     .unwrap_or(Drawer::Feed);
-                let labels: Vec<&str> = tabs.iter().map(|d| d.label()).collect();
-                let idx = tabs.iter().position(|d| *d == cur).unwrap_or(0);
                 let mut tab_pick = None;
                 panel_with(ui, rect, "hud_phone", false, |ui| {
                     ui.spacing_mut().item_spacing.y = 4.0;
@@ -555,9 +646,7 @@ impl App {
                         commands.as_deref_mut(),
                     );
                     ui.add_space(2.0);
-                    if let Some(i) = tab_row(ui, &labels, idx, true) {
-                        tab_pick = Some(tabs[i]);
-                    }
+                    tab_pick = tab_rows(ui, tabs, cur, false);
                     egui::ScrollArea::vertical()
                         .id_salt(("hud_phone_body", cur.label()))
                         .auto_shrink([false, false])
@@ -591,12 +680,8 @@ impl App {
                 pos2(drawer_left, court.top() + 8.0),
                 pos2(court.right() - pad, court.bottom() - pad),
             );
-            let labels: Vec<&str> = tabs.iter().map(|d| d.label()).collect();
-            let cur = tabs.iter().position(|d| *d == which).unwrap_or(0);
             panel_with(ui, rect, "hud_panel", false, |ui| {
-                if let Some(i) = tab_row(ui, &labels, cur, false) {
-                    pick_tab = Some(tabs[i]);
-                }
+                pick_tab = tab_rows(ui, tabs, which, false);
                 egui::ScrollArea::vertical()
                     .id_salt(("hud_body", which.label()))
                     .auto_shrink([false, false])
@@ -672,6 +757,11 @@ impl App {
         self.playback.playing = st.playing;
         self.playback.speed = st.speed;
         self.look = look;
+        // A tap on the shot chart: play from just before that shot.
+        if let Some(t) = self.sh.hud.feeds.jump.take() {
+            self.playback.time = t;
+            self.playback.playing = true;
+        }
     }
 
     /// What is in the panel for `which`.
@@ -689,7 +779,29 @@ impl App {
         big: bool,
     ) {
         match (which, live, commands, bench) {
-            (Drawer::Feed, ..) => self.feed_list(ui, g, time, if big { 200 } else { 80 }, big),
+            (Drawer::Feed, live, mut commands, _) => {
+                self.feed_list(ui, g, time, if big { 200 } else { 80 }, big, live, &mut commands)
+            }
+            (Drawer::Scores | Drawer::Shots | Drawer::Flow, live, ..) => {
+                let ctx = super::feeds::Ctx {
+                    world: &self.world,
+                    rec: g.rec,
+                    result: g.result,
+                    fixture: g.fixture,
+                    me: g.me,
+                    time,
+                    live,
+                    colors: g.colors,
+                    teams: &g.teams,
+                    wall: ui.input(|i| i.time),
+                };
+                let feeds = &mut self.sh.hud.feeds;
+                match which {
+                    Drawer::Scores => feeds.scores_tab(ui, bd, &ctx),
+                    Drawer::Shots => feeds.shots_tab(ui, bd, &ctx),
+                    _ => feeds.flow_tab(ui, bd, &ctx),
+                }
+            }
             (Drawer::Box, ..) => self.box_panel(ui, bd, g),
             (Drawer::Bench, Some(l), Some(c), Some(b)) => self.bench_card(ui, bd, l, b, c),
             (Drawer::Shout, Some(l), Some(c), Some(b)) => self.shout_card(ui, bd, l, b, c),

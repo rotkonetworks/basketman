@@ -19,6 +19,7 @@ use crate::theme::{self, Backdrop};
 use crate::view3d::gait::{Dims, Stats};
 use crate::view3d::{self, Cam3, FigureSpec, Preset, Scene, Vec3, v3};
 
+mod feeds;
 mod hud;
 pub(crate) use hud::Hud;
 
@@ -46,7 +47,7 @@ impl Playback {
 
 /// What the user did on the touchline this frame. Applied once the screen
 /// is drawn, because the screen reads the game these change.
-enum Command {
+pub(crate) enum Command {
     Timeout,
     AutoSubs(bool),
     /// Off, on.

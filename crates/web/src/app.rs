@@ -777,7 +777,12 @@ impl App {
                 {
                     use basketman_core::engine::Shout;
                     use basketman_core::league::LiveInput;
-                    while live.game.time() < 420.0 {
+                    // `SHOT_LIVE_TO=1500` plays that many seconds first.
+                    let to: f32 = std::env::var("SHOT_LIVE_TO")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(420.0);
+                    while live.game.time() < to && !live.game.is_over() {
                         live.step();
                     }
                     let side = live.side;
@@ -796,6 +801,10 @@ impl App {
                     app.touchline.off = bench.iter().filter(|p| p.on_court).nth(2).map(|p| p.id);
                     app.playback.time = live.game.time();
                     app.live = Some(live);
+                }
+                // `SHOT_DRAWER=scores|shots|flow|box|feed` opens that tab.
+                if let Ok(d) = std::env::var("SHOT_DRAWER") {
+                    app.sh.hud.pick(&d);
                 }
             }
         }

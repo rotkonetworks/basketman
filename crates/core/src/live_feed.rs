@@ -428,4 +428,25 @@ mod tests {
         assert_eq!(table.iter().map(|r| r.club).collect::<Vec<_>>(), booked);
         assert!(table.iter().all(|r| r.playing.is_none()));
     }
+
+    /// Not an assertion: what the games played ahead cost at kickoff, for
+    /// the record (the same work as before, moved from full time).
+    #[test]
+    fn what_kickoff_costs() {
+        let w = career();
+        let me = w.watch.unwrap();
+        let t = std::time::Instant::now();
+        let mut a = w.clone();
+        let live = a.kickoff_today(me).unwrap();
+        let kick = t.elapsed();
+        let t = std::time::Instant::now();
+        let mut b = w.clone();
+        b.apply(Command::PlayToday).unwrap();
+        eprintln!(
+            "kickoff with {} other games: {:.0} ms; a whole instant day: {:.0} ms",
+            live.around.len(),
+            kick.as_secs_f64() * 1000.0,
+            t.elapsed().as_secs_f64() * 1000.0
+        );
+    }
 }

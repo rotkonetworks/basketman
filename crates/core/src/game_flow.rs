@@ -588,3 +588,40 @@ mod tests {
         assert_eq!(forms.len(), ids[0].len() + ids[1].len());
     }
 }
+
+#[cfg(test)]
+mod cost {
+    use super::*;
+    use crate::command::Command;
+    use crate::league::World;
+
+    /// Not an assertion about speed: prints what a refresh of the data tabs
+    /// costs on a whole game, for the record.
+    #[test]
+    fn what_a_refresh_costs() {
+        let mut w = World::new_career_tiers(5, 8, 3);
+        w.apply(Command::TakeCharge(1)).unwrap();
+        w.apply(Command::PlayRound).unwrap();
+        let (i, rec) = w.replay.clone().unwrap();
+        let r = w.fixtures[i].result.clone().unwrap();
+        let ids = [0, 1].map(|s| r.boxes[s].iter().map(|b| b.0).collect::<Vec<_>>());
+        let read = Read {
+            rec: &rec,
+            ids: &ids,
+            me: 0,
+            time: f32::MAX,
+            live: None,
+        };
+        let t = std::time::Instant::now();
+        let n = 200;
+        for _ in 0..n {
+            std::hint::black_box((read.flow(), read.factors(), read.forms(), read.matchups(), crate::shotchart::shots(&rec, &ids)));
+        }
+        eprintln!(
+            "refresh of the data tabs on a whole game: {:.3} ms ({} events, {} frames)",
+            t.elapsed().as_secs_f64() * 1000.0 / n as f64,
+            rec.events.len(),
+            rec.frames.len()
+        );
+    }
+}
