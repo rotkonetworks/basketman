@@ -157,14 +157,9 @@ impl World {
             && let Some(mv) = moves.iter().find(|m| m.team == me)
         {
             let up = mv.to < mv.from;
-            let n = self.division_teams(mv.to).len();
-            // Promotion raises what is asked: stay up. Relegation asks for
-            // an immediate return.
-            self.desk.expectation = if up {
-                n.saturating_sub(self.tiers.moves)
-            } else {
-                self.tiers.moves
-            };
+            // Promotion raises what is asked. Relegation asks for an
+            // immediate return. The board's number is set in `club_after_moves`.
+            let ask = self.expectation_after_move(me, !up);
             let name = self.division_name(mv.to);
             let (subject, body) = if up {
                 (
@@ -173,10 +168,10 @@ impl World {
                         "We are going up. The league office has paid {} into the club, the \
                          sponsors are paying more and the fans are talking about little else. \
                          The {name} is a harder league: the squads are better, the halls are \
-                         bigger and nobody will give us anything. The board asks that we stay \
-                         out of the bottom {} places.",
+                         bigger and nobody will give us anything. The board asks for a place in \
+                         the top {}.",
                         crate::inbox::money(PROMOTION_WINDFALL),
-                        self.tiers.moves
+                        ask
                     ),
                 )
             } else {
@@ -186,7 +181,7 @@ impl World {
                         "We are going down. Sponsors have cut what they pay, the crowds will be \
                          smaller and the league's money is less. The board wants an immediate \
                          return: a place in the top {} of the {name}.",
-                        self.tiers.moves
+                        ask
                     ),
                 )
             };

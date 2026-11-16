@@ -38,7 +38,31 @@ pub struct ClubBook {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PastSeason {
     pub year: u16,
+    /// Every club of the pyramid that played, best first. The best of the
+    /// top division is the champion; the divisions are cut from the list
+    /// in `sizes`.
     pub order: Vec<u8>,
+    /// How many clubs each division had that year, the top one first.
+    /// Empty: one division with everybody.
+    #[serde(default)]
+    pub sizes: Vec<u8>,
+}
+
+impl PastSeason {
+    /// The division a club played in that year and its place in it, 1 being
+    /// the best. `None` if it did not exist.
+    pub fn place_of(&self, club: usize) -> Option<(usize, usize)> {
+        let pos = self.order.iter().position(|&x| x as usize == club)?;
+        let mut start = 0;
+        for (d, &size) in self.sizes.iter().enumerate() {
+            if pos < start + size as usize {
+                return Some((d, pos - start + 1));
+            }
+            start += size as usize;
+        }
+        // No sizes: everybody is in one division.
+        Some((self.sizes.len().saturating_sub(1), pos + 1 - start.min(pos)))
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -327,17 +351,42 @@ const ORIGINS: [&str; 8] = [
     "Founded in {y} by the {c} fire brigade, who needed something to do between shifts.",
 ];
 
+/// The range of stature a club of this division has, with `slack` more at
+/// each end. The bands overlap a little; the top one reaches the top.
+pub fn stature_band(division: usize, tiers: usize, slack: i32) -> (i32, i32) {
+    let tiers = tiers.max(1) as i32;
+    let d = division.min(tiers as usize - 1) as i32;
+    let width = 130 / tiers;
+    let centre = 100 * (2 * (tiers - d) - 1) / (2 * tiers);
+    let lo = (centre - width / 2).max(8) - slack;
+    let hi = (centre + width / 2).min(92) + slack;
+    (lo.max(1), hi.min(100))
+}
+
 /// The city in a club's name: everything before the nickname.
 pub fn city_of(name: &str) -> &str {
     name.rsplit_once(' ').map_or(name, |(c, _)| c)
 }
 
 impl ClubBook {
-    pub(crate) fn generate(seed: u64, names: &[String]) -> ClubBook {
+    /// `divisions` holds each club's division as the game begins, 0 being the
+    /// top: a club of a lower division is a smaller club with a shorter
+    /// past.
+    pub(crate) fn generate(seed: u64, names: &[String], divisions: &[usize]) -> ClubBook {
         let n = names.len();
+        let tiers = divisions.iter().map(|d| d + 1).max().unwrap_or(1);
         let mut rng = Rng::new(seed ^ 0xC1B_0001);
         let base: Vec<i32> = (0..n)
-            .map(|_| 12 + (rng.range(0, 76) + rng.range(0, 76)) as i32 / 2 * 1)
+            .map(|c| {
+                let raw = 12 + (rng.range(0, 76) + rng.range(0, 76)) as i32 / 2;
+                if tiers == 1 {
+                    return raw;
+                }
+                // The size of a club follows the division it plays in; the
+                // bands overlap, so a big club can be down and a small one up.
+                let (lo, hi) = stature_band(divisions[c], tiers, 0);
+                lo + (raw - 12) * (hi - lo) / 76
+            })
             .collect();
         // Founded: the big clubs are old, with some noise.
         let window_start = START_YEAR - PAST_YEARS;
@@ -369,9 +418,23 @@ impl ClubBook {
                 here.push((form, c));
             }
             here.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+            // The year's pyramid: the best clubs form the top division, as
+            // many as there are today, and so on down.
+            let mut sizes = Vec::new();
+            let mut left = here.len();
+            for d in 0..tiers {
+                let size = if d + 1 == tiers {
+                    left
+                } else {
+                    divisions.iter().filter(|&&x| x == d).count().min(left)
+                };
+                sizes.push(size as u8);
+                left -= size;
+            }
             past.push(PastSeason {
                 year,
                 order: here.iter().map(|&(_, c)| c as u8).collect(),
+                sizes,
             });
         }
 
@@ -529,18 +592,33 @@ pub struct YearLine {
     pub year: u16,
     /// 1 = top of the table; 0 if the club did not exist.
     pub place: u8,
+    /// Champion of its own division, which need not be the top one.
     pub champion: bool,
+    /// Runner-up of the top division.
     pub runner_up: bool,
     /// Played in this game rather than before it.
     pub played: bool,
+    /// The division, 0 being the top.
+    #[serde(default)]
+    pub division: u8,
+    /// 1 if the club went up after the season, -1 if it went down.
+    #[serde(default)]
+    pub moved: i8,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Honours {
+    /// Years the top division was won.
     pub titles: Vec<u16>,
     pub finals: Vec<u16>,
-    /// Best league place and the first year it was reached.
+    /// A division below the top won, by year and division.
+    pub lower_titles: Vec<(u16, u8)>,
+    /// Years after which the club went up.
+    pub promotions: Vec<u16>,
+    /// Best league place and the first year it was reached, in the highest
+    /// division the club has played in.
     pub best: Option<(u8, u16)>,
+    pub best_division: u8,
     pub seasons: usize,
 }
 
@@ -558,7 +636,8 @@ impl World {
             self.econ.seed
         };
         let names: Vec<String> = self.teams.iter().map(|t| t.name.clone()).collect();
-        self.club = ClubBook::generate(seed, &names);
+        let divisions: Vec<usize> = self.teams.iter().map(|t| t.division).collect();
+        self.club = ClubBook::generate(seed, &names, &divisions);
     }
 
     pub fn identity(&self, t: TeamId) -> &Identity {
@@ -575,74 +654,122 @@ impl World {
 
     /// How big and how respected a club is, 1..=100. The one number other
     /// systems should ask: what the club was when the game began, moved by
-    /// how it has done in the seasons since.
+    /// how it has done in the seasons since. Places count in the pyramid:
+    /// first in the Third Division is worth less than twelfth in the top
+    /// one. The division the club plays in now bounds it.
     pub fn stature(&self, t: TeamId) -> u8 {
         let base = self.club.clubs.get(t).map_or(50, |c| c.identity.stature) as i32;
-        let n = self.teams.len() as i32;
+        let tiers = self.division_count();
         let recent: Vec<i32> = self
             .history
             .iter()
             .rev()
             .take(5)
-            .map(|r| {
-                let place = r.place(t) as i32;
-                if n > 1 && place > 0 {
-                    100 * (n - place) / (n - 1)
-                } else {
-                    50
-                }
-            })
+            .map(|r| self.pyramid_percent(r, t))
             .collect();
-        if recent.is_empty() {
-            return base as u8;
+        let mut s = base;
+        if !recent.is_empty() {
+            let k = recent.len() as i32;
+            let avg = recent.iter().sum::<i32>() / k;
+            // Five seasons move it half way.
+            s = (base * (10 - k) + avg * k) / 10;
         }
-        let k = recent.len() as i32;
-        let avg = recent.iter().sum::<i32>() / k;
-        // Five seasons move it half way.
-        ((base * (10 - k) + avg * k) / 10).clamp(1, 100) as u8
+        let division = self.teams.get(t).map_or(0, |x| x.division);
+        let (lo, hi) = stature_band(division, tiers, 10);
+        s.clamp(lo, hi).clamp(1, 100) as u8
+    }
+
+    /// 0..=100 for a season's finish, the best club of the pyramid being
+    /// 100 and the worst 0. A club that did not play is in the middle.
+    fn pyramid_percent(&self, r: &crate::season::SeasonRecord, t: TeamId) -> i32 {
+        let place = r.place(t);
+        let Some(d) = r.division_of(t).filter(|_| place > 0) else {
+            return 50;
+        };
+        let (above, total) = if r.divisions.is_empty() {
+            (0, r.table.len())
+        } else {
+            (
+                r.divisions[..d].iter().map(|x| x.len()).sum::<usize>(),
+                r.divisions.iter().map(|x| x.len()).sum::<usize>(),
+            )
+        };
+        let (above, total) = (above as i32, total as i32);
+        if total > 1 {
+            100 * (total - above - place as i32) / (total - 1)
+        } else {
+            50
+        }
     }
 
     /// Every season of a club's life, oldest first, one line each.
     pub fn club_record(&self, t: TeamId) -> Vec<YearLine> {
         let mut out = Vec::new();
         for s in &self.club.past {
-            let pos = s.order.iter().position(|&x| x as usize == t);
+            let found = s.place_of(t);
             out.push(YearLine {
                 year: s.year,
-                place: pos.map_or(0, |p| p as u8 + 1),
-                champion: pos == Some(0),
-                runner_up: pos == Some(1),
+                place: found.map_or(0, |(_, p)| p as u8),
+                division: found.map_or(0, |(d, _)| d as u8),
+                champion: found.is_some_and(|(_, p)| p == 1),
+                runner_up: found.is_some_and(|(_, p)| p == 2),
                 played: false,
+                moved: 0,
             });
         }
         for r in &self.history {
+            let division = r.division_of(t);
+            let place = r.place(t);
             out.push(YearLine {
                 year: START_YEAR + r.season,
-                place: r.place(t) as u8,
-                champion: r.champion == t,
-                runner_up: r.runner_up == Some(t),
+                place: place as u8,
+                division: division.unwrap_or(0) as u8,
+                champion: division.is_some_and(|d| {
+                    if d == 0 { r.champion == t } else { r.division_champions.get(d - 1) == Some(&t) }
+                }),
+                runner_up: division == Some(0) && r.runner_up == Some(t),
                 played: true,
+                moved: 0,
             });
+        }
+        // Promotion and relegation: the division of the next year, and for
+        // the last, the division the club plays in now.
+        for i in 0..out.len() {
+            if out[i].place == 0 {
+                continue;
+            }
+            let next = out.get(i + 1).map_or(Some(self.teams[t].division as u8), |n| {
+                (n.place > 0).then_some(n.division)
+            });
+            out[i].moved = match next {
+                Some(d) if d < out[i].division => 1,
+                Some(d) if d > out[i].division => -1,
+                _ => 0,
+            };
         }
         out
     }
 
     pub fn honours(&self, t: TeamId) -> Honours {
         let rec = self.club_record(t);
-        let mut best: Option<(u8, u16)> = None;
+        // Best finish: the highest division first, then the place.
+        let mut best: Option<(u8, u8, u16)> = None;
         for l in rec.iter().filter(|l| l.place > 0) {
-            if best.is_none_or(|(p, _)| l.place < p) {
-                best = Some((l.place, l.year));
+            if best.is_none_or(|(d, p, _)| (l.division, l.place) < (d, p)) {
+                best = Some((l.division, l.place, l.year));
             }
         }
         Honours {
-            titles: rec.iter().filter(|l| l.champion).map(|l| l.year).collect(),
-            finals: rec
+            titles: rec.iter().filter(|l| l.champion && l.division == 0).map(|l| l.year).collect(),
+            finals: rec.iter().filter(|l| l.runner_up && l.division == 0).map(|l| l.year).collect(),
+            lower_titles: rec
                 .iter()
-                .filter(|l| l.runner_up)
-                .map(|l| l.year)
+                .filter(|l| l.champion && l.division > 0)
+                .map(|l| (l.year, l.division))
                 .collect(),
-            best,
+            promotions: rec.iter().filter(|l| l.moved > 0).map(|l| l.year).collect(),
+            best: best.map(|(_, p, y)| (p, y)),
+            best_division: best.map_or(0, |(d, _, _)| d),
             seasons: rec.iter().filter(|l| l.place > 0).count(),
         }
     }
@@ -734,6 +861,14 @@ pub struct ClubSummary {
     pub titles: Vec<u16>,
     pub finals: Vec<u16>,
     pub best: Option<(u8, u16)>,
+    pub best_division: u8,
+    pub lower_titles: Vec<(u16, u8)>,
+    pub promotions: Vec<u16>,
+    /// The division the club plays in now, and its name.
+    pub division: usize,
+    pub division_name: String,
+    /// How many clubs are in it.
+    pub division_size: usize,
     pub legends: Vec<Legend>,
     pub fans_expect: &'static str,
     pub record: Vec<YearLine>,
@@ -774,7 +909,7 @@ impl World {
         let id = self.identity(t);
         let board = self.boardroom(t);
         let honours = self.honours(t);
-        let n = self.teams.len();
+        let n = self.division_size(t);
         let expected = self.expected_finish(t);
         let mut people = Vec::new();
         let mut push = |role: &'static str, p: &Person, speaks: bool| {
@@ -831,6 +966,12 @@ impl World {
             titles: honours.titles,
             finals: honours.finals,
             best: honours.best,
+            best_division: honours.best_division,
+            lower_titles: honours.lower_titles,
+            promotions: honours.promotions,
+            division: self.teams[t].division,
+            division_name: self.division_name(self.teams[t].division),
+            division_size: n,
             legends: id.legends.clone(),
             fans_expect: self.fans_expect(t),
             record: self.club_record(t),
@@ -850,13 +991,14 @@ impl World {
     fn club_arena(&self, t: TeamId) -> ArenaView {
         let a = self.arena(t);
         let mut special = Vec::new();
-        let biggest = (0..self.teams.len()).all(|o| self.arena(o).capacity <= a.capacity);
-        let smallest = (0..self.teams.len()).all(|o| self.arena(o).capacity >= a.capacity);
+        let mates = self.division_teams(self.teams[t].division);
+        let biggest = mates.iter().all(|&o| self.arena(o).capacity <= a.capacity);
+        let smallest = mates.iter().all(|&o| self.arena(o).capacity >= a.capacity);
         if biggest {
-            special.push("The biggest hall in the league.".to_string());
+            special.push("The biggest hall in the division.".to_string());
         }
         if smallest {
-            special.push("The smallest hall in the league. Visitors say it is loud.".to_string());
+            special.push("The smallest hall in the division. Visitors say it is loud.".to_string());
         }
         if a.look.two_tiers {
             special.push("Two tiers of seats. The upper one hangs over the floor.".into());
@@ -895,9 +1037,8 @@ impl World {
             ov.iter().take(8).sum()
         };
         let mine = strength(t);
-        let rank = 1 + (0..self.teams.len())
-            .filter(|&c| strength(c) > mine)
-            .count();
+        let mates = self.division_teams(team.division);
+        let rank = 1 + mates.iter().filter(|&&c| strength(c) > mine).count();
         let glance = |p: u32| {
             let pl = &self.players[p as usize];
             Glance {
@@ -923,8 +1064,9 @@ impl World {
                     .map(|g| g.overall)
                     .fold(0.0, f32::max);
                 let players = all.iter().filter(|g| g.position == pos).count();
-                let mut league: Vec<f32> = (0..self.teams.len())
-                    .map(|c| {
+                let mut league: Vec<f32> = mates
+                    .iter()
+                    .map(|&c| {
                         self.teams[c]
                             .roster
                             .iter()
@@ -968,7 +1110,7 @@ impl World {
             .filter(|g| g.injured)
             .map(|g| g.name.clone())
             .collect();
-        let n = self.teams.len();
+        let n = mates.len();
         let mut assistant = Vec::new();
         assistant.push(if rank <= 3 {
             format!("On paper we are the number {rank} squad. We should be at the top.")

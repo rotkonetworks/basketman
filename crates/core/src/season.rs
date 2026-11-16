@@ -523,10 +523,12 @@ impl World {
         }
         self.fame_close_season(&table, champion_id, runner_up, mvp);
         self.fans_close_season(&tables, champion_id);
+        // The boards judge the season in the divisions the clubs played in.
+        self.club_close_season(&tables, champion_id);
         // Promotion and relegation: the clubs change division before the
         // new schedule is drawn.
         let moved = self.promote_and_relegate(&tables);
-        self.club_close_season(&table, champion_id);
+        self.club_after_moves(&moved);
         self.summer_retirements();
         let champion = self.teams[champion_id].name.clone();
         let mvp_line = mvp.map(|p| {

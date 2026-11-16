@@ -43,7 +43,9 @@ impl World {
     /// and the name of the club say what is reasonable, and the owner's
     /// ambition moves it.
     pub fn board_target(&self, club: TeamId) -> usize {
-        let n = self.teams.len();
+        // Everything is measured in the club's own division.
+        let mates = self.division_teams(self.teams[club].division);
+        let n = mates.len();
         let strength = |t: TeamId| -> f32 {
             let mut ov: Vec<f32> = self.teams[t]
                 .roster
@@ -54,9 +56,9 @@ impl World {
             ov.iter().take(8).sum()
         };
         let mine = strength(club);
-        let squad = 1 + (0..n).filter(|&t| strength(t) > mine).count();
+        let squad = 1 + mates.iter().filter(|&&t| strength(t) > mine).count();
         let name = self.stature(club);
-        let known = 1 + (0..n).filter(|&t| self.stature(t) > name).count();
+        let known = 1 + mates.iter().filter(|&&t| self.stature(t) > name).count();
         let base = (squad + known).div_ceil(2) as i32;
         let ambition = self.club.clubs[club].board.ambition() as i32;
         let shift = (10 - ambition) * n as i32 / 40;
@@ -90,7 +92,7 @@ impl World {
     }
 
     pub(crate) fn board_game(&mut self, club: TeamId, opp: TeamId, won: bool, margin: i32, home: bool) {
-        let n = self.teams.len().max(2) as i32;
+        let n = self.division_size(club).max(2) as i32;
         let e = self.expected_finish(club).clamp(1, n as usize) as i32;
         let e_opp = self.expected_finish(opp).clamp(1, n as usize) as i32;
         let expect = (80 - 60 * (e - 1) / (n - 1) + 30 * (e_opp - e) / (n - 1)).clamp(15, 90);
@@ -255,19 +257,29 @@ impl World {
     /// A board does not sack a manager whose club is in the top two
     /// thirds of the table, whatever the numbers say.
     pub(crate) fn in_the_bottom_third(&self, club: TeamId) -> bool {
-        let n = self.teams.len();
-        let place = self.table().iter().position(|&t| t == club).unwrap_or(0);
+        let table = self.table_of(self.teams[club].division);
+        let n = table.len();
+        let place = table.iter().position(|&t| t == club).unwrap_or(0);
         place * 3 >= n * 2
     }
 
     /// The season is over: judge it, cool the tempers, and change the
     /// people upstairs where it is time.
-    pub(crate) fn club_close_season(&mut self, table: &[TeamId], champion: TeamId) {
-        let n = self.teams.len();
+    ///
+    /// `tables` are the final tables of every division, the top one first,
+    /// and the clubs are still in the divisions they played in.
+    pub(crate) fn club_close_season(&mut self, tables: &[Vec<TeamId>], champion: TeamId) {
+        let clubs = self.teams.len();
         let season = self.season;
         let seed = self.econ.seed ^ 0xB0A2_D000 ^ ((season as u64) << 24);
-        for club in 0..n {
+        for club in 0..clubs {
+            let division = self.teams[club].division;
+            let table: &[TeamId] = tables.get(division).map_or(&[], |t| t.as_slice());
+            let n = table.len().max(1);
             let place = table.iter().position(|&t| t == club).map_or(n, |p| p + 1);
+            // Champions of a lower division are champions to their boards.
+            let champ = if division == 0 { club == champion } else { place == 1 };
+            let relegated = division + 1 < tables.len() && place + self.tiers.moves > n;
             let e = self.expected_finish(club);
             let (budget, wage_over) = (
                 self.teams[club].budget,
@@ -281,12 +293,12 @@ impl World {
             if swing < 0.0 {
                 swing *= harshness(b.patience()) * (0.7 + 0.03 * b.ambition() as f32);
             }
-            if club == champion {
+            if champ {
                 swing += 8.0;
             } else if place <= 4 {
                 swing += 2.0;
             }
-            let text = if club == champion {
+            let text = if champ {
                 format!("Delighted: champions. We were asked for {}.", crate::budget::ordinal(e))
             } else if diff >= 0 {
                 format!(
@@ -302,14 +314,17 @@ impl World {
                 )
             };
             b.confidence = (b.confidence + swing).clamp(0.0, 100.0);
-            b.push_reason(season, n as u16 * 2, swing, text);
+            b.push_reason(season, clubs as u16 * 2, swing, text);
             if budget < 0 || wage_over {
                 let d = -2.0 * (21 - b.spending().min(20)) as f32 / 10.0;
                 b.confidence = (b.confidence + d).max(0.0);
-                b.push_reason(season, n as u16 * 2, d, "Worried about the finances.");
+                b.push_reason(season, clubs as u16 * 2, d, "Worried about the finances.");
             }
             let line = sack_line(b.patience()) - grace;
-            let sacked = (b.confidence < line || (b.confidence < line + 8.0 && b.warned))
+            // A board that sees its club go down is less patient.
+            let sacked = (b.confidence < line
+                || (b.confidence < line + 8.0 && b.warned)
+                || (relegated && b.confidence < line + 15.0))
                 && place * 3 > n * 2 - 1;
             let leaves = rng.chance(0.05);
             // Summer cools tempers.
@@ -334,9 +349,47 @@ impl World {
             }
         }
         self.front_office_changes();
-        self.career_close_season(table, champion);
+        self.career_close_season(tables, champion);
+    }
+
+    /// What the board asks of the club it has just put in a new division:
+    /// a relegated club is asked to come straight back.
+    pub(crate) fn expectation_after_move(&self, club: TeamId, down: bool) -> usize {
+        let target = self.board_target(club);
+        if down { target.min(self.tiers.moves) } else { target }
+    }
+
+    /// The clubs have changed division. Boards, and the manager, take it
+    /// to heart; the next season's expectation is set.
+    pub(crate) fn club_after_moves(&mut self, moves: &[crate::divisions::Move]) {
+        let season = self.season;
+        for mv in moves {
+            let up = mv.to < mv.from;
+            let name = self.division_name(mv.to);
+            let end = self.teams.len() as u16 * 2;
+            let b = &mut self.club.clubs[mv.team].board;
+            let (d, text) = if up {
+                (6.0, format!("Delighted: promoted to the {name}."))
+            } else {
+                (-8.0 * harshness(b.patience()), format!("Distressed: relegated to the {name}."))
+            };
+            b.confidence = (b.confidence + d).clamp(0.0, 100.0);
+            b.push_reason(season, end, d, text);
+            if self.watch == Some(mv.team) {
+                // Going up proves something; going down costs the name.
+                let rep = &mut self.career.reputation;
+                *rep = (*rep + if up { 3 } else { -3 }).clamp(0, 100);
+                if let Some(s) = self.career.spells.last_mut().filter(|s| s.ended == crate::career::Ending::Current) {
+                    if up { s.promotions += 1 } else { s.relegations += 1 }
+                }
+            }
+        }
         if let Some(me) = self.watch {
-            self.desk.expectation = self.board_target(me);
+            let moved = moves.iter().find(|m| m.team == me);
+            self.desk.expectation = match moved {
+                Some(m) => self.expectation_after_move(me, m.to > m.from),
+                None => self.board_target(me),
+            };
         }
     }
 
@@ -412,7 +465,7 @@ impl World {
 
     /// The chairman's (or the owner's) first message to a new manager.
     pub(crate) fn club_welcome(&mut self, club: TeamId, practical: &str) {
-        let n = self.teams.len();
+        let n = self.division_size(club);
         let name = self.teams[club].name.clone();
         let expect = self.desk.expectation.max(1);
         let id = self.identity(club).clone();

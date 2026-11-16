@@ -44,6 +44,13 @@ pub struct Spell {
     pub places: Vec<(u16, u8)>,
     pub titles: u8,
     pub ended: Ending,
+    /// Season and division (0 is the top) of each final place in `places`.
+    #[serde(default)]
+    pub levels: Vec<(u16, u8)>,
+    #[serde(default)]
+    pub promotions: u8,
+    #[serde(default)]
+    pub relegations: u8,
 }
 
 /// A club without a manager, for a few rounds.
@@ -73,6 +80,9 @@ pub struct Career {
     pub offers: Vec<JobOffer>,
     /// Rounds played and days passed since the last job ended.
     pub idle_rounds: u32,
+    /// The division of the club he left last, 0 being the top.
+    #[serde(default)]
+    pub last_division: usize,
 }
 
 /// What a member of staff makes of the move.
@@ -131,6 +141,9 @@ impl World {
             places: Vec::new(),
             titles: 0,
             ended: Ending::Current,
+            levels: Vec::new(),
+            promotions: 0,
+            relegations: 0,
         });
         // A board hires a name with more hope than it hires a stranger.
         let hope = (self.career.reputation - self.stature(club) as i32) / 5;
@@ -146,18 +159,21 @@ impl World {
     }
 
     /// The manager's season is over: his reputation follows how it went.
-    pub(crate) fn career_close_season(&mut self, table: &[TeamId], champion: TeamId) {
+    pub(crate) fn career_close_season(&mut self, tables: &[Vec<TeamId>], champion: TeamId) {
         let Some(me) = self.watch else {
             if self.jobless() {
                 self.career.reputation = (self.career.reputation - 2).max(0);
             }
             return;
         };
-        let n = self.teams.len();
+        let division = self.teams[me].division;
+        let table: &[TeamId] = tables.get(division).map_or(&[], |t| t.as_slice());
+        let n = table.len();
         let place = table.iter().position(|&t| t == me).map_or(n, |p| p + 1);
         let e = self.expected_finish(me);
+        let champ = if division == 0 { me == champion } else { place == 1 };
         let mut d = (e as i32 - place as i32) * 2;
-        if me == champion {
+        if champ {
             d += 6;
         } else if place <= 4 {
             d += 1;
@@ -175,7 +191,33 @@ impl World {
             s.wins += w;
             s.losses += l;
             s.places.push((season, place as u8));
-            s.titles += (me == champion) as u8;
+            s.levels.push((season, division as u8));
+            s.titles += champ as u8;
+        }
+        // Doing well below the top gets noticed above.
+        if d > 0 && division > 0 && (champ || place <= 2) {
+            self.approach_from_above(me, division);
+        }
+    }
+
+    /// A club of the division above loses its manager and calls the one who
+    /// did well: not every year.
+    fn approach_from_above(&mut self, me: TeamId, division: usize) {
+        let mut rng = Rng::new(self.econ.seed ^ 0xA99_0000 ^ ((self.season as u64) << 24));
+        if !rng.chance(0.6) {
+            return;
+        }
+        let rep = self.career.reputation;
+        let pick = self
+            .division_teams(division - 1)
+            .into_iter()
+            .filter(|&c| c != me && !self.career.vacancies.iter().any(|v| v.club == c))
+            .min_by_key(|&c| ((self.stature(c) as i32 - (rep + 5)).abs(), c));
+        if let Some(c) = pick {
+            let from = self.teams[me].name.clone();
+            // The call comes first, so the offer carries the real reason.
+            self.make_offer(c, &format!("Your results at {from} caught their eye."));
+            self.manager_out(c, "the manager left for another job");
         }
     }
 
@@ -226,10 +268,25 @@ impl World {
         }
         let rep = self.career.reputation;
         let s = self.stature(club) as i32;
+        let division = self.teams[club].division;
         let fits = match self.watch {
-            // In work he listens to equals and betters.
-            Some(me) => s <= rep + 10 && s >= self.stature(me) as i32 - 5 && s >= rep - 15,
-            None => s <= rep + 10 && s >= rep - 50,
+            // In work he listens to equals and betters, and to the
+            // division above his own, never to a leap of two.
+            Some(me) => {
+                s <= rep + 10
+                    && s >= self.stature(me) as i32 - 5
+                    && s >= rep - 15
+                    && division + 1 >= self.teams[me].division
+            }
+            // Out of work, the calls come from below, from his own level
+            // and, now and then, from one level up.
+            None => {
+                let last = self.career.last_division;
+                let step_up = division < last;
+                let luck = Rng::new(self.econ.seed ^ 0x0FFE_4000 ^ ((club as u64) << 16) ^ self.season as u64)
+                    .chance(0.25);
+                s <= rep + 10 && s >= rep - 50 && (!step_up || (division + 1 == last && luck))
+            }
         };
         if fits && self.watch != Some(club) {
             self.make_offer(club, "Your name was the first they thought of.");
@@ -257,6 +314,7 @@ impl World {
         let name = self.teams[club].name.clone();
         let rep = self.career.reputation;
         let rank = self.stature(club) as i32;
+        let div = self.division_name(self.teams[club].division);
         let step = if rank > self.watch.map_or(0, |m| self.stature(m) as i32) + 5 {
             "It would be a step up."
         } else if self.watch.is_none() {
@@ -266,7 +324,7 @@ impl World {
         };
         let body = format!(
             "{name} need a manager. {why}\n\nI would like to talk to you. {step} You would \
-             arrive with a reputation of {rep}; the club stands at {rank}.\n\nLook at the \
+             arrive with a reputation of {rep}; the club stands at {rank} and plays in the {div}.\n\nLook at the \
              club, the squad and the money on the Career page, and tell me which of your \
              people you want with you. The job will not wait long.\n\n{face}"
         );
@@ -311,7 +369,9 @@ impl World {
                 .any(|o| o.state == OfferState::Open);
             if !waiting && self.career.idle_rounds >= 3 && self.career.idle_rounds % 3 == 0 {
                 let rep = self.career.reputation;
+                let last = self.career.last_division;
                 let pick = (0..self.teams.len())
+                    .filter(|&c| self.teams[c].division >= last)
                     .filter(|&c| !self.career.vacancies.iter().any(|v| v.club == c))
                     .min_by_key(|&c| ((self.stature(c) as i32 - (rep - 10)).abs(), c));
                 if let Some(c) = pick {
@@ -374,6 +434,7 @@ impl World {
             s.wins += w;
             s.losses += l;
         }
+        self.career.last_division = self.teams[old].division;
         self.watch = None;
         // His desk: the transfer business, the questions, the promises.
         self.desk.offers.clear();
@@ -673,6 +734,11 @@ pub struct SpellView {
     pub wins: u16,
     pub losses: u16,
     pub best_place: Option<u8>,
+    /// The division of the best place, 0 being the top.
+    pub best_division: u8,
+    pub division_name: String,
+    pub promotions: u8,
+    pub relegations: u8,
     pub titles: u8,
     pub ended: &'static str,
 }
@@ -683,6 +749,8 @@ pub struct OfferView {
     pub club: TeamId,
     pub club_name: String,
     pub stature: u8,
+    pub division: usize,
+    pub division_name: String,
     pub why: String,
     pub state: &'static str,
     pub open: bool,
@@ -738,6 +806,18 @@ fn staff_lines(office: &crate::staff::FrontOffice) -> Vec<crate::club::StaffLine
 }
 
 impl World {
+    /// The best finish of a spell: division and place, the top division
+    /// first.
+    fn best_finish(&self, s: &Spell) -> Option<(u8, u8)> {
+        s.places
+            .iter()
+            .map(|&(season, place)| {
+                let d = s.levels.iter().find(|l| l.0 == season).map_or(0, |l| l.1);
+                (d, place)
+            })
+            .min()
+    }
+
     pub fn view_career(&self) -> CareerView {
         let year = |s: u16| crate::club::START_YEAR + s;
         CareerView {
@@ -759,7 +839,11 @@ impl World {
                         + if s.ended == Ending::Current { self.standings[s.club].wins } else { 0 },
                     losses: s.losses
                         + if s.ended == Ending::Current { self.standings[s.club].losses } else { 0 },
-                    best_place: s.places.iter().map(|p| p.1).min(),
+                    best_place: self.best_finish(s).map(|b| b.1),
+                    best_division: self.best_finish(s).map_or(0, |b| b.0),
+                    division_name: self.division_name(self.teams[s.club].division),
+                    promotions: s.promotions,
+                    relegations: s.relegations,
                     titles: s.titles,
                     ended: match s.ended {
                         Ending::Current => "current",
@@ -779,6 +863,8 @@ impl World {
                     club: o.club,
                     club_name: self.teams[o.club].name.clone(),
                     stature: self.stature(o.club),
+                    division: self.teams[o.club].division,
+                    division_name: self.division_name(self.teams[o.club].division),
                     why: o.why.clone(),
                     state: match o.state {
                         OfferState::Open => "open",
