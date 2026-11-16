@@ -29,6 +29,7 @@ use basketman_core::engine::{BoxLine, GameResult, simulate_recorded_crewed};
 use basketman_core::inbox::Stop;
 use basketman_core::league::{Fixture, World, lineup};
 use basketman_core::player::Position;
+use basketman_core::officials::Ruling;
 use basketman_core::replay::{EventKind, FoulKind, Recording, Source, TurnoverKind};
 use basketman_core::rng::Rng;
 use basketman_core::shotchart::{Shot, Zone, shots};
@@ -647,11 +648,21 @@ fn event_rows(rec: &Recording, r: &GameResult, setup: Setup) -> Rows {
     // possessions by kind
     let np = segs.len() as f64;
     let pts_all: f64 = segs.iter().map(|s| s.pts as f64).sum();
+    // A crew may count a shot on the line wrongly: the event says what the
+    // shot was, the score what the crew called.
+    let miscount: f64 = rec
+        .calls
+        .iter()
+        .filter_map(|c| match (c.truth, c.called) {
+            (Ruling::Value(t), Ruling::Value(k)) => Some(k as f64 - t as f64),
+            _ => None,
+        })
+        .sum();
     out.push(("diag_engine_poss", (r.possessions[0] + r.possessions[1]) as f64, 1.0));
     out.push(("diag_segment_poss", np, 1.0));
     out.push((
         "diag_segment_points_ok",
-        (pts_all == (r.score[0] + r.score[1]) as f64) as u8 as f64,
+        (pts_all + miscount == (r.score[0] + r.score[1]) as f64) as u8 as f64,
         1.0,
     ));
     out.push(("diag_poss_seconds", 2.0 * 2400.0, np.max(1.0)));
