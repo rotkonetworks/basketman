@@ -66,7 +66,7 @@ impl App {
                 .ctx()
                 .data_mut(|d| d.get_persisted::<bool>(egui::Id::unique("tactics_tour_seen")))
                 .unwrap_or(false);
-            if !seen && self.shot.is_none() {
+            if !seen && !self.harness() {
                 self.room.tour = Some(0);
             }
         }
@@ -437,7 +437,7 @@ impl App {
     /// the screen up for a screenshot. `SHOT_POSS=n` and `SHOT_RUNT=secs`
     /// place the playback.
     fn harness_tactics(&mut self) {
-        if self.shot.is_none() || self.room.tour_checked {
+        if !self.harness() || self.room.tour_checked {
             return;
         }
         let Ok(spec) = std::env::var("SHOT_TACTICS") else {

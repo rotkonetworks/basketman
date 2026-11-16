@@ -214,6 +214,18 @@ pub(crate) fn name(text: &str) -> RichText {
 }
 
 impl App {
+    /// Whether this run is the screenshot harness (never, in the browser).
+    pub(crate) fn harness(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.shot.is_some()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            false
+        }
+    }
+
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::install(&cc.egui_ctx);
         #[allow(unused_mut)]
