@@ -899,6 +899,9 @@ pub(super) struct Game {
     /// Both hands of each player (attack frame), and as they were a tick ago.
     hands: [[Hands; 5]; 2],
     hands_prev: [[Hands; 5]; 2],
+    /// Where each hand is from its shoulder, which goes with the body when it
+    /// runs, turns, jumps or is placed (z is NaN until the first tick).
+    hand_rel: [[[V3; 2]; 5]; 2],
     /// Who goes for the dribbled ball this bounce.
     poke: Poke,
     /// Passes read this tick: (tick, risk) by passer and receiver.
@@ -992,6 +995,7 @@ impl Game {
             ofc: None,
             hands: [[Hands::NONE; 5]; 2],
             hands_prev: [[Hands::NONE; 5]; 2],
+            hand_rel: [[[v3(0.0, 0.0, f32::NAN); 2]; 5]; 2],
             poke: Poke::NONE,
             risk_memo: std::cell::Cell::new([None; 25]),
             stalls: 0,
@@ -1089,6 +1093,14 @@ impl Game {
                                 let q = h.p.xy().flipped();
                                 h.p.x = q.x;
                                 h.p.y = q.y;
+                            }
+                        }
+                    }
+                    for side in &mut self.hand_rel {
+                        for hs in side {
+                            for r in hs {
+                                r.x = -r.x;
+                                r.y = -r.y;
                             }
                         }
                     }

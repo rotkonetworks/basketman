@@ -4,13 +4,18 @@
 //! ratings that should show in the hands do. Aggregated over many games and
 //! worlds, never over a picked seed.
 
-use super::{BoxLine, Rules, simulate_game, simulate_recorded};
+use super::{BoxLine, Rules, hands, simulate_game, simulate_recorded};
 use crate::league::{World, lineup};
 use crate::player::{Attr, Player};
 use crate::replay::{EventKind, PassKind, PassOutcome, PokeResult, Recording, TurnoverKind};
 use crate::rng::Rng;
 
 fn games(n: usize) -> Vec<Recording> {
+    games_with_ids(n).into_iter().map(|g| g.0).collect()
+}
+
+/// The same games with, for each side, the shoulder half-width of each box-score player.
+fn games_with_ids(n: usize) -> Vec<(Recording, [Vec<f32>; 2])> {
     let w = World::generate(7, 12);
     (0..n)
         .map(|g| {
@@ -19,7 +24,9 @@ fn games(n: usize) -> Vec<Recording> {
             let b = if a == b { (b + 1) % 12 } else { b };
             let hl = lineup(&w.teams[a], &w.players);
             let al = lineup(&w.teams[b], &w.players);
-            simulate_recorded(&hl, &al, &w.rules, &mut Rng::new(900 + g as u64)).1
+            let (r, rec) = simulate_recorded(&hl, &al, &w.rules, &mut Rng::new(900 + g as u64));
+            let hw = [0, 1].map(|s| r.boxes[s].iter().map(|b| w.players[b.0 as usize].body.shoulder_width_cm / 200.0).collect::<Vec<f32>>());
+            (rec, hw)
         })
         .collect()
 }
@@ -114,15 +121,19 @@ fn the_ball_never_changes_hands_without_a_hand_event() {
     assert!(handoffs > 0);
 }
 
-/// A hand does not move faster than the limit for hands: relative to his own
-/// body, a recorded hand moves at most about eleven metres a second, and a
-/// body turns the shoulders under it by up to about a metre a tick.
+/// A hand does not move faster than the limit for hands, measured from the
+/// recording: relative to its own shoulder (the body's centre, the shoulder
+/// half a width out to its side, turned with the body, rising with a jump), a
+/// recorded hand moves at most as fast as the quickest man's hand can, in
+/// every frame. A body that runs, turns, jumps or is put somewhere else takes
+/// its hands with it; the hand does not jump when the body does.
 #[test]
 fn hands_never_move_faster_than_their_limit() {
+    use crate::court::v;
     let mut worst = 0.0f32;
     let mut frames = 0;
-    let mut speeds: Vec<f32> = Vec::new();
-    for rec in games(3) {
+    let mut over_body = 0.0f32;
+    for (rec, hw) in games_with_ids(3) {
         for pair in rec.frames.windows(2) {
             let (a, b) = (&pair[0], &pair[1]);
             if b.cut {
@@ -133,16 +144,28 @@ fn hands_never_move_faster_than_their_limit() {
                 for k in 0..5 {
                     let id = a.who[side][k];
                     let Some(j) = b.who[side].iter().position(|&w| w == id) else { continue };
+                    let half = hw[side][id as usize];
                     for i in 0..2 {
                         let (h0, h1) = (a.pose[side][k].hands[i], b.pose[side][j].hands[i]);
                         if h0.z == 0 || h1.z == 0 {
                             continue;
                         }
-                        let d = ((h1.dx - h0.dx) as f32 / 100.0).hypot((h1.dy - h0.dy) as f32 / 100.0);
-                        let dz = (h1.z as f32 - h0.z as f32) / 100.0;
-                        let speed = d.hypot(dz) / dt;
-                        worst = worst.max(speed);
-                        speeds.push(speed);
+                        // The shoulder's offset from the centre of the body: out
+                        // to its right (the first hand) or its left.
+                        let shoulder = |pose: &crate::replay::Pose| {
+                            let body = v(pose.body[0] as f32, pose.body[1] as f32).norm();
+                            let sign = if i == 0 { 1.0 } else { -1.0 };
+                            (body.y * half * sign, -body.x * half * sign, pose.lift_cm as f32 / 100.0)
+                        };
+                        let (s0, s1) = (shoulder(&a.pose[side][k]), shoulder(&b.pose[side][j]));
+                        let rel = |h: &crate::replay::HandRec, s: (f32, f32, f32)| {
+                            (h.dx as f32 / 100.0 - s.0, h.dy as f32 / 100.0 - s.1, h.z as f32 / 100.0 - s.2)
+                        };
+                        let (r0, r1) = (rel(&h0, s0), rel(&h1, s1));
+                        let d = ((r1.0 - r0.0).powi(2) + (r1.1 - r0.1).powi(2) + (r1.2 - r0.2).powi(2)).sqrt();
+                        worst = worst.max(d / dt);
+                        let c = ((h1.dx - h0.dx) as f32 / 100.0).hypot((h1.dy - h0.dy) as f32 / 100.0);
+                        over_body = over_body.max(c.hypot((h1.z as f32 - h0.z as f32) / 100.0) / dt);
                         frames += 1;
                     }
                 }
@@ -150,15 +173,11 @@ fn hands_never_move_faster_than_their_limit() {
         }
     }
     assert!(frames > 10_000, "{frames}");
-    speeds.sort_by(|a, b| a.total_cmp(b));
-    let p999 = speeds[speeds.len() * 999 / 1000];
-    eprintln!("hand speed relative to the body: p99.9 {p999:.1}, worst {worst:.1} m/s");
-    // 11 m/s of hand, plus the shoulder moving under it as he turns or jumps.
-    assert!(p999 < 16.0, "one frame in a thousand has a hand moving at {p999:.1} m/s relative to its body");
-    // The worst frames are a takeoff (the shoulders rise four or five metres
-    // a second under a hand at rest) with the body turning: the hand itself
-    // still moves at its own limit, which `a_hand_never_moves_faster_than_its_speed_from_its_shoulder` shows.
-    assert!(worst < 20.0, "a hand moved at {worst:.1} m/s relative to its body");
+    eprintln!("hand speed relative to the shoulder: worst {worst:.2} m/s; to the middle of the body {over_body:.2}");
+    // The quickest hand: 4.5 + 0.18 * 20 + 0.14 * 20 m/s (ratings run to a little
+    // over 20 with belief and mood), and a centimetre of rounding at both ends.
+    let limit = hands::hand_speed(21.0, 21.0) + 0.4;
+    assert!(worst <= limit, "a hand moved at {worst:.2} m/s relative to its shoulder, the limit is {limit:.2}");
 }
 
 /// The model's own guarantee: whatever the goal and wherever the shoulder
@@ -425,3 +444,4 @@ fn a_squad_of_passers_scores_more_with_ball_movement_than_in_isolation() {
     let r = passers_and_star();
     assert!(r[0][0] > r[0][1], "a squad of passers scores {:.3} with Motion and {:.3} with Isolation", r[0][0], r[0][1]);
 }
+

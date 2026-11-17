@@ -307,10 +307,18 @@ impl Game {
                         goal[i] = (v3(me.x + to_h.x * 0.5 * arm, me.y + to_h.y * 0.5 * arm, sh[i].z + 0.15 * arm), HandKind::Target);
                     }
                 }
+                let rel = &mut self.hand_rel[t][k];
                 let hs = &mut self.hands[t][k];
                 for i in 0..2 {
+                    // The hand goes with the shoulder: a body that runs, turns, jumps
+                    // or is put somewhere else takes its hands with it, and the hand
+                    // moves from there by its own speed.
+                    if !rel[i].z.is_nan() {
+                        hs.h[i].p = v3(sh[i].x + rel[i].x, sh[i].y + rel[i].y, sh[i].z + rel[i].z);
+                    }
                     hs.h[i].kind = goal[i].1;
                     hands::step(&mut hs.h[i], goal[i].0, sh[i], arm, speed, DT);
+                    rel[i] = V3 { x: hs.h[i].p.x - sh[i].x, y: hs.h[i].p.y - sh[i].y, z: hs.h[i].p.z - sh[i].z };
                 }
                 let _ = HandPos { p: hs.h[0].p, kind: hs.h[0].kind };
             }
@@ -323,8 +331,17 @@ impl Game {
         let c = to_court(self.m[t][k].pos, f);
         for i in 0..2 {
             let h = &self.hands[t][k].h[i];
-            let hc = to_court(v(h.p.x, h.p.y), f);
-            pose.hands[i] = hands::record(h, hc, c, h.kind);
+            // Where the hand is by the end of the tick: with the shoulder, which
+            // has moved on with the body since the hands were worked out.
+            let rel = self.hand_rel[t][k][i];
+            let p = if rel.z.is_nan() {
+                h.p
+            } else {
+                let sh = self.shoulder_of(t, k, i);
+                v3(sh.x + rel.x, sh.y + rel.y, sh.z + rel.z)
+            };
+            let hc = to_court(v(p.x, p.y), f);
+            pose.hands[i] = hands::record(&HandPos { p, kind: h.kind }, hc, c, h.kind);
         }
     }
 }
