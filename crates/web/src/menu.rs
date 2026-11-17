@@ -607,7 +607,8 @@ impl App {
         }
         let slots: Vec<SlotMeta> = self.slots.slots.clone();
         let width = ui.available_width();
-        let wide = width > 600.0;
+        // Wide: the buttons stand beside the words, so more slots are in view.
+        let wide = width > 640.0;
         for s in slots {
             let current = self.slot_id == Some(s.id) && self.career;
             let frame = egui::Frame::NONE
@@ -617,86 +618,30 @@ impl App {
                 .stroke(Stroke::new(if current { 1.5 } else { 1.0 }, if current { theme::ACCENT } else { theme::LINE_2 }));
             frame.show(ui, |ui| {
                 ui.set_width(width - 26.0);
-                ui.spacing_mut().item_spacing.y = 3.0;
-                let renaming = self.menu.renaming.as_ref().filter(|r| r.0 == s.id).map(|r| r.1.clone());
-                if let Some(mut text) = renaming {
+                let confirming = self.menu.confirm_delete == Some(s.id);
+                if wide {
                     ui.horizontal(|ui| {
-                        let r = ui.add(egui::TextEdit::singleline(&mut text).char_limit(40).desired_width(260.0));
-                        r.request_focus();
-                        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                        if ui.add(egui::Button::new("Save name").min_size(vec2(100.0, 36.0))).clicked() || enter {
-                            self.ops.push(Op::Rename(s.id, text.clone()));
-                            self.menu.renaming = None;
-                        } else if ui.add(egui::Button::new("Cancel").min_size(vec2(80.0, 36.0))).clicked() {
-                            self.menu.renaming = None;
+                        ui.vertical(|ui| {
+                            ui.set_width(width - 26.0 - 360.0);
+                            self.slot_info(ui, &s, now, current);
+                        });
+                        if !confirming {
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                self.slot_buttons(ui, &s, true);
+                            });
+                        }
+                    });
+                    if confirming {
+                        self.slot_confirm(ui, &s);
+                    }
+                } else {
+                    ui.vertical(|ui| {
+                        self.slot_info(ui, &s, now, current);
+                        ui.add_space(4.0);
+                        if confirming {
+                            self.slot_confirm(ui, &s);
                         } else {
-                            self.menu.renaming = Some((s.id, text));
-                        }
-                    });
-                } else {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(&s.name).font(FontId::new(17.0, theme::semibold())));
-                        if current {
-                            ui.label(theme::mono("playing now").color(theme::ACCENT));
-                        }
-                    });
-                }
-                if s.damaged {
-                    ui.label(RichText::new(format!("Cannot be opened: {}", s.club)).color(theme::WARN));
-                } else {
-                    ui.label(RichText::new(s.line()).color(theme::TEXT));
-                    ui.label(theme::mono(s.detail()).color(theme::TEXT_DIM));
-                }
-                let when = persist::ago(now, s.played);
-                let who = if s.manager.is_empty() { String::new() } else { format!("Manager {}", s.manager) };
-                let foot = [who, if when.is_empty() { when } else { format!("saved {when}") }]
-                    .into_iter()
-                    .filter(|t| !t.is_empty())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                ui.label(theme::mono(foot).color(theme::TEXT_MUTE));
-                ui.add_space(4.0);
-                if self.menu.confirm_delete == Some(s.id) {
-                    ui.label(
-                        RichText::new(format!("Delete \"{}\"? This cannot be undone.", s.name))
-                            .color(theme::WARN)
-                            .family(theme::semibold()),
-                    );
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add(egui::Button::new(RichText::new("Delete").color(theme::BG)).fill(theme::WARN).min_size(vec2(90.0, 36.0)))
-                            .clicked()
-                        {
-                            self.ops.push(Op::Delete(s.id));
-                            self.menu.confirm_delete = None;
-                        }
-                        if ui.add(egui::Button::new("Keep it").min_size(vec2(90.0, 36.0))).clicked() {
-                            self.menu.confirm_delete = None;
-                        }
-                    });
-                } else {
-                    let _ = wide;
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
-                        if !s.damaged
-                            && ui
-                                .add(
-                                    egui::Button::new(RichText::new("Load").family(theme::semibold()).color(theme::BG))
-                                        .fill(theme::TEXT)
-                                        .min_size(vec2(84.0, 36.0)),
-                                )
-                                .clicked()
-                        {
-                            self.request(Op::Load(s.id));
-                        }
-                        if ui.add(egui::Button::new("Rename").min_size(vec2(84.0, 36.0))).clicked() {
-                            self.menu.renaming = Some((s.id, s.name.clone()));
-                        }
-                        if !s.damaged && ui.add(egui::Button::new("Export").min_size(vec2(84.0, 36.0))).clicked() {
-                            self.ops.push(Op::Export(s.id));
-                        }
-                        if ui.add(egui::Button::new("Delete").min_size(vec2(84.0, 36.0))).clicked() {
-                            self.menu.confirm_delete = Some(s.id);
+                            ui.horizontal_wrapped(|ui| self.slot_buttons(ui, &s, false));
                         }
                     });
                 }
@@ -704,6 +649,97 @@ impl App {
             ui.add_space(4.0);
         }
         self.page_import(ui);
+    }
+
+    fn slot_info(&mut self, ui: &mut Ui, s: &SlotMeta, now: u64, current: bool) {
+        ui.spacing_mut().item_spacing.y = 3.0;
+        let renaming = self.menu.renaming.as_ref().filter(|r| r.0 == s.id).map(|r| r.1.clone());
+        if let Some(mut text) = renaming {
+            ui.horizontal_wrapped(|ui| {
+                let r = ui.add(egui::TextEdit::singleline(&mut text).char_limit(40).desired_width(220.0));
+                if !r.has_focus() && !r.lost_focus() {
+                    r.request_focus();
+                }
+                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                if ui.add(egui::Button::new("Save name").min_size(vec2(100.0, 36.0))).clicked() || enter {
+                    self.ops.push(Op::Rename(s.id, text.clone()));
+                    self.menu.renaming = None;
+                } else if ui.add(egui::Button::new("Cancel").min_size(vec2(80.0, 36.0))).clicked() {
+                    self.menu.renaming = None;
+                } else {
+                    self.menu.renaming = Some((s.id, text));
+                }
+            });
+        } else {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(&s.name).font(FontId::new(17.0, theme::semibold())));
+                if current {
+                    ui.label(theme::mono("playing now").color(theme::ACCENT));
+                }
+            });
+        }
+        if s.damaged {
+            ui.label(RichText::new(format!("Cannot be opened: {}", s.club)).color(theme::WARN));
+        } else {
+            ui.label(RichText::new(s.line()).color(theme::TEXT));
+            ui.label(theme::mono(s.detail()).color(theme::TEXT_DIM));
+        }
+        let when = persist::ago(now, s.played);
+        let who = if s.manager.is_empty() { String::new() } else { format!("Manager {}", s.manager) };
+        let foot = [who, if when.is_empty() { when } else { format!("saved {when}") }]
+            .into_iter()
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join(", ");
+        ui.label(theme::mono(foot).color(theme::TEXT_MUTE));
+    }
+
+    /// Load, Rename, Export, Delete; `reverse` for a row that fills from the right.
+    fn slot_buttons(&mut self, ui: &mut Ui, s: &SlotMeta, reverse: bool) {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        let size = vec2(80.0, 36.0);
+        let mut which: Vec<&str> = vec!["Load", "Rename", "Export", "Delete"];
+        if s.damaged {
+            which.retain(|w| *w != "Load" && *w != "Export");
+        }
+        if reverse {
+            which.reverse();
+        }
+        for w in which {
+            let b = if w == "Load" {
+                egui::Button::new(RichText::new("Load").family(theme::semibold()).color(theme::BG)).fill(theme::TEXT)
+            } else {
+                egui::Button::new(w)
+            };
+            if ui.add(b.min_size(size)).clicked() {
+                match w {
+                    "Load" => self.request(Op::Load(s.id)),
+                    "Rename" => self.menu.renaming = Some((s.id, s.name.clone())),
+                    "Export" => self.ops.push(Op::Export(s.id)),
+                    _ => self.menu.confirm_delete = Some(s.id),
+                }
+            }
+        }
+    }
+
+    fn slot_confirm(&mut self, ui: &mut Ui, s: &SlotMeta) {
+        ui.label(
+            RichText::new(format!("Delete \"{}\"? This cannot be undone.", s.name))
+                .color(theme::WARN)
+                .family(theme::semibold()),
+        );
+        ui.horizontal(|ui| {
+            if ui
+                .add(egui::Button::new(RichText::new("Delete").color(theme::BG)).fill(theme::WARN).min_size(vec2(90.0, 36.0)))
+                .clicked()
+            {
+                self.ops.push(Op::Delete(s.id));
+                self.menu.confirm_delete = None;
+            }
+            if ui.add(egui::Button::new("Keep it").min_size(vec2(90.0, 36.0))).clicked() {
+                self.menu.confirm_delete = None;
+            }
+        });
     }
 
     /// Careers brought in from a file.
@@ -831,14 +867,17 @@ impl App {
     }
 
     fn page_settings(&mut self, ui: &mut Ui) {
-        // Two columns when there is room, so that all of it is in view.
-        if ui.available_width() > 640.0 {
-            ui.columns(2, |cols| {
+        // Three columns when there is room, so that all of it is in view.
+        if ui.available_width() > 700.0 {
+            ui.columns(3, |cols| {
                 self.settings_match(&mut cols[0]);
-                self.settings_screen(&mut cols[1]);
+                self.settings_game(&mut cols[1]);
+                self.settings_screen(&mut cols[2]);
             });
         } else {
             self.settings_match(ui);
+            ui.add_space(6.0);
+            self.settings_game(ui);
             ui.add_space(6.0);
             self.settings_screen(ui);
         }
@@ -872,13 +911,25 @@ impl App {
                     .custom_parser(|s| s.trim_end_matches('%').parse::<f64>().ok().map(|v| v / 100.0)),
             );
         });
+    }
+
+    fn settings_game(&mut self, ui: &mut Ui) {
         let s = &mut self.settings;
+        theme::eyebrow(ui, "The game");
         setting_row(ui, "Game speed", "The speed a match starts at.", &mut |ui| {
             segmented(ui, &SPEEDS.map(|v| (v, format!("{v:.0}x"))), &mut s.speed);
         });
         setting_row(ui, "Ask before leaving a match", "Leaving a match in progress gives it up; it cannot be saved.", &mut |ui| {
             segmented(ui, &[(false, "Off".to_string()), (true, "On".to_string())], &mut s.confirm_leave);
         });
+        setting_row(
+            ui,
+            "Auto-save",
+            "Off: the game saves only when you press Save or leave to the main menu.",
+            &mut |ui| {
+                segmented(ui, &Autosave::ALL.map(|a| (a, a.label().to_string())), &mut s.autosave);
+            },
+        );
     }
 
     fn settings_screen(&mut self, ui: &mut Ui) {
@@ -894,16 +945,6 @@ impl App {
         setting_row(ui, "Full screen", "F11 does the same.", &mut |ui| {
             segmented(ui, &[(false, "Off".to_string()), (true, "On".to_string())], &mut s.fullscreen);
         });
-        ui.add_space(6.0);
-        theme::eyebrow(ui, "Saving");
-        setting_row(
-            ui,
-            "Auto-save",
-            "Off: the game saves only when you press Save or leave to the main menu.",
-            &mut |ui| {
-                segmented(ui, &Autosave::ALL.map(|a| (a, a.label().to_string())), &mut s.autosave);
-            },
-        );
     }
 
     fn page_howto(&mut self, ui: &mut Ui) {
@@ -998,7 +1039,7 @@ impl App {
                 ui.set_clip_rect(screen);
                 // The scrim takes every click that would reach the game.
                 let r = ui.allocate_rect(screen, Sense::click_and_drag());
-                ui.painter().rect_filled(screen, 0.0, Color32::from_black_alpha(120));
+                ui.painter().rect_filled(screen, 0.0, Color32::from_black_alpha(150));
                 if r.clicked() && page == Page::Pause {
                     self.pause = None;
                 }
@@ -1368,12 +1409,4 @@ pub(crate) fn export_dir() -> std::path::PathBuf {
     eframe::storage_dir("Basketman")
         .map(|d| d.join("exports"))
         .unwrap_or_else(|| std::path::PathBuf::from("basketman-exports"))
-}
-
-impl App {
-    /// The screens drawn over the game when the pause menu is not the
-    /// face of it: nothing. Kept so the shell has one call.
-    pub(crate) fn menu_open(&self) -> bool {
-        self.pause.is_some()
-    }
 }

@@ -414,7 +414,8 @@ impl App {
 
         let side = theme::side();
         let screen = ui.max_rect();
-        let margin = if side { 8.0 } else { 18.0 };
+        let narrow = screen.width() < 520.0;
+        let margin = if side || narrow { 8.0 } else { 18.0 };
         let w = (screen.width() - 2.0 * margin).min(1060.0);
         let wanted = match self.nc.step {
             Step::You => 400.0,
@@ -423,11 +424,19 @@ impl App {
             Step::Division => 600.0,
             Step::Club => 820.0,
         };
-        let h = (screen.height() - 2.0 * margin).min(if side { 820.0 } else { wanted });
+        let h = (screen.height() - 2.0 * margin).min(if side { 820.0 } else if narrow { wanted + 80.0 } else { wanted });
         let rect = egui::Rect::from_center_size(screen.center(), vec2(w, h));
-        let pad = if side { 12.0 } else { 18.0 };
+        let pad = if side || narrow { 12.0 } else { 18.0 };
         let inner = vec2(w - 2.0 * pad, h - 2.0 * pad);
-        let (header_h, footer_h) = if side { (40.0, 44.0) } else { (58.0, 50.0) };
+        let (header_h, footer_h) = if side {
+            (40.0, 44.0)
+        } else if narrow {
+            (84.0, 50.0)
+        } else {
+            (58.0, 50.0)
+        };
+        // Three buttons in a row on a narrow phone: smaller ones.
+        let (back_w, next_w, surprise_w) = if narrow { (72.0, 112.0, 100.0) } else { (96.0, 150.0, 120.0) };
         let (mut go_next, mut go_back) = (false, false);
         ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
             bd.card_padded(ui, pad as i8, |ui| {
@@ -450,7 +459,7 @@ impl App {
                     ui.horizontal(|ui| {
                         let b = if self.nc.step == Step::You { "Cancel" } else { "Back" };
                         if ui
-                            .add_enabled(!busy, egui::Button::new(b).min_size(vec2(96.0, 40.0)))
+                            .add_enabled(!busy, egui::Button::new(b).min_size(vec2(back_w, 40.0)))
                             .clicked()
                         {
                             go_back = true;
@@ -468,7 +477,7 @@ impl App {
                                     egui::Button::new(RichText::new(label).family(theme::semibold()).color(theme::BG))
                                         .fill(theme::TEXT)
                                         .stroke(Stroke::NONE)
-                                        .min_size(vec2(150.0, 40.0)),
+                                        .min_size(vec2(next_w, 40.0)),
                                 )
                                 .clicked();
                             if clicked {
@@ -476,7 +485,7 @@ impl App {
                             }
                             if self.nc.step == Step::Club && !busy {
                                 if ui
-                                    .add(egui::Button::new("Surprise me").min_size(vec2(120.0, 40.0)))
+                                    .add(egui::Button::new("Surprise me").min_size(vec2(surprise_w, 40.0)))
                                     .on_hover_text("A club from the middle of the division. Press again for another.")
                                     .clicked()
                                 {
@@ -499,55 +508,64 @@ impl App {
     fn nc_header(&mut self, ui: &mut Ui, side: bool) {
         let step = self.nc.step;
         let n = Step::ALL.len();
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 0.0;
-                theme::eyebrow(ui, &format!("New career / step {} of {}", step.index() + 1, n));
-                let title = match step {
-                    Step::You => "Who are you?",
-                    Step::World => "Choose a world",
-                    Step::Division => "Choose a division",
-                    Step::Club => "Choose your club",
-                    Step::Confirm => "Ready?",
-                };
-                ui.label(
-                    RichText::new(title)
-                        .font(FontId::new(if side { 20.0 } else { 26.0 }, theme::semibold()))
-                        .color(theme::TEXT),
-                );
-            });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let w = if side { 180.0 } else { 260.0 };
-                let (rect, _) = ui.allocate_exact_size(vec2(w, 30.0), Sense::hover());
-                let p = ui.painter_at(rect);
-                let seg = (w - 4.0 * 4.0) / n as f32;
-                for (i, s) in Step::ALL.iter().enumerate() {
-                    let x = rect.left() + i as f32 * (seg + 4.0);
-                    let r = egui::Rect::from_min_size(egui::pos2(x, rect.top() + 2.0), vec2(seg, 5.0));
-                    let col = if i <= step.index() { theme::ACCENT } else { theme::LINE_2 };
-                    p.rect_filled(r, 2.5, col);
-                    if !side || i == step.index() {
-                        let _ = s;
-                    }
-                    if !side {
-                        p.text(
-                            egui::pos2(r.center().x, r.bottom() + 5.0),
-                            Align2::CENTER_TOP,
-                            s.label(),
-                            FontId::new(10.0, egui::FontFamily::Monospace),
-                            if i == step.index() { theme::TEXT } else { theme::TEXT_MUTE },
-                        );
-                    }
+        let narrow = ui.available_width() < 520.0;
+        let title = match step {
+            Step::You => "Who are you?",
+            Step::World => "Choose a world",
+            Step::Division => "Choose a division",
+            Step::Club => "Choose your club",
+            Step::Confirm => "Ready?",
+        };
+        let heading = |ui: &mut Ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            theme::eyebrow(ui, &format!("New career / step {} of {}", step.index() + 1, n));
+            ui.label(
+                RichText::new(title)
+                    .font(FontId::new(if side { 20.0 } else { 26.0 }, theme::semibold()))
+                    .color(theme::TEXT),
+            );
+        };
+        // The progress line: one segment a step, the current and earlier ones filled.
+        let progress = |ui: &mut Ui, w: f32, labels: bool| {
+            let (rect, _) = ui.allocate_exact_size(vec2(w, if labels { 30.0 } else { 10.0 }), Sense::hover());
+            let p = ui.painter_at(rect);
+            let seg = (w - 4.0 * 4.0) / n as f32;
+            for (i, s) in Step::ALL.iter().enumerate() {
+                let x = rect.left() + i as f32 * (seg + 4.0);
+                let r = egui::Rect::from_min_size(egui::pos2(x, rect.top() + 2.0), vec2(seg, 5.0));
+                p.rect_filled(r, 2.5, if i <= step.index() { theme::ACCENT } else { theme::LINE_2 });
+                if labels {
+                    p.text(
+                        egui::pos2(r.center().x, r.bottom() + 5.0),
+                        Align2::CENTER_TOP,
+                        s.label(),
+                        FontId::new(10.0, egui::FontFamily::Monospace),
+                        if i == step.index() { theme::TEXT } else { theme::TEXT_MUTE },
+                    );
                 }
+            }
+        };
+        if narrow {
+            ui.vertical(|ui| {
+                heading(ui);
+                ui.add_space(6.0);
+                progress(ui, ui.available_width(), false);
             });
-        });
+        } else {
+            ui.horizontal(|ui| {
+                ui.vertical(heading);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    progress(ui, if side { 180.0 } else { 260.0 }, !side);
+                });
+            });
+        }
     }
 
     fn nc_you(&mut self, ui: &mut Ui) {
         ui.add_space(4.0);
         theme::eyebrow(ui, "Your name");
         let mut go = false;
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let r = ui.add(
                 egui::TextEdit::singleline(&mut self.nc.name)
                     .desired_width(ui.available_width().min(320.0))
@@ -607,11 +625,12 @@ impl App {
         );
         ui.add_space(10.0);
         theme::eyebrow(ui, "Size");
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Divisions");
+        ui.horizontal(|ui| {
+            menu::key_label(ui, 110.0, "Divisions");
             menu::segmented(ui, &DIV_CHOICES.map(|d| (d, d.to_string())), &mut self.nc.divs);
-            ui.add_space(10.0);
-            ui.label("Clubs in each");
+        });
+        ui.horizontal(|ui| {
+            menu::key_label(ui, 110.0, "Clubs in each");
             menu::segmented(ui, &PER_CHOICES.map(|d| (d, d.to_string())), &mut self.nc.per);
         });
         let total = self.nc.divs * self.nc.per;
@@ -686,7 +705,7 @@ impl App {
                         });
                     }
                 }));
-                let r = ui.interact(out.response.rect, ui.id().with(("div", d)), Sense::click());
+                let r = ui.interact(out.response.rect, egui::Id::unique(("nc_div", d)), Sense::click());
                 if r.clicked() {
                     *pick = Some(d);
                 }
@@ -726,7 +745,7 @@ impl App {
         let mut pick = None;
         let size = self.nc.division_size();
         let list_h = if stacked { (body_h * 0.45).max(120.0) } else { body_h };
-        let mut draw_list = |ui: &mut Ui, selected: Option<TeamId>, pick: &mut Option<TeamId>| {
+        let draw_list = |ui: &mut Ui, selected: Option<TeamId>, pick: &mut Option<TeamId>| {
             ui.set_width(list_w);
             egui::ScrollArea::vertical()
                 .id_salt("nc_clubs")

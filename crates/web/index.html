@@ -215,7 +215,7 @@
             <a href="#office">Front office</a>
           </div>
           <div class="spacer"></div>
-          <button class="play small" data-start>Play</button>
+          <button class="play small" data-go="play">Play</button>
         </nav>
       </div>
 
@@ -232,7 +232,7 @@
             <div class="start" data-choice>
               <button class="way main" data-go="new">
                 <b>New career</b>
-                <span>Pick one of twelve clubs and start from week one.</span>
+                <span>Choose a division and a club, and start from week one.</span>
               </button>
               <button class="way" data-go="continue" disabled>
                 <b>Continue career</b>
@@ -339,7 +339,7 @@
           <div class="start" data-choice>
             <button class="way main" data-go="new">
               <b>New career</b>
-              <span>Pick one of twelve clubs and start from week one.</span>
+              <span>Choose a division and a club, and start from week one.</span>
             </button>
             <button class="way" data-go="continue" disabled>
               <b>Continue career</b>
@@ -348,8 +348,8 @@
           </div>
           <div class="note">
             <b>Early version.</b> Your career is saved automatically in this browser after each round; a
-            match in progress is not, and a save may not survive a game update. Starting a new career
-            replaces the saved one. There is one league, and no sound.
+            match in progress is not, and a save may not survive a game update. You can keep several
+            careers in this browser. There is one league, and no sound.
           </div>
         </div>
       </section>
@@ -369,15 +369,32 @@
       // The game loads behind the site. Choosing how to start takes the
       // site away; the browser's back button brings it back without losing
       // the career. The game reads the choice from the address: #new opens
-      // the club picker, #continue goes straight into the saved career.
+      // the new career steps, #continue goes straight into the latest saved
+      // career, #load opens the list of careers and #play the main menu.
       (function () {
         var site = document.getElementById("site");
         var canvas = document.getElementById("app");
-        var playing = { "#play": 1, "#new": 1, "#continue": 1 };
+        var playing = { "#play": 1, "#new": 1, "#continue": 1, "#load": 1 };
+        // What the game keeps in this browser: its list of careers
+        // ("basketman.slots"), or the single save of older versions.
         function saved() {
           try {
-            if (!localStorage.getItem("basketman.career")) return null;
-            return localStorage.getItem("basketman.summary") || "A career is saved in this browser.";
+            var list = [];
+            var raw = localStorage.getItem("basketman.slots");
+            if (raw) list = (JSON.parse(raw).slots || []).filter(function (s) { return !s.damaged; });
+            if (list.length) {
+              var last = list.reduce(function (a, b) {
+                return (b.played || 0) >= (a.played || 0) ? b : a;
+              });
+              return {
+                count: list.length,
+                text: last.club + ", " + last.division + ", season " + last.season,
+              };
+            }
+            if (localStorage.getItem("basketman.career")) {
+              return { count: 1, text: localStorage.getItem("basketman.summary") || "A career is saved in this browser." };
+            }
+            return null;
           } catch (e) {
             return null;
           }
@@ -388,7 +405,12 @@
             var again = box.querySelector('[data-go="continue"]');
             var fresh = box.querySelector('[data-go="new"]');
             again.disabled = !summary;
-            again.querySelector("[data-saved]").textContent = summary || "No career saved in this browser yet.";
+            // Several careers: the card says so and opens the list.
+            var many = summary && summary.count > 1;
+            again.setAttribute("data-go", many ? "load" : "continue");
+            again.querySelector("[data-saved]").textContent = summary
+              ? many ? summary.count + " saved careers" : summary.text
+              : "No career saved in this browser yet.";
             // Whichever is the likelier choice gets the dark button.
             again.classList.toggle("main", !!summary);
             fresh.classList.toggle("main", !summary);
