@@ -21,7 +21,7 @@ const TAKE_BASE: f32 = 0.22;
 const MISS_BALANCE: f32 = 0.10;
 const MISS_STUN: f32 = 0.35;
 /// Chance a touch is on the arm and not the ball, at rating 10 handling.
-const ARM_BASE: f32 = 0.07;
+const ARM_BASE: f32 = 0.03;
 
 #[derive(Copy, Clone)]
 pub(super) struct Poke {
@@ -129,7 +129,7 @@ impl Game {
                         self.play.stun[dk] = self.play.stun[dk].max(MISS_STUN * self.rng.f32());
                         // Reaching in with the hand past the ball: the arm.
                         let temper = 1.5 - self.sides[1 - o].slots[self.sides[1 - o].on[dk]].p.personality.temperament as f32 / 20.0;
-                        let raw = 0.05 * temper * self.def().foul_mult(self.def().on[dk]) * self.off().draw_mult(self.off().on[h]) / CALL_BASE;
+                        let raw = 0.02 * temper * self.def().foul_mult(self.def().on[dk]) * self.off().draw_mult(self.off().on[h]) / CALL_BASE;
                         let hit = self.rng.chance(raw.min(0.9));
                         if self.call(hit, 1.0, FoulKind::ReachIn, (1 - o, dk), (o, h)) {
                             return self.floor_foul(dk, h, FoulKind::ReachIn);
