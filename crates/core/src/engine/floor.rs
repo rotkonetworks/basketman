@@ -48,6 +48,9 @@ const HEAT_CONTEST: f32 = 0.55;
 const HEAT_REAL: f32 = 0.45;
 /// A pass the passer reads as likelier than this to be lost is not thrown.
 const SWING_RISK_MAX: f32 = 0.22;
+/// Metres from the basket past which a three is judged a worse shot, and by how much a metre.
+const THREE_LONG: f32 = 7.4;
+const LONG_SLOPE: f32 = 0.022;
 const SWING_MOVER: f32 = 0.25;
 /// What a shot has to be worth, in points, with twelve seconds on the clock, and how much
 /// more early in the possession (and less late) over twelve seconds: the
@@ -3139,10 +3142,7 @@ impl Game {
     /// on a man who has been shooting, and his look is the tighter for it.
     fn look_seen(&self, k: usize) -> (ShotKind, f32, Option<usize>) {
         let (kind, c, near) = self.look(k);
-        // Nobody shoots from beyond the top of the arc unless the clock makes
-        // him: a catch up the floor is a man to bring the ball into the set.
-        let far = if self.op(k).y > 12.5 { 1.4 } else { 0.0 };
-        (kind, (c + HEAT_CONTEST * self.heat_of(k) + far).min(1.4), near)
+        (kind, (c + HEAT_CONTEST * self.heat_of(k)).min(1.4), near)
     }
 
     fn heat_of(&self, k: usize) -> f32 {
@@ -3255,7 +3255,11 @@ impl Game {
             }
             ShotKind::Three => {
                 let guard = dk.map_or(10.0, |d| self.de(d, Attr::PerimeterD));
+                // Beyond the arc the ball has further to go and less room for
+                // the error: a long three is a worse shot, and he knows it.
+                let range = self.op(k).dist(HOOP);
                 0.372 + (self.oe(k, Attr::ThreePoint) - 10.0) * 0.011
+                    - (range - THREE_LONG).max(0.0) * LONG_SLOPE
                     - c * (0.115 + (guard - 10.0) * 0.005)
                     - if off_dribble { 0.035 } else { 0.0 }
             }
@@ -3273,7 +3277,7 @@ impl Game {
             ShotKind::Mid => 0.040 + 0.130 * c,
             ShotKind::Three => 0.018 + 0.060 * c,
         };
-        base * if kind == ShotKind::Rim { 1.0 } else { 1.0 } * (1.0 + 0.5 * self.def().aggression()) * officiating::SHOOTING_FOULS
+        base * (1.0 + 0.5 * self.def().aggression()) * officiating::SHOOTING_FOULS
     }
 
     /// Expected points of that shot, as the player would judge it.
