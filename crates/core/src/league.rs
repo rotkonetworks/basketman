@@ -2082,7 +2082,6 @@ mod tests {
     /// the handler's day is different: under, he gets the pull-up and not the
     /// lane; over, he is contested at the shot and gets the lane.
     #[test]
-    #[ignore = "REGRESSION of the hands branch, not luck: over 150 games and 8400 screens each way main has the handler shooting after 6.3% of the screens he goes under and 4.3% of those he goes over; this branch has 11.1% under and 11.4% over (he shoots more than twice as often in both, and the open pull-up no longer draws more shots)"]
     fn going_under_gives_the_pull_up_and_going_over_gives_the_lane() {
         use crate::replay::EventKind;
         use crate::tactics::{DefenseScheme, OffenseSet};
@@ -2304,7 +2303,6 @@ mod tests {
     /// The tactics are not a table of bonuses: a zone packs the paint
     /// because of where its defenders stand, and pays for it outside.
     #[test]
-    #[ignore = "REGRESSION of the hands branch, not luck: over 3 worlds x 160 games main has the zone at rim 0.364 and threes 0.391 against man to man at 0.426 and 0.366; this branch has 0.361 and 0.401 against 0.381 and 0.406 (the zone still gives up rim shots, a third as many, and no longer gives up threes)"]
     fn a_zone_trades_shots_at_the_rim_for_threes() {
         use crate::court::ShotKind;
         use crate::tactics::DefenseScheme;
@@ -2335,6 +2333,88 @@ mod tests {
         let (man, zone) = (mix(DefenseScheme::ManToMan), mix(DefenseScheme::Zone23));
         assert!(zone.0 < man.0, "rim share: zone {} man {}", zone.0, man.0);
         assert!(zone.1 > man.1, "three share: zone {} man {}", zone.1, man.1);
+    }
+
+    #[test]
+    fn zz_measure() {
+        use crate::court::ShotKind;
+        use crate::replay::{EventKind, Source};
+        use crate::tactics::{DefenseScheme, OffenseSet};
+        let n: u64 = std::env::var("ZN").ok().and_then(|s| s.parse().ok()).unwrap_or(40);
+        for (name, d) in [("man", DefenseScheme::ManToMan), ("z23", DefenseScheme::Zone23), ("z32", DefenseScheme::Zone32), ("pack", DefenseScheme::PackLine), ("switch", DefenseScheme::SwitchEverything)] {
+            let mut cnt = [0.0f32; 3];
+            let mut made = [0.0f32; 3];
+            let mut con = [0.0f32; 3];
+            let mut src3 = [0.0f32; 9];
+            let mut src3c = [0.0f32; 9];
+            let (mut all, mut pts) = (0.0f32, 0.0f32);
+            for world in [9u64, 10, 11] {
+                let w = World::generate(world, 2);
+                let home = lineup(&w.teams[0], &w.players);
+                let mut tactics = w.teams[1].tactics().clone();
+                tactics.defense = d;
+                let mut away = lineup(&w.teams[1], &w.players);
+                away.tactics = &tactics;
+                for seed in 0..n {
+                    let (_, rec) = simulate_recorded(&home, &away, &w.rules, &mut Rng::new(seed));
+                    for e in rec.events.iter().filter(|e| e.offense == 0) {
+                        if let EventKind::Shot { kind, made: m, contest, source, .. } = &e.kind {
+                            let k = match kind { ShotKind::Rim => 0, ShotKind::Mid => 1, ShotKind::Three => 2 };
+                            all += 1.0; cnt[k] += 1.0; made[k] += *m as u8 as f32; con[k] += *contest;
+                            pts += if *m { [2.0, 2.0, 3.0][k] } else { 0.0 };
+                            if k == 2 { let si = Source::ALL.iter().position(|x| x == source).unwrap(); src3[si] += 1.0; src3c[si] += *contest; }
+                        }
+                    }
+                }
+            }
+            eprintln!("ZZ {name}: rim {:.3} mid {:.3} three {:.3} | fg {:.3} {:.3} {:.3} | contest {:.2} {:.2} {:.2} | pps {:.3}", cnt[0]/all, cnt[1]/all, cnt[2]/all, made[0]/cnt[0], made[1]/cnt[1], made[2]/cnt[2], con[0]/cnt[0], con[1]/cnt[1], con[2]/cnt[2], pts/all);
+            let mut line = String::new();
+            for (i, s) in Source::ALL.iter().enumerate() { line += &format!(" {:?} {:.0}/{:.2}", s, src3[i], if src3[i] > 0.0 { src3c[i]/src3[i] } else { 0.0 }); }
+            eprintln!("ZZ   threes by source:{line}");
+        }
+        let _ = OffenseSet::Motion;
+        // screens
+        let sn: u64 = std::env::var("ZS").ok().and_then(|s| s.parse().ok()).unwrap_or(30);
+        let mut by = [[0.0f32; 4]; 2];
+        let mut bs = [[0.0f32; 9]; 2];
+        let mut bk = [[0.0f32; 3]; 2];
+        for world in [9u64, 10, 11] {
+            let w = World::generate(world, 2);
+            let mut offense = w.teams[0].tactics().clone();
+            offense.offense = OffenseSet::PickAndRoll;
+            let mut home = lineup(&w.teams[0], &w.players);
+            home.tactics = &offense;
+            let mut defense = w.teams[1].tactics().clone();
+            defense.defense = DefenseScheme::ManToMan;
+            let mut away = lineup(&w.teams[1], &w.players);
+            away.tactics = &defense;
+            for seed in 0..sn {
+                let (_, rec) = simulate_recorded(&home, &away, &w.rules, &mut Rng::new(seed));
+                let mut screened: Option<(u32, f32, usize)> = None;
+                for e in rec.events.iter().filter(|e| e.offense == 0) {
+                    match &e.kind {
+                        EventKind::Screen { handler, .. } => {
+                            screened = rec.screens.iter().find(|x| x.0 == e.time).map(|x| (*handler, e.time, x.1 as usize));
+                            if let Some((_, _, c)) = screened { by[c][0] += 1.0; }
+                        }
+                        EventKind::Shot { who, contest, made, source, kind, .. } => {
+                            if let Some((h, at, c)) = screened.take() && h == *who && e.time - at < 5.0 {
+                                by[c][1] += 1.0; by[c][2] += *contest; let _ = made;
+                                bs[c][Source::ALL.iter().position(|x| x == source).unwrap()] += 1.0;
+                                bk[c][match kind { ShotKind::Rim => 0, ShotKind::Mid => 1, ShotKind::Three => 2 }] += 1.0;
+                            }
+                        }
+                        EventKind::Beaten { who, .. } => {
+                            if let Some((h, at, c)) = screened && h == *who && e.time - at < 1.0 { by[c][3] += 1.0; }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        for c in 0..2 { eprintln!("ZZ screens {} shots by source {:?} by kind(rim,mid,three) {:?}", if c == 0 { "over" } else { "under" }, Source::ALL.iter().zip(bs[c]).map(|(a, b)| format!("{a:?}={b}")).collect::<Vec<_>>(), bk[c]); }
+        let [over, under] = by;
+        eprintln!("ZZ screens over n={} shoot {:.3} contest {:.2} beaten {:.3} | under n={} shoot {:.3} contest {:.2} beaten {:.3}", over[0], over[1]/over[0], over[2]/over[1], over[3]/over[0], under[0], under[1]/under[0], under[2]/under[1], under[3]/under[0]);
     }
 
     #[test]
