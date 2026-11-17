@@ -134,7 +134,7 @@ pub(crate) fn moments(rec: &Recording, what: &str) -> Vec<f32> {
             let (q0, q1) = (a.pos[p.side as usize][p.to as usize], b.pos[p.side as usize][p.to as usize]);
             let toward = (q0.dist(hp) - q1.dist(hp)) / (b.time - a.time).max(0.05);
             let g = &rec.frames[rec.frame_at(p.time + 0.9)];
-            !p.inbound && q1.dist(hp) > 4.5 && toward > 2.5 && g.pos[p.side as usize][p.to as usize].dist(hp) < 3.0
+            !p.inbound && q1.dist(hp) > 3.5 && toward > 1.5 && g.pos[p.side as usize][p.to as usize].dist(hp) < 3.0
         }),
         // A ball screen, then a pass to the man who rolled to the rim.
         "roller" => passes(&|p, rec| {
