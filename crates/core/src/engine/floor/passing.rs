@@ -26,6 +26,8 @@ const LUNGE_REACH: f32 = 0.35;
 const TRY_BASE: f32 = 0.12;
 const TRY_SKILL: f32 = 0.030;
 const TRY_AGGRESSION: f32 = 0.25;
+/// How much of its running a man who is going to his spot is led by.
+const SPOT_LEAD: f32 = 1.4;
 /// Metres within which a hand and the ball are in contact.
 const HIT: f32 = hands::CONTACT;
 /// The same for a receiver's hands, which come to the ball together.
@@ -179,6 +181,8 @@ impl Game {
                     let dist = (v0 * t + 0.5 * 6.0 * t * t).min(top * t).min(m.pos.dist(to));
                     m.pos + dir * (dist * lead.max(0.8))
                 }
+                // A man going to his spot slows into it: he will not be as far on.
+                Task::Spot => m.pos + m.vel * (t * lead * SPOT_LEAD),
                 _ => m.pos + m.vel * (t * lead),
             };
         }
@@ -410,6 +414,10 @@ impl Game {
         let skill = self.pass_skill(h);
         let sp = spec(kind);
         risk += (0.004 + len * 0.0011) * sp.err * (1.6 - 1.1 * skill);
+        // A man running onto it is harder to hit with the ball: the passer
+        // has to lead him, and he has to meet it at speed.
+        let moving = self.m[self.play.o][j].vel.len();
+        risk += 0.012 * (moving - 1.0).max(0.0);
         risk * self.pass_stance(h, j).min(2.0)
     }
 
@@ -604,6 +612,11 @@ impl Game {
                 );
                 attempt[dk] = Some((v3(p.x + e.x, p.y + e.y, (p.z + e.z).max(0.3)), tau));
             }
+        }
+        if let Some((c, to)) = self.play.cut_after.take()
+            && c == h
+        {
+            self.play.task[h] = Task::Cut(to);
         }
         let react: [f32; 5] = std::array::from_fn(|dk| self.see_time(dk, rel.xy()) + REACT_READ);
         self.play.pre_aims = Some((self.cache.aims, react));

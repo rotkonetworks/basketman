@@ -442,6 +442,7 @@ pub fn passes(games: usize) {
         let mut ng = 0u32;
         let mut bx = BoxLine::default();
         let mut oc = [[0u32; 6]; 7];
+        let mut sp = [[0u32; 2]; 5];
         for g in 0..games {
             let (a, b) = ((g * 7 + si) % n, (g * 5 + 1 + g / n + si) % n);
             if a == b {
@@ -472,6 +473,14 @@ pub fn passes(games: usize) {
             for (pi, p) in ps.iter().enumerate() {
                 npass += 1;
                 oc[p.kind as usize][p.outcome as usize] += 1;
+                {
+                    let i = rec.frame_at(p.time);
+                    let (a, b) = (&rec.frames[i.saturating_sub(2)], &rec.frames[i]);
+                    let v = a.pos[p.side as usize][p.to as usize].dist(b.pos[p.side as usize][p.to as usize]) / (b.time - a.time).max(0.05);
+                    let k = if v < 1.0 { 0 } else if v < 2.5 { 1 } else if v < 4.0 { 2 } else if v < 5.5 { 3 } else { 4 };
+                    sp[k][0] += 1;
+                    sp[k][1] += (p.outcome != PassOutcome::Caught) as u32;
+                }
                 caught += (p.outcome == PassOutcome::Caught) as u32;
                 let side = p.side as usize;
                 let fi = rec.frame_at(p.time);
@@ -567,6 +576,11 @@ pub fn passes(games: usize) {
             pts_un / unas.0.max(1) as f64,
         );
         let _ = (pts_after, after.6, unas.3, efg_num_after);
+        print!("{:<11}       lost by receiver speed (<1, <2.5, <4, <5.5, more m/s): ", "");
+        for b in sp {
+            print!(" {:.1}% of {};", b[1] as f32 * 100.0 / b[0].max(1) as f32, b[0]);
+        }
+        println!();
         print!("{:<11}       by kind (n, % lost: bobble/tip/steal/out/miss):", "");
         for (ki, kn) in ["chest", "bounce", "ovrhd", "lob", "push", "hand", "outlt"].iter().enumerate() {
             let t: u32 = oc[ki].iter().sum();

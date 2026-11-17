@@ -736,6 +736,8 @@ struct Play {
     /// go, and the seconds each defender takes to see it go and read where
     /// it is going: until then he stays on the old picture.
     pre_aims: Option<(defense::Aims, [f32; 5])>,
+    /// A man who cuts as soon as the pass he is throwing is let go.
+    cut_after: Option<(usize, Vec2)>,
     /// How the current drive met the defense: 0 clean, 1 late help, 2 stopped.
     drive_class: usize,
     /// The driver has seen the help defender now running at him.
@@ -3690,7 +3692,9 @@ impl Game {
         {
             self.play.spots.swap(h, far);
             let side = if p.x >= 0.0 { 0.9 } else { -0.9 };
-            self.play.task[h] = Task::Cut(HOOP + v(side, 1.3));
+            // He goes when the ball has left his hands, not while he is
+            // throwing it.
+            self.play.cut_after = Some((h, HOOP + v(side, 1.3)));
             // The exchange doubles as a screen away from the ball. A
             // switching defense just trades men; everyone else can get hung
             // up on it.
@@ -6693,6 +6697,7 @@ impl Play {
             post_from: Vec2::ZERO,
             late_help: None,
             pre_aims: None,
+            cut_after: None,
             drive_class: 0,
             late_seen: false,
             hit: None,
