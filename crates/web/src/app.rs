@@ -6,7 +6,9 @@ use basketman_core::training::{Intensity, TrainingFocus};
 use eframe::egui::{self, Color32, FontId, Rect, RichText, Ui, vec2};
 
 use crate::matchview::{Look, Playback, Touchline, ViewMode};
+use crate::menu::{MenuState, Op, Page};
 use crate::persist;
+use crate::settings::{self, Settings};
 use crate::theme::{self, Backdrop};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::view3d::Preset;
@@ -111,13 +113,32 @@ impl Tab {
 pub struct App {
     pub(crate) world: World,
     pub(crate) seed: u64,
-    /// False while the title screen is up.
+    /// False while the main menu (or a page of the front end) is up.
     pub(crate) started: bool,
-    /// A career exists to go back to.
+    /// The world in memory is a career that can be played on.
     pub(crate) career: bool,
-    /// Clubs on offer on the title screen for a seed, and the one picked.
-    pub(crate) candidates: (u64, Vec<crate::title::Candidate>),
-    pub(crate) pick: usize,
+    /// The page of the front end shown while `started` is false.
+    pub(crate) front: Page,
+    /// The menu open over the game, and what it was asked to do and waits
+    /// on an answer for.
+    pub(crate) pause: Option<Page>,
+    pub(crate) leaving: Option<Op>,
+    pub(crate) menu: MenuState,
+    /// The new career being put together.
+    pub(crate) nc: crate::newcareer::NewCareer,
+    pub(crate) settings: Settings,
+    /// The saved careers, and the one the game saves into.
+    pub(crate) slots: persist::Index,
+    pub(crate) slot_id: Option<u32>,
+    /// The name of the manager, who is the player.
+    pub(crate) manager: String,
+    /// Storage work for the end of the frame.
+    pub(crate) ops: Vec<Op>,
+    /// The last thing the menus have to say about what they did.
+    pub(crate) notice: Option<String>,
+    pub(crate) applied_motion: Option<bool>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) applied_full: Option<bool>,
     /// The club the user manages.
     pub(crate) team: TeamId,
     /// The arrival pages, the career pages: see `club_ui.rs`.
@@ -155,15 +176,9 @@ pub struct App {
     /// The search box that Ctrl+K opens.
     pub(crate) search: crate::search::Search,
     /// False in `--screenshot` mode: the harness never touches the save.
-    persist: bool,
-    /// Why the career in storage could not be opened. While this is set
-    /// nothing is saved, so the stored one is not overwritten until the user
-    /// starts a new career.
-    pub(crate) load_failed: Option<String>,
-    /// The title screen asked "really start a new career?" and waits.
-    pub(crate) confirm_new: bool,
+    pub(crate) persist: bool,
     /// Where the calendar stood when the career was last saved.
-    saved_at: Option<(u16, usize, u32)>,
+    pub(crate) saved_at: Option<(u16, usize, u32)>,
     pub(crate) backdrop: Backdrop,
     /// How the screens are laid out and what the scenes remember.
     pub(crate) sh: crate::shell::Shell,
@@ -235,8 +250,20 @@ impl App {
             seed: 1,
             started: false,
             career: false,
-            candidates: (0, Vec::new()),
-            pick: 0,
+            front: Page::Main,
+            pause: None,
+            leaving: None,
+            menu: Default::default(),
+            nc: crate::newcareer::NewCareer::new(1),
+            settings: Settings::default(),
+            slots: Default::default(),
+            slot_id: None,
+            manager: String::new(),
+            ops: Vec::new(),
+            notice: None,
+            applied_motion: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            applied_full: None,
             team: 0,
             cu: Default::default(),
             tab: Tab::Inbox,
@@ -259,8 +286,6 @@ impl App {
             touchline: Touchline::default(),
             search: Default::default(),
             persist: true,
-            load_failed: None,
-            confirm_new: false,
             saved_at: None,
             backdrop: Backdrop::load(&cc.egui_ctx),
             sh: Default::default(),
@@ -280,15 +305,10 @@ impl App {
         if app.persist
             && let Some(storage) = cc.storage
         {
-            match persist::read(storage) {
-                persist::Loaded::Nothing => {}
-                persist::Loaded::Career(world) => {
-                    app.team = world.watch.unwrap_or(0);
-                    app.world = *world;
-                    app.career = true;
-                    app.saved_at = Some(app.save_mark());
-                }
-                persist::Loaded::Unreadable(why) => app.load_failed = Some(why),
+            // Only the list of careers is read now; a career is opened when it is chosen.
+            app.slots = persist::Index::read(storage);
+            if let Some(text) = storage.get_string(settings::KEY) {
+                app.settings = Settings::decode(&text);
             }
             if let Some(text) = storage.get_string(HUD_KEY) {
                 app.sh.hud.prefs = crate::matchview::HudPrefs::decode(&text);
@@ -308,6 +328,7 @@ impl App {
                 };
             }
         }
+        app.playback = app.fresh_playback();
         #[cfg(not(target_arch = "wasm32"))]
         {
             let args: Vec<String> = std::env::args().collect();
@@ -332,8 +353,10 @@ impl App {
                     app.search.query = q;
                 }
                 let tab = args.get(i + 2).map(String::as_str);
-                // `--screenshot file title` stays on the title screen.
+                // `--screenshot file title` stays on the main menu; `SHOT_MENU`
+                // picks another page of the front end: see `menu_harness`.
                 if tab == Some("title") {
+                    app.menu_harness();
                     return app;
                 }
                 // `SHOT_CLUB=n` manages club number n instead of the first.
@@ -967,6 +990,16 @@ impl App {
                 if let Ok(d) = std::env::var("SHOT_DRAWER") {
                     app.sh.hud.pick(&d);
                 }
+                // `SHOT_PAUSE=pause|settings|load|howto|saveas|leave` has the
+                // menu over the game open at that page.
+                if let Ok(p) = std::env::var("SHOT_PAUSE") {
+                    app.pause = Page::from_key(&p).or(Some(Page::Pause));
+                    app.menu.save_name = "Season one".into();
+                    if p == "leave" {
+                        app.leaving = Some(Op::ExitToMenu);
+                    }
+                }
+                app.make_slots();
             }
         }
         app
@@ -988,7 +1021,7 @@ impl App {
                 crate::perf::report();
             }
         }
-        if *frame != 90 {
+        if *frame != shot_frame() {
             return;
         }
         let (path, ctx) = (path.clone(), ui.ctx().clone());
@@ -1009,11 +1042,100 @@ impl App {
             .send_viewport_cmd(egui::ViewportCommand::Screenshot(save));
     }
 
-    /// Start a new career in charge of `team` in the world of `self.seed`.
+    /// `SHOT_MENU=main|load|settings|howto[:n]|credits|new:<step>` shows that
+    /// page of the front end; `new:club` and later have the league built
+    /// with the middle club of the bottom division chosen (`SHOT_DIV=n`
+    /// another division, `SHOT_CLUB=n` another club of the list).
+    /// `SHOT_MAKE=n` first puts n careers into slots (use `SHOT_SAVE=1` and
+    /// an `XDG_DATA_HOME` of your own).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn menu_harness(&mut self) {
+        self.make_slots();
+        let Ok(menu) = std::env::var("SHOT_MENU") else { return };
+        self.menu_page(&menu);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn make_slots(&mut self) {
+        let n: usize = std::env::var("SHOT_MAKE").ok().and_then(|n| n.parse().ok()).unwrap_or(0);
+        for i in 0..n {
+            let mut w = crate::newcareer::career(10 + i as u64, TEAMS, DIVISIONS, 24 + i * 3);
+            for _ in 0..(2 + 3 * i) {
+                w.play_round();
+            }
+            self.ops.push(Op::Stash(Box::new(w), crate::newcareer::make_name(i as u64, 1)));
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn menu_page(&mut self, menu: &str) {
+        let (page, arg) = menu.split_once(':').unwrap_or((menu, ""));
+        match page {
+            "new" => {
+                self.open_new_career();
+                let step = crate::newcareer::Step::from_key(arg).unwrap_or(crate::newcareer::Step::You);
+                self.nc.step = step;
+                if matches!(step, crate::newcareer::Step::Division | crate::newcareer::Step::Club | crate::newcareer::Step::Confirm) {
+                    self.nc.generate();
+                    if let Some(d) = std::env::var("SHOT_DIV").ok().and_then(|d| d.parse().ok()) {
+                        self.nc.division = d;
+                    }
+                    self.nc.pick_for_harness(std::env::var("SHOT_CLUB").ok().and_then(|d| d.parse().ok()));
+                }
+            }
+            "howto" => {
+                self.menu.howto = arg.parse().unwrap_or(0);
+                self.front = Page::HowTo;
+            }
+            other => {
+                if let Some(p) = Page::from_key(other) {
+                    self.front = p;
+                }
+            }
+        }
+    }
+
+    /// Start a new career in charge of `team` in the world of `self.seed`
+    /// (the screenshot harness).
     pub(crate) fn begin(&mut self, team: TeamId) {
-        self.world = World::new_career_tiers(self.seed, TEAMS, DIVISIONS);
+        let world = crate::newcareer::career(self.seed, TEAMS, DIVISIONS, team);
+        self.begin_world(world, team, "Manager".into(), None);
+    }
+
+    /// Take over a world in which the manager is already in charge of
+    /// `team`, as a new career in `slot`.
+    pub(crate) fn begin_world(&mut self, world: World, team: TeamId, manager: String, slot: Option<u32>) {
+        self.world = world;
         self.team = team;
-        let _ = self.world.apply(Command::TakeCharge(team));
+        self.manager = manager;
+        self.slot_id = slot;
+        self.reset_screens();
+        self.start_intro();
+        self.started = true;
+        self.career = true;
+        self.pause = None;
+        self.saved_at = None;
+        // The first save follows at once: the slot holds the new career as it begins.
+        self.notice = None;
+    }
+
+    /// A saved career, opened.
+    pub(crate) fn enter_world(&mut self, world: World, slot: u32, manager: String) {
+        self.team = world.watch.unwrap_or(0);
+        self.world = world;
+        self.manager = manager;
+        self.slot_id = Some(slot);
+        self.reset_screens();
+        self.tab = self.home_tab();
+        self.started = true;
+        self.career = true;
+        self.pause = None;
+        self.saved_at = Some(self.save_mark());
+        self.notice = None;
+    }
+
+    /// Nothing of the screens of one career is kept for the next.
+    fn reset_screens(&mut self) {
         self.mail = None;
         self.mail_kind = None;
         self.live = None;
@@ -1028,25 +1150,19 @@ impl App {
         self.deal = Default::default();
         self.deal_note = None;
         self.cu = Default::default();
-        self.start_intro();
-        self.started = true;
-        self.career = true;
-        self.confirm_new = false;
-        // The user chose to replace whatever is stored, readable or not.
-        self.load_failed = None;
-        self.saved_at = None;
+        self.playback = self.fresh_playback();
     }
 
     /// What changes when the calendar moves: a day, a round, a season.
-    fn save_mark(&self) -> (u16, usize, u32) {
+    pub(crate) fn save_mark(&self) -> (u16, usize, u32) {
         (self.world.season, self.world.round, self.world.day)
     }
 
     /// Whether the career may be written now. Not during a live game (the
     /// world has already started the round, and the game cannot be saved),
-    /// not in screenshot mode, and not over a save that did not load.
-    fn may_save(&self) -> bool {
-        self.persist && self.career && self.live.is_none() && self.load_failed.is_none()
+    /// not in screenshot mode, and only into a slot of its own.
+    pub(crate) fn may_save(&self) -> bool {
+        self.persist && self.career && self.live.is_none() && self.slot_id.is_some()
     }
 
     pub(crate) fn squad(&mut self, ui: &mut Ui, bd: &Backdrop) {
@@ -1377,6 +1493,71 @@ impl App {
     }
 }
 
+/// One thing the harness does before the picture.
+#[cfg(not(target_arch = "wasm32"))]
+enum ShotStep {
+    Click(egui::Pos2, egui::Pos2),
+    Key(egui::Key, egui::Modifiers),
+    Text(String),
+    Wait,
+}
+
+/// `SHOT_CLICK="80,420;300,200"` clicks those points one after another;
+/// "x,y>x,y" drags; `enter`, `esc`, `up`, `down`, `left`, `right`, `tab`,
+/// `ctrl+a` press that key, `type:text` types, `wait` does nothing for a
+/// while.
+#[cfg(not(target_arch = "wasm32"))]
+fn shot_steps() -> Vec<ShotStep> {
+    let Ok(clicks) = std::env::var("SHOT_CLICK") else {
+        return Vec::new();
+    };
+    let point = |t: &str| -> Option<egui::Pos2> {
+        let (x, y) = t.split_once(',')?;
+        Some(egui::pos2(x.trim().parse().ok()?, y.trim().parse().ok()?))
+    };
+    clicks
+        .split(';')
+        .filter_map(|c| {
+            let c = c.trim();
+            if let Some(t) = c.strip_prefix("type:") {
+                return Some(ShotStep::Text(t.to_string()));
+            }
+            if c == "wait" {
+                return Some(ShotStep::Wait);
+            }
+            let (mods, name) = match c.strip_prefix("ctrl+") {
+                Some(k) => (egui::Modifiers::COMMAND, k),
+                None => (egui::Modifiers::NONE, c),
+            };
+            let key = match name {
+                "enter" => Some(egui::Key::Enter),
+                "esc" => Some(egui::Key::Escape),
+                "up" => Some(egui::Key::ArrowUp),
+                "down" => Some(egui::Key::ArrowDown),
+                "left" => Some(egui::Key::ArrowLeft),
+                "right" => Some(egui::Key::ArrowRight),
+                "tab" => Some(egui::Key::Tab),
+                "a" => Some(egui::Key::A),
+                _ => None,
+            };
+            if let Some(k) = key {
+                return Some(ShotStep::Key(k, mods));
+            }
+            match c.split_once('>') {
+                Some((a, b)) => Some(ShotStep::Click(point(a)?, point(b)?)),
+                None => point(c).map(|p| ShotStep::Click(p, p)),
+            }
+        })
+        .collect()
+}
+
+/// The frame the picture is taken at: 90, or later when there is a lot to click.
+#[cfg(not(target_arch = "wasm32"))]
+fn shot_frame() -> u32 {
+    let n = shot_steps().len() as u32;
+    (40 + 10 * n + 40).max(90)
+}
+
 impl eframe::App for App {
     /// `SHOT_CLICK="80,420;300,200"` clicks those points one after another
     /// before a screenshot is taken, so what a click does can be checked
@@ -1394,29 +1575,38 @@ impl eframe::App for App {
                     | egui::Event::MouseMoved(_)
             )
         });
-        let Ok(clicks) = std::env::var("SHOT_CLICK") else {
-            return;
-        };
-        // "x,y" is a click; "x,y>x,y" a drag from the first point to the
-        // second.
-        let point = |t: &str| -> Option<egui::Pos2> {
-            let (x, y) = t.split_once(',')?;
-            Some(egui::pos2(x.trim().parse().ok()?, y.trim().parse().ok()?))
-        };
-        let steps: Vec<(egui::Pos2, egui::Pos2)> = clicks
-            .split(';')
-            .filter_map(|c| match c.split_once('>') {
-                Some((a, b)) => Some((point(a)?, point(b)?)),
-                None => point(c).map(|p| (p, p)),
-            })
-            .collect();
+        let steps = shot_steps();
         // One step every ten frames from frame 40: move, press, (drag),
-        // release.
+        // release; or a key, or text typed.
         let Some(n) = frame.checked_sub(40) else {
             return;
         };
-        let Some(&(pos, to)) = steps.get((n / 10) as usize) else {
+        let Some(step) = steps.get((n / 10) as usize) else {
             return;
+        };
+        let (pos, to) = match step {
+            ShotStep::Click(a, b) => (*a, *b),
+            ShotStep::Key(k, m) => {
+                if n % 10 == 1 {
+                    for pressed in [true, false] {
+                        raw.events.push(egui::Event::Key {
+                            key: *k,
+                            physical_key: Some(*k),
+                            pressed,
+                            repeat: false,
+                            modifiers: *m,
+                        });
+                    }
+                }
+                return;
+            }
+            ShotStep::Text(t) => {
+                if n % 10 == 1 {
+                    raw.events.push(egui::Event::Text(t.clone()));
+                }
+                return;
+            }
+            ShotStep::Wait => return,
         };
         let button = |at, pressed| egui::Event::PointerButton {
             pos: at,
@@ -1440,10 +1630,12 @@ impl eframe::App for App {
         if self.persist {
             storage.set_string(VIEW_KEY, self.look.mode.key().to_string());
             storage.set_string(HUD_KEY, self.sh.hud.prefs.encode());
+            storage.set_string(settings::KEY, self.settings.encode());
         }
-        if self.may_save() {
-            persist::write(storage, &self.world);
-            self.saved_at = Some(self.save_mark());
+        // Leaving the browser or the window is not a save the player asked for
+        // when automatic saving is off.
+        if self.settings.autosave != settings::Autosave::Off {
+            self.save_current(storage);
         }
     }
 
@@ -1461,30 +1653,32 @@ impl eframe::App for App {
             crate::perf::add("eframe: ui+tessellate", cpu as f64 * 1000.0);
         }
         // The web page around the game says what the visitor chose by
-        // setting the address: `#continue` goes straight into the saved
-        // career, `#new` to the club picker.
+        // setting the address: `#continue` goes into the latest career,
+        // `#new` to the new career flow, `#play` to the main menu and
+        // `#load` to the list of careers.
         #[cfg(target_arch = "wasm32")]
         {
             let hash = frame.info().web_info.location.hash.clone();
             if hash != self.web_hash {
-                match hash.as_str() {
-                    "#continue" if self.career => self.started = true,
-                    "#new" => self.started = false,
-                    _ => {}
-                }
+                self.follow_hash(&hash);
                 self.web_hash = hash;
             }
         }
-        // Save when the calendar has moved (a day, a round, a game, the
-        // draft): not every frame, and not in the middle of a live game.
+        self.apply_settings(ui.ctx());
+        #[cfg(target_arch = "wasm32")]
+        for bytes in crate::webfile::take() {
+            self.ops.push(Op::Import(bytes));
+            ui.ctx().request_repaint();
+        }
+        // Save when the calendar has moved as far as the player asked (a
+        // day, a round): not every frame, and not in the middle of a live game.
         if self.may_save()
-            && self.saved_at != Some(self.save_mark())
+            && self.autosave_due()
             && let Some(storage) = frame.storage_mut()
         {
-            persist::write(storage, &self.world);
-            self.saved_at = Some(self.save_mark());
+            self.save_current(storage);
         }
-        // The title screen is the photograph; the game proper is a place.
+        // The main menu is the photograph; the game proper is a place.
         self.backdrop.inset = self.started;
         if !self.started {
             let _p = crate::perf::scope("backdrop");
@@ -1519,16 +1713,23 @@ impl eframe::App for App {
         #[cfg(not(target_arch = "wasm32"))]
         self.capture(ui);
         let bd = self.backdrop.clone();
+        let pause_keys = self.pause_keys(ui.ctx());
         self.search_keys(ui.ctx());
         self.match_keys(ui.ctx());
         if !self.started {
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
-                .show(ui, |ui| self.title(ui, &bd));
-            return;
+                .show(ui, |ui| self.front_ui(ui, &bd));
+        } else {
+            self.shell(ui);
+            self.search_overlay(ui.ctx());
+            self.pause_overlay(ui, &bd, pause_keys);
         }
-
-        self.shell(ui);
-        self.search_overlay(ui.ctx());
+        if !self.ops.is_empty() || self.slots.migrating {
+            let ctx = ui.ctx().clone();
+            let persist_on = self.persist;
+            let storage = frame.storage_mut().filter(|_| persist_on);
+            self.run_ops(&ctx, storage);
+        }
     }
 }

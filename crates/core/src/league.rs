@@ -417,7 +417,7 @@ impl World {
             club: Default::default(),
             career: Default::default(),
             travel: Vec::new(),
-            officials: crate::officials::Officials::generate(seed, n_teams),
+            officials: crate::officials::Officials::generate(seed, n_teams, Rules::fiba().ref_game_mgmt),
         };
         world.fixtures = schedule_tiers(&world.teams);
         world.date_fixtures();

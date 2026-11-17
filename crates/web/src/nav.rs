@@ -558,7 +558,7 @@ impl App {
             self.playback = crate::matchview::Playback {
                 time: 0.0,
                 playing: true,
-                ..crate::matchview::Playback::start()
+                ..self.fresh_playback()
             };
             self.go(Tab::Match);
         }

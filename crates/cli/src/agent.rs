@@ -452,8 +452,11 @@ impl Session {
                     json!({"id": r.id, "name": r.name, "age": r.age, "known_for": r.tags(),
                            "accuracy": r.accuracy, "strictness": r.strictness, "consistency": r.consistency,
                            "home_lean": r.home_lean, "composure": r.composure,
+                           "game_management": r.game_mgmt,
                            "season": {"games": r.season.games, "fouls_per_game": r.season.fouls_per_game(),
                                       "home_balance": r.season.home_balance(), "overturned": r.season.overturned,
+                                      "fouls_on_leading": r.season.fouls_lead, "fouls_on_trailing": r.season.fouls_trail,
+                                      "leading_minus_trailing_per_game": r.season.lead_balance(),
                                       "reviewed": r.season.reviewed},
                            "warned": r.warned})
                 };

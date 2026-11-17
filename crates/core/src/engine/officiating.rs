@@ -76,6 +76,45 @@ const STALE: f32 = 14.0;
 /// crew chief's quality bears on a marginal play.
 const REVIEW_SLIP: f32 = 0.05;
 
+/// Game management (`Official::manager`, 0..=1): how far, at the most, it
+/// moves the threshold at which a marginal contact is whistled, as a share of
+/// that threshold, for a referee who is all of it. Evening out a lead, making
+/// up for a call he doubts, and a foul count that has run away within a half.
+/// Each is applied only inside the band of contact the book leaves to
+/// judgement (`CLEAR`..1.15 of the threshold), never to a clear foul or to
+/// legal contact. Together they are capped at `MANAGE_CAP`. For a crew that
+/// is all of it, the average final margin falls by about 1.1 points (13.5 to
+/// 12.3) and the fouls on the side ahead, less those on the side behind, move
+/// by 2.6 a game (`basketman lab officials`).
+const EVEN_MAX: f32 = 0.50;
+const MAKEUP_MAX: f32 = 0.30;
+const DRIFT_MAX: f32 = 0.10;
+const MANAGE_CAP: f32 = 0.80;
+/// A whistle turned on a side has less room to go than one let go (a usual
+/// threshold sits nearer the top of the band of judgement than the bottom),
+/// so a nudge towards whistling is made this much larger, which keeps the
+/// total of fouls where it was.
+const UP_GAIN: f32 = 1.4;
+const DOWN_GAIN: f32 = 0.6;
+/// A lead smaller than this many points is a close game and is not evened;
+/// the full push is from `LEAD_FULL` to `LEAD_FADE`, and it is gone again by
+/// `LEAD_GONE` (a game already decided).
+const LEAD_FROM: f32 = 2.0;
+const LEAD_FULL: f32 = 10.0;
+const LEAD_FADE: f32 = 18.0;
+const LEAD_GONE: f32 = 32.0;
+/// The first half's share of the push the second half gets.
+const FIRST_HALF: f32 = 0.5;
+/// How much of a doubt the call that left it is worth: a wrong whistle, a
+/// foul he let go, and a whistle on contact the film calls marginal.
+const DOUBT_WRONG: f32 = 1.0;
+const DOUBT_MARGINAL: f32 = 0.25;
+/// What is left of a grievance after he has decided a marginal play.
+const MAKEUP_SPENT: f32 = 0.5;
+/// How much of a swing to the charge or the block a marginal collision takes
+/// from the difference of the two sides' nudges.
+const MANAGE_KIND: f32 = 0.5;
+
 /// Roles of the three, in the standard mechanics.
 const LEAD: u8 = 0;
 const TRAIL: u8 = 1;
@@ -142,6 +181,7 @@ pub(super) struct Ofc {
     swing: [f32; 2],
     per: [RefRecord; 3],
     fouls: [u16; 2],
+    fouls_state: [[u16; 3]; 2],
     decisions: u16,
     /// Decisions on the ball and the count.
     others: u16,
@@ -158,6 +198,9 @@ pub(super) struct Ofc {
     pub(super) prompt: Option<ReviewPrompt>,
     /// The shot being fouled: made, and a three.
     shot: Option<(bool, bool)>,
+    /// What each official feels he owes each side, in 0..=1.5: the doubt of
+    /// calls he made against it (see `doubt`).
+    owed: [[f32; 2]; 3],
 }
 
 impl Ofc {
@@ -177,6 +220,7 @@ impl Ofc {
             swing: [0.0; 2],
             per: [RefRecord::default(); 3],
             fouls: [0; 2],
+            fouls_state: [[0; 3]; 2],
             decisions: 0,
             others: 0,
             left: [1, 1],
@@ -187,6 +231,7 @@ impl Ofc {
             challenge: [None, None],
             prompt: None,
             shot: None,
+            owed: [[0.0; 2]; 3],
         }
     }
 
@@ -351,6 +396,107 @@ impl Game {
         style * mood * (1.0 + lean)
     }
 
+    // ---- game management ---------------------------------------------------
+
+    /// Which half of the game (overtime is its own).
+    fn half(&self, period: u8) -> u8 {
+        (period as u32 * 2 / self.rules.periods.max(1) as u32) as u8
+    }
+
+    /// How strongly a game that is `lead` points apart wants evening: 0 when
+    /// close, full between `LEAD_FULL` and `LEAD_FADE`, and fading to nothing
+    /// as a game is decided. In the first half it is a smaller push.
+    fn even_push(&self, lead: f32) -> f32 {
+        let s = if lead <= LEAD_FROM {
+            0.0
+        } else if lead < LEAD_FULL {
+            (lead - LEAD_FROM) / (LEAD_FULL - LEAD_FROM)
+        } else if lead <= LEAD_FADE {
+            1.0
+        } else if lead < LEAD_GONE {
+            1.0 - (lead - LEAD_FADE) / (LEAD_GONE - LEAD_FADE)
+        } else {
+            0.0
+        };
+        let half = if self.half(self.period) == 0 { FIRST_HALF } else { 1.0 };
+        s * half
+    }
+
+    /// How much more readily (positive) or less readily (negative), as a
+    /// share of his threshold, official `i` whistles contact that is a
+    /// judgement call against side `against`, from his game management: the
+    /// lead, what he owes each side, and the fouls of this half so far. 0
+    /// exactly for a man with none.
+    fn manage(&self, i: usize, against: usize) -> f32 {
+        let ofc = self.ofc.as_ref().expect("officiated");
+        let m = ofc.crew.refs[i].manager;
+        if m <= 0.0 {
+            return 0.0;
+        }
+        let margin = self.sides[against].score as i32 - self.sides[1 - against].score as i32;
+        // Positive when `against` leads: turn the whistle on it.
+        let even = EVEN_MAX * self.even_push(margin.abs() as f32) * margin.signum() as f32;
+        let makeup = MAKEUP_MAX * (ofc.owed[i][1 - against] - ofc.owed[i][against]).clamp(-1.0, 1.0);
+        let half = self.half(self.period);
+        let mut hf = [0i32; 2];
+        for c in &ofc.calls {
+            if let Ruling::Foul { by, .. } = c.called {
+                if self.half(c.period) == half {
+                    hf[by as usize & 1] += 1;
+                }
+            }
+        }
+        let drift = -DRIFT_MAX * (((hf[against] - hf[1 - against]) as f32) / 4.0).clamp(-1.0, 1.0);
+        (m * (even + makeup + drift)).clamp(-MANAGE_CAP, MANAGE_CAP)
+    }
+
+    /// The threshold `ct` for a play whose contact has the threshold `t0`
+    /// moved by `nudge`, within the band of judgement only: never past what
+    /// a clear foul is (so none is let go) nor past what is legal.
+    fn nudged(ct: f32, t0: f32, nudge: f32) -> f32 {
+        if nudge > 0.0 {
+            (ct * (1.0 + UP_GAIN * nudge)).min(ct.max(t0 * 1.15)).min(0.97)
+        } else if nudge < 0.0 {
+            (ct * (1.0 + DOWN_GAIN * nudge)).max(ct.min(t0 * CLEAR))
+        } else {
+            ct
+        }
+    }
+
+    /// He has decided a play that was his to judge: what he felt he owed
+    /// has been paid in part.
+    fn spend(&mut self, i: usize) {
+        let ofc = self.ofc.as_mut().expect("officiated");
+        if ofc.crew.refs[i].manager > 0.0 {
+            for v in &mut ofc.owed[i] {
+                *v *= MAKEUP_SPENT;
+            }
+        }
+    }
+
+    /// What a call he has just made does to what official `i` feels he
+    /// owes: his own doubt about it (the recorded truth against the call),
+    /// scaled by how much he senses such things (eyes and steadiness).
+    fn doubt(&mut self, i: usize, truth: Ruling, called: Ruling) {
+        let ofc = self.ofc.as_mut().expect("officiated");
+        let o = &ofc.crew.refs[i];
+        if o.manager <= 0.0 {
+            return;
+        }
+        let sense = 0.3 + 0.7 * (0.6 * o.accuracy + 0.4 * o.consistency);
+        let (side, w) = match (truth, called) {
+            // A whistle against `a` that the film does not back, or the
+            // wrong foul: he owes `a`; one on a judgement call, a little.
+            (Ruling::Marginal { .. }, Ruling::Foul { by: a, .. }) => (a as usize, DOUBT_MARGINAL),
+            (t, Ruling::Foul { by: a, .. }) if t != called => (a as usize, DOUBT_WRONG),
+            // A clear foul let go: he owes the side it was committed on.
+            (Ruling::Foul { by: x, .. }, Ruling::Nothing) => (1 - x as usize, DOUBT_WRONG),
+            _ => return,
+        };
+        let v = &mut ofc.owed[i][side & 1];
+        *v = (*v + w * sense).min(1.5);
+    }
+
     // ---- making a call ----------------------------------------------------
 
     fn note(
@@ -403,6 +549,22 @@ impl Game {
         ofc.calls.push(rec.clone());
         if let Some(r) = &mut self.rec {
             r.calls.push(rec);
+        }
+        if what == What::Foul {
+            self.doubt(by, truth, called);
+            // A whistle: was the side it is on ahead or behind?
+            if let Ruling::Foul { by: a, .. } = called {
+                let a = a as usize & 1;
+                let m = self.sides[a].score as i32 - self.sides[1 - a].score as i32;
+                let state = if m > 0 { 0 } else if m == 0 { 1 } else { 2 };
+                let ofc = self.ofc.as_mut().expect("officiated");
+                ofc.fouls_state[a][state] += 1;
+                match state {
+                    0 => ofc.per[by].fouls_lead += 1,
+                    2 => ofc.per[by].fouls_trail += 1,
+                    _ => {}
+                }
+            }
         }
         idx
     }
@@ -459,6 +621,13 @@ impl Game {
             Ruling::Marginal { kind, by: against as u8 }
         };
         let ct = (t0 * self.blow_at(i, kind, against)).min(0.97);
+        let ct = if matches!(truth, Ruling::Marginal { .. }) {
+            let n = self.manage(i, against);
+            self.spend(i);
+            Self::nudged(ct, t0, n)
+        } else {
+            ct
+        };
         let e = (ERR_BASE * muddle).clamp(0.003, 0.45);
         let ph = (PHANTOM_BASE * muddle).clamp(0.0005, 0.12);
         let lean = self.lean_of(i) * LEAN_SHIFT * if against == 1 { 1.0 } else { -1.0 };
@@ -623,6 +792,18 @@ impl Game {
             Ruling::Marginal { kind: truth_kind, by: truth_by as u8 }
         };
         let ct = (t0 * self.blow_at(i, truth_kind, truth_by)).min(0.97);
+        // On a play that was his to judge, a manager of the game leans: how
+        // readily he whistles it, and whether it is the charge or the block.
+        let mut kind_shift = 0.0;
+        let ct = if matches!(truth, Ruling::Marginal { .. }) {
+            let (n_o, n_d) = (self.manage(i, o), self.manage(i, d));
+            self.spend(i);
+            // Positive: favour calling it on the attacker.
+            kind_shift = MANAGE_KIND * (n_o - n_d);
+            Self::nudged(ct, t0, if truth_by == o { n_o } else { n_d })
+        } else {
+            ct
+        };
         let e = (ERR_BASE * muddle).clamp(0.003, 0.45);
         let ph = (PHANTOM_BASE * muddle).clamp(0.0005, 0.12);
         let lean_c = self.crew_lean(i);
@@ -647,6 +828,10 @@ impl Game {
         } else {
             kind_err * (1.0 + toward_charge * 1.6)
         } * (1.0 + lean);
+        // A marginal one goes the way the manager would have it: a nudge
+        // towards the charge makes a charge less likely to be turned into a
+        // block, and a block more likely to be turned into a charge.
+        let p_flip = if charge { p_flip - kind_shift } else { p_flip + kind_shift };
         let flipped = flip_roll < p_flip.clamp(0.0, 0.8);
         // A whistle on a play that was clean is a phantom, and it goes the
         // way the call was going to go: a charge if the driver was in the
@@ -1329,6 +1514,7 @@ impl Game {
         Some(GameOfficiating {
             crew: ofc.crew.ids(),
             fouls: ofc.fouls,
+            fouls_state: ofc.fouls_state,
             calls: ofc.decisions,
             others: ofc.others,
             errors: ofc.errors,

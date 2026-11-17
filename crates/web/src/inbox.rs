@@ -54,7 +54,7 @@ impl App {
                     let _ = self.world.apply(Command::PlayToday);
                 }
                 self.touchline = Default::default();
-                self.playback = crate::matchview::Playback::start();
+                self.playback = self.fresh_playback();
                 self.tab = Tab::Match;
             }
             if ui
@@ -76,7 +76,7 @@ impl App {
                 self.playback = crate::matchview::Playback {
                     time: end,
                     playing: false,
-                    ..crate::matchview::Playback::start()
+                    ..self.fresh_playback()
                 };
                 self.tab = Tab::Match;
             }

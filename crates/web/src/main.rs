@@ -16,7 +16,9 @@ mod inbox;
 mod lineup;
 mod market;
 mod matchview;
+mod menu;
 mod nav;
+mod newcareer;
 mod pages;
 mod perf;
 mod persist;
@@ -25,6 +27,7 @@ mod profile;
 mod scenes;
 mod screens;
 mod search;
+mod settings;
 mod shell;
 mod side;
 mod signature_ui;
@@ -36,6 +39,8 @@ mod tscreen;
 mod theme;
 mod title;
 mod view3d;
+#[cfg(target_arch = "wasm32")]
+mod webfile;
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result {

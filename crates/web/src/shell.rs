@@ -669,7 +669,7 @@ impl App {
 
     /// 1 to 6 open the groups, Alt+Left goes back, F11 is full screen.
     pub(crate) fn shell_keys(&mut self, ctx: &egui::Context) {
-        if ctx.egui_wants_keyboard_input() || self.search.open {
+        if ctx.egui_wants_keyboard_input() || self.search.open || self.pause.is_some() {
             return;
         }
         use egui::{Key, Modifiers};
@@ -775,14 +775,14 @@ impl App {
                                 ui.close();
                             }
                             if ui.button("Main menu").clicked() {
-                                self.started = false;
+                                self.open_pause();
                                 ui.close();
                             }
                         });
                     } else {
                         let menu = if wide { "Main menu" } else { "Menu" };
                         if ui.add(egui::Button::new(menu)).clicked() {
-                            self.started = false;
+                            self.open_pause();
                         }
                         let fs = match (wide, is_fullscreen(ui.ctx())) {
                             (true, true) => "Exit full screen",

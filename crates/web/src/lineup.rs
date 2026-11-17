@@ -55,8 +55,11 @@ pub(crate) fn profile_figure(
     size: egui::Vec2,
 ) {
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
-    let t = ui.input(|i| i.time) as f32;
-    ui.ctx().request_repaint_after(Duration::from_millis(40));
+    // Reduced motion: the figure stands still, facing front.
+    let t = if crate::settings::reduced() { 0.0 } else { ui.input(|i| i.time) as f32 };
+    if !crate::settings::reduced() {
+        ui.ctx().request_repaint_after(Duration::from_millis(40));
+    }
     // Turning slowly, starting from the front.
     let a = -std::f32::consts::FRAC_PI_2 + (t * 0.55).sin() * 1.25;
     let face = Vec2 {
