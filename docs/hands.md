@@ -72,3 +72,32 @@ Files: `engine/hands.rs` (the pure model), `engine/floor/hands_hooks.rs` (what e
 **What was not done.** Seals, screens with arms, box-outs with hands, tips, held balls, fakes, the shot and finish catalogue, signature moves as executions, jump catches (so no alley-oop), and the coaching instructions (deny or sag, pressure the ball, force the weak hand) are not built. A bobble is recovered by the nearest hand, not by a hand going to the floor. The release point of a pass is the passer's hand at the time, but his body does not pivot round a hand in his way.
 
 **What ball movement pays, and what is still off.** See the numbers in the last section of this file.
+
+## What ball movement pays (measured at the end of the stage)
+
+`basketman lab hands passes 100` (the same world, both teams run the same set; per possession unless said otherwise):
+
+| set | pts | passes | assists/game | turnovers | bad passes | completion | open at catch | after a pass: pts/shot | without a pass |
+|---|---|---|---|---|---|---|---|---|---|
+| Motion | 1.10 | 3.7 | 16.7 | .17 | .086 | 96.0% | 3.0 m | 0.99 | 0.75 |
+| Pick and roll | 1.10 | 2.9 | 13.2 | .14 | .045 | 96.7% | 3.1 m | 0.98 | 0.80 |
+| Post up | 1.12 | 5.0 | 19.2 | .16 | .086 | 96.7% | 2.8 m | 1.01 | 0.78 |
+| Isolation | 1.07 | 3.3 | 15.5 | .15 | .056 | 96.6% | 3.0 m | 0.95 | 0.75 |
+| Five-out | 1.12 | 4.2 | 17.8 | .16 | .086 | 96.3% | 3.1 m | 1.00 | 0.81 |
+
+Why passing did not pay when the stage was first built (the diagnosis, with the lab columns that showed it):
+
+- Shots after a pass were already worth about 0.25 points more than shots with no pass (1.0 against 0.75), so the shots were not the problem. Passing lost the possession on the way: 7% of passes did not reach a hand (bobbles 3.9%, an arm that was fully stretched at the catch because the receiver's hand went to the first point of the ball's path it could just touch, the ball arriving where the man was not when he was running), and a possession of 3.5 passes lost one in five.
+- The defense had a perfect picture: it moved for the receiver as the ball left the passer's hand. Now it holds the old picture for the time it takes to see the ball go and read where it is going (the man who guards the receiver, half of it); the receiver is open by about 3 m at the catch and a defender closes 0.1 to 0.4 m of that while the ball flies.
+- The offence passed on only when a shot cleared a bar that is high early in the possession (`threshold`: 1.45 at 20 s, 1.25 at 14 s, 1.1 at 8 s). Measured on 22 000 decisions: of the open catch-and-shoot threes (contest under 0.3, worth 1.10 points), 15 were taken with 14 to 19 s left, 1140 with 8 to 13 s left. So an open three was passed up for the first ten seconds of a possession and the ball moved on, to be lost on the way. Lowering the bar (1.08) made Motion better than Isolation but made the game too quick (pace 85 against a band of 70.5 to 75.5) and put 44 threes a game up (band 24 to 28). It was left where it was; what is left is a coupled choice (pace, three-point attempts and how early the open shot is taken) that has to be set together.
+- Isolation was not an isolation: the star led the offence (he brought the ball up and stood in the lead's spot), and a star's usage went untaxed. The ball is now brought up by the handler in every set, a drive that beats a man draws two helpers, and a man who takes the load tires faster. The ablations: the star in the lead slot was worth 0.035 points a possession, the star's priority in `decide` another 0.04, and neither the drives (a sag or a closeout beaten) nor the heat on the star moved it.
+- A pick and roll lost a possession in twenty to a roller camping under the basket (three seconds), which is fixed.
+
+Where it landed (the tests): for a squad of good passers Motion 1.151 against Isolation 1.146 (24 worlds, thin), and for a star with four poor passers Isolation 1.233 against Motion 1.129.
+
+## League numbers, main against the end of this stage (1500 games, 4 seasons, `basketman realism`)
+
+Points a hundred possessions 101.6 -> 104.0 (target 113, band 109 to 117; the first hands build had 99.2); points a game 71.0 -> 73.7; pace 69.9 -> 70.8; FG% 43.1 -> 41.8; eFG% 50.4 -> 49.3; three-point attempts 23.1 -> 26.1 (inside); three-point % 35.2 -> 34.0; turnovers a hundred 20.0 -> 16.3 (inside); bad passes 53% of them (the first hands build 66%) -> 43%; steals a hundred 10.5 -> 9.9; assists a game 15.1 -> 14.7; assist leader 4.7 -> 3.5 (target 7.4); free-throw rate 33.9 -> 33.7; fouls a game 19.3 -> 19.5; top scorer 38.6 -> 27.4 points a game and 25.8% -> 20.0% of his team's points; shot-clock violations 0.09% of turnovers -> 0.05% (target 3.7%).
+
+Still off target: points a hundred possessions (104 against 113), FG% and two-point % (the shooting model has its own calibration that was not touched), the assist leader (assists are spread over the five by slot, 23, 24, 22, 19, 11%; real teams have a point guard with 40%), 0 to 3 ft share (16% against 23%: a beaten drive meets two helpers), 3 to 10 ft accuracy (36% against 45.5%), corner threes (30% of threes against 20%), and-ones (10% of baskets against 6%), shot-clock violations, and the speed of the engine (see the report).
+
