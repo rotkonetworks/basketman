@@ -13,11 +13,13 @@ use crate::replay::{Dribble, HandKind, PassKind, PassOutcome, TurnoverKind};
 
 /// Metres of aim error at no distance, and per metre thrown, for a chest
 /// pass by a passer of rating 10.
-const AIM_BASE: f32 = 0.07;
-const AIM_PER_M: f32 = 0.014;
+const AIM_BASE: f32 = 0.05;
+const AIM_PER_M: f32 = 0.010;
 /// Seconds before a defender sees the ball go, before his anticipation.
 const SEE_BASE: f32 = 0.16;
 const SEE_SKILL: f32 = 0.008;
+/// Seconds, past seeing the ball go, a defender takes to read where it is going.
+const REACT_READ: f32 = 0.12;
 /// How far past his arm a defender can get a hand to a ball by leaning.
 const LUNGE_REACH: f32 = 0.35;
 /// How likely a defender who can reach a pass goes for it, at rating 10.
@@ -561,9 +563,8 @@ impl Game {
                 attempt[dk] = Some((v3(p.x + e.x, p.y + e.y, (p.z + e.z).max(0.3)), tau));
             }
         }
-        if std::env::var("DBG").is_ok() {
-            eprintln!("release {kind:?} from {:?} h{h}->{j} rel {:?} aim {:?} dur {:.2} recvpos {:?} t {:.1}", self.m[o][h].pos, rel, plan.aim, plan.dur, self.m[o][j].pos, self.play.t);
-        }
+        let react: [f32; 5] = std::array::from_fn(|dk| self.see_time(dk, rel.xy()) + REACT_READ);
+        self.play.pre_aims = Some((self.cache.aims, react));
         self.cut_log(0.0);
         self.log_path(&plan.path, 0.0, 0.0);
         self.play.flight = Some(Flight {
@@ -681,11 +682,6 @@ impl Game {
                 }
             }
         }
-        if std::env::var("DBG").is_ok() && t1 >= f.dur && t1 < f.dur + DT {
-            let (bp, bz) = path.at(t1);
-            let h = &self.hands[o][to];
-            eprintln!("   at arrival ball {:.2},{:.2},{:.2} recv {:?} hands {:?} {:?} kind {:?} {:?}", bp.x, bp.y, bz, self.m[o][to].pos, h.h[0].p, h.h[1].p, h.h[0].kind, h.h[1].kind);
-        }
         if t1 >= f.dur + OVERTIME {
             // Nobody got to it: it is a loose ball now.
             return self.pass_loose(f, t1, from, to, None, kind_of(th));
@@ -698,16 +694,6 @@ impl Game {
     fn defender_on_pass(&mut self, f: Flight, ts: f32, dk: usize, gap: f32, from: usize, to: usize, th: Thrown) -> Option<End> {
         let path = f.path.unwrap_or_else(Path::new);
         let (bp, bz, bv, bvz) = path.state(ts);
-        if std::env::var("DBG").is_ok() {
-            eprintln!("  DEF attempt {} d_to_passer {:.2} d_to_recv {:.2} hands {:?} {:?} z {:.2} {:.2}", th.attempt[dk].is_some(), self.dp(dk).dist(self.m[self.play.o][from].pos), self.dp(dk).dist(self.m[self.play.o][to].pos), self.hands[1-self.play.o][dk].h[0].kind, self.hands[1-self.play.o][dk].h[1].kind, self.hands[1-self.play.o][dk].h[0].p.z, self.hands[1-self.play.o][dk].h[1].p.z);
-        }
-        if std::env::var("DBG").is_ok() {
-            let o2 = self.play.o;
-            let (dp0, h0, h1) = th.dbg[dk];
-            let now = (self.dp(dk), self.hands[1 - o2][dk].h[0].p, self.hands[1 - o2][dk].h[1].p);
-            eprintln!("  TIP ts {ts:.2} ball {:.2},{:.2},{bz:.2} | at release def {:.2},{:.2} h0 {:.2},{:.2},{:.2} h1 {:.2},{:.2},{:.2} | now def {:.2},{:.2} h0 {:.2},{:.2},{:.2} h1 {:.2},{:.2},{:.2} kinds {:?} {:?}", bp.x,bp.y, dp0.x,dp0.y,h0.x,h0.y,h0.z,h1.x,h1.y,h1.z, now.0.x,now.0.y,now.1.x,now.1.y,now.1.z,now.2.x,now.2.y,now.2.z, self.hands[1-o2][dk].h[0].kind, self.hands[1-o2][dk].h[1].kind);
-        }
-        dbg_out("defender", ts, f.dur, bp, bz);
         let speed = (bv.dot(bv) + bvz * bvz).sqrt();
         let steal = self.de(dk, Attr::Steal);
         let hands = self.de(dk, Attr::Handling);
@@ -755,33 +741,37 @@ impl Game {
         let path = f.path.unwrap_or_else(Path::new);
         let (bp, bz, bv, bvz) = path.state(ts);
         let speed = (bv.dot(bv) + bvz * bvz).sqrt();
-        dbg_out("receiver", ts, f.dur, bp, bz);
         let hands_skill = self.oe(to, Attr::Handling);
         // Stretching for it, a hard pass, not looking, and running all
         // make it harder to hold.
         let me = self.m[o][to].pos;
         let (arm, _, _) = self.arm_of(o, to);
+        // How far out his arm is when the ball meets it: the hand that is
+        // nearest the ball, from its own shoulder.
         let stretch = (0..2)
             .map(|i| {
                 let sh = self.shoulder_of(o, to, i);
-                V3 { x: bp.x - sh.x, y: bp.y - sh.y, z: bz - sh.z }.len() / arm
+                let hp = self.hands[o][to].h[i].p;
+                let d = V3 { x: bp.x - hp.x, y: bp.y - hp.y, z: bz - hp.z }.len();
+                (d, V3 { x: hp.x - sh.x, y: hp.y - sh.y, z: hp.z - sh.z }.len() / arm)
             })
-            .fold(f32::MAX, f32::min)
+            .fold((f32::MAX, 1.0), |a, b| if b.0 < a.0 { b } else { a })
+            .1
             .clamp(0.0, 1.3);
         let back = (self.m[o][from].pos - me).norm();
         let looking = (self.st[o][to].gaze.dot(back) * 0.5 + 0.5).clamp(0.0, 1.0);
         let run = self.m[o][to].vel.len();
-        let base = 0.996 + 0.0004 * hands_skill;
-        let pen = 0.15 * (stretch - 0.85).max(0.0).powi(2)
+        // A catch is almost always held: what costs one is a ball that was
+        // thrown wide, a stretch past the arm, a hard throw to a man who is
+        // not looking, and a bad pair of hands.
+        let base = 0.9985 + 0.0003 * (hands_skill - 10.0);
+        let pen = 0.12 * (stretch - 0.85).max(0.0).powi(2)
             + 0.30 * ((th.err - 0.50).max(0.0) / 0.6).min(1.5)
-            + 0.03 * (speed - 12.0).max(0.0) / 4.0
-            + 0.02 * (1.0 - looking)
-            + 0.001 * run
-            + 0.012 * (gap / CATCH);
+            + 0.02 * (speed - 12.0).max(0.0) / 4.0
+            + 0.008 * (1.0 - looking)
+            + 0.0004 * run
+            + 0.004 * (gap / CATCH);
         let p = (base - pen).clamp(0.40, 0.995);
-        if std::env::var("DBG").is_ok() {
-            eprintln!("  catchp {p:.2} stretch {stretch:.2} speed {speed:.1} looking {looking:.2} run {run:.1} gap {gap:.2}");
-        }
         self.cut_log(ts - f.t);
         let held = self.rng.chance(p);
         self.note_pass(if held { PassOutcome::Caught } else { PassOutcome::Bobbled }, gap, None);
@@ -832,7 +822,6 @@ impl Game {
         let path = f.path.unwrap_or_else(Path::new);
         let (bp, bz, _, _) = path.state(ts);
         let _ = (to, tipped);
-        dbg_out("gone", ts, f.dur, bp, bz);
         self.cut_log(ts - f.t);
         self.play.flight = None;
         self.play.thrown = None;
@@ -858,7 +847,6 @@ impl Game {
         self.play.scramble = Some(Scramble { passer: from, to, tipped_by: tipped, kind, cause: TurnoverKind::BadPass });
         let (bp, bz) = path.at(t);
         self.note_pass(PassOutcome::Missed, 0.0, None);
-        dbg_out("loose", t, f.dur, bp, bz);
         self.play.ball = bp;
         self.play.ball_h = bz;
         // The rest of the flight is the ball physics' (the glass, the rim, the
@@ -944,10 +932,4 @@ impl Game {
 
 fn kind_of(th: Thrown) -> PassKind {
     th.kind
-}
-
-fn dbg_out(what: &str, ts: f32, dur: f32, bp: Vec2, bz: f32) {
-    if std::env::var("DBG").is_ok() {
-        eprintln!("  {what} at {ts:.2}/{dur:.2} ball {:.2},{:.2} z {bz:.2}", bp.x, bp.y);
-    }
 }

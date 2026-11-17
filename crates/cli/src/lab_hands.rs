@@ -34,6 +34,7 @@ pub fn run(games: usize) {
     let mut ast_made = (0u32, 0u32);
     let mut secs = 0.0f64;
     let mut by_set = [(0u32, 0u32, 0u32, 0u32); 5];
+    let mut fouls = [0u32; 8];
     for g in 0..games {
         let (a, b) = (g % n, (g * 5 + 1 + g / n) % n);
         if a == b {
@@ -121,6 +122,7 @@ pub fn run(games: usize) {
                     tov[k] += 1;
                     stolen += stolen_by.is_some() as u32;
                 }
+                EventKind::Foul { kind, .. } => fouls[*kind as usize] += 1,
                 EventKind::Shot { made, assist, .. } if *made => {
                     ast_made.0 += 1;
                     ast_made.1 += assist.is_some() as u32;
@@ -193,6 +195,14 @@ pub fn run(games: usize) {
         "bad passes per 100 passes {:.2}",
         tov[0] as f32 / passes.max(1) as f32 * 100.0
     );
+    {
+        let tot: u32 = fouls.iter().sum();
+        print!("fouls per game {:.1}:", tot as f32 / games.max(1) as f32);
+        for (i, k) in basketman_core::replay::FoulKind::ALL.iter().enumerate() {
+            print!(" {:?} {:.1}%", k, fouls[i] as f32 * 100.0 / tot.max(1) as f32);
+        }
+        println!();
+    }
     shares.sort_by(|a, b| a.total_cmp(b));
     if !shares.is_empty() {
         println!(
@@ -430,6 +440,7 @@ pub fn passes(games: usize) {
         let mut pts_after = 0.0f64;
         let mut pts_un = 0.0f64;
         let mut ng = 0u32;
+        let mut bx = BoxLine::default();
         for g in 0..games {
             let (a, b) = ((g * 7 + si) % n, (g * 5 + 1 + g / n + si) % n);
             if a == b {
@@ -447,6 +458,7 @@ pub fn passes(games: usize) {
             for side in 0..2 {
                 for (_, l) in &r.boxes[side] {
                     ast += l.ast as u32;
+                    bx.add(l);
                 }
             }
             for e in &rec.events {
@@ -553,6 +565,11 @@ pub fn passes(games: usize) {
             pts_un / unas.0.max(1) as f64,
         );
         let _ = (pts_after, after.6, unas.3, efg_num_after);
+        println!(
+            "{:<11}       fga/p {:.3} fg% {:.1} 3pa/p {:.3} 3p% {:.1} fta/p {:.3} ftm/p {:.3} orb/p {:.3} ast/fgm {:.3}",
+            "", bx.fga as f32 / p, bx.fgm as f32 * 100.0 / bx.fga.max(1) as f32, bx.tpa as f32 / p, bx.tpm as f32 * 100.0 / bx.tpa.max(1) as f32,
+            bx.fta as f32 / p, bx.ftm as f32 / p, bx.orb as f32 / p, bx.ast as f32 / bx.fgm.max(1) as f32
+        );
     }
     println!("columns: ppp points/possession; pass/p passes per possession; ast/g assists per team-game; tov/p, bad/p turnovers and bad passes per possession; cmp% pass completion;");
     println!("hold s the passer held the ball; fly s of flight; open0/open1 m from the nearest defender to the receiver at release/catch; close how much he closed;");

@@ -732,6 +732,10 @@ struct Play {
     post_from: Vec2,
     /// A help defender who ran into the driver's path too late to be set.
     late_help: Option<usize>,
+    /// Where the defense was standing to guard the ball when a pass was let
+    /// go, and the seconds each defender takes to see it go and read where
+    /// it is going: until then he stays on the old picture.
+    pre_aims: Option<(defense::Aims, [f32; 5])>,
     /// How the current drive met the defense: 0 clean, 1 late help, 2 stopped.
     drive_class: usize,
     /// The driver has seen the help defender now running at him.
@@ -871,7 +875,6 @@ pub(super) struct Game {
     poke: Poke,
     /// Passes read this tick: (tick, risk) by passer and receiver.
     risk_memo: std::cell::Cell<[Option<(u32, f32)>; 25]>,
-    dbg_sc: f32,
     /// Possessions the shot clock failed to end (a fault; tests want none).
     pub(super) stalls: u32,
     /// Arms and hand speeds of the ten.
@@ -963,7 +966,6 @@ impl Game {
             hands_prev: [[Hands::NONE; 5]; 2],
             poke: Poke::NONE,
             risk_memo: std::cell::Cell::new([None; 25]),
-            dbg_sc: 0.0,
             stalls: 0,
             hand_k: [HandK::NONE; 10],
             catch_at: None,
@@ -1096,9 +1098,6 @@ impl Game {
                         && self.play.after.is_none()
                         && !matches!(self.play.phase, Phase::Line { .. });
                     if idle && self.play.shot_clock < -4.0 && self.play.dead <= 0.0 {
-                        if std::env::var("STALL").is_ok() {
-                            eprintln!("STALL sc {:.1} t {:.1} wait {:.1} phase {} holder {:?} fetcher {:?} throw {} loose {}", self.play.shot_clock, self.play.t, self.play.wait, self.phase_name(), self.play.holder, self.play.fetcher, self.play.throw.is_some(), self.loose.is_some());
-                        }
                         self.stalls += 1;
                         if let Some(rec) = &mut self.rec {
                             rec.stalls += 1;
@@ -1615,12 +1614,6 @@ impl Game {
             }
         }
         self.ticks += 1;
-        if std::env::var("STALL").is_ok() {
-            if self.play.shot_clock > self.dbg_sc + 0.05 && self.play.t > 8.0 {
-                eprintln!("RESET sc {:.1}->{:.1} at t {:.1} phase {} holder {:?} loose {} flight {} after {}", self.dbg_sc, self.play.shot_clock, self.play.t, self.phase_name(), self.play.holder, self.loose.is_some(), self.play.flight.is_some(), self.play.after.is_some());
-            }
-            self.dbg_sc = self.play.shot_clock;
-        }
         self.officials_tick();
         for side in &mut self.m {
             for m in side {
@@ -2343,7 +2336,18 @@ impl Game {
             self.cache.aims = defense::aims(&view);
             self.cache.aims_tick = self.ticks;
         }
-        let aims = self.cache.aims;
+        let mut aims = self.cache.aims;
+        // A pass in the air: a defender has to see it go and work out where it
+        // is going before he moves for the man who will catch it.
+        if let Some(Flight { kind: FlightKind::Pass { .. }, t, .. }) = self.play.flight
+            && let Some((pre, react)) = self.play.pre_aims
+        {
+            for dk in 0..5 {
+                if t < react[dk] {
+                    aims.at[dk] = pre.at[dk];
+                }
+            }
+        }
         if !matches!(self.play.phase, Phase::Drive { .. } | Phase::Screen { .. }) {
             self.play.on_ball = aims.on_ball;
         }
@@ -3782,10 +3786,12 @@ impl Game {
             * self.off().draw_mult(self.off().on[h])
             / CALL_BASE;
         let guarded = q.dist(p) < 2.6;
+        // The strips are the hands' now (`dribbling.rs`): a ball that is
+        // taken is a ball a hand reached, not a die rolled here.
         let _ = strip;
         if guarded {
             let o = self.play.o;
-            if self.call(r < strip + foul, 1.0, FoulKind::ReachIn, (1 - o, dk), (o, h)) {
+            if self.call(r < foul, 1.0, FoulKind::ReachIn, (1 - o, dk), (o, h)) {
                 return self.floor_foul(dk, h, FoulKind::ReachIn);
             }
         }
@@ -6686,6 +6692,7 @@ impl Play {
             blown: None,
             post_from: Vec2::ZERO,
             late_help: None,
+            pre_aims: None,
             drive_class: 0,
             late_seen: false,
             hit: None,
