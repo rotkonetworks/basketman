@@ -2378,6 +2378,8 @@ mod tests {
         let mut by = [[0.0f32; 4]; 2];
         let mut bs = [[0.0f32; 9]; 2];
         let mut bk = [[0.0f32; 3]; 2];
+        let mut oc = [[0.0f32; 6]; 2];
+        let mut pa = [0.0f32; 2];
         for world in [9u64, 10, 11] {
             let w = World::generate(world, 2);
             let mut offense = w.teams[0].tactics().clone();
@@ -2390,6 +2392,27 @@ mod tests {
             away.tactics = &defense;
             for seed in 0..sn {
                 let (_, rec) = simulate_recorded(&home, &away, &w.rules, &mut Rng::new(seed));
+                {
+                    let evs: Vec<_> = rec.events.iter().collect();
+                    for (i, e) in evs.iter().enumerate() {
+                        if e.offense != 0 { continue; }
+                        if let EventKind::Screen { handler, .. } = &e.kind {
+                            let Some(c) = rec.screens.iter().find(|x| x.0 == e.time).map(|x| x.1 as usize) else { continue };
+                            pa[c] += rec.passes.iter().filter(|p| p.side == 0 && p.time > e.time && p.time < e.time + 5.0).count() as f32;
+                            let mut out = 5;
+                            for f in evs[i + 1..].iter().take(12) {
+                                match &f.kind {
+                                    EventKind::Shot { who, .. } => { out = if who == handler { 0 } else { 1 }; break; }
+                                    EventKind::Turnover { .. } => { out = 2; break; }
+                                    EventKind::Foul { .. } => { out = 3; break; }
+                                    EventKind::Screen { .. } => { out = 4; break; }
+                                    _ => {}
+                                }
+                            }
+                            oc[c][out] += 1.0;
+                        }
+                    }
+                }
                 let mut screened: Option<(u32, f32, usize)> = None;
                 for e in rec.events.iter().filter(|e| e.offense == 0) {
                     match &e.kind {
@@ -2413,8 +2436,49 @@ mod tests {
             }
         }
         for c in 0..2 { eprintln!("ZZ screens {} shots by source {:?} by kind(rim,mid,three) {:?}", if c == 0 { "over" } else { "under" }, Source::ALL.iter().zip(bs[c]).map(|(a, b)| format!("{a:?}={b}")).collect::<Vec<_>>(), bk[c]); }
+        eprintln!("ZZ outcome after screen (handler shot, other shot, turnover, foul, next screen, none) over {:?} under {:?}; passes in 5 s over {:.2} under {:.2}", oc[0], oc[1], pa[0] / by[0][0], pa[1] / by[1][0]);
         let [over, under] = by;
         eprintln!("ZZ screens over n={} shoot {:.3} contest {:.2} beaten {:.3} | under n={} shoot {:.3} contest {:.2} beaten {:.3}", over[0], over[1]/over[0], over[2]/over[1], over[3]/over[0], under[0], under[1]/under[0], under[2]/under[1], under[3]/under[0]);
+    }
+
+    #[test]
+    fn zz_short() {
+        use crate::replay::Source;
+        use crate::shotchart::{shots, Zone};
+        let n: u64 = std::env::var("ZN").ok().and_then(|s| s.parse().ok()).unwrap_or(20);
+        let mut by = [[0.0f32; 4]; 9]; // per source: count, made, contest, all-shots-of-source
+        let (mut all, mut sh, mut shm) = (0.0f32, 0.0f32, 0.0f32);
+        let (mut corner, mut atb, mut rim, mut rimm, mut zero3, mut zero3m) = (0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32);
+        let mut kick = [0.0f32; 2];
+        for world in [20u64, 21, 22] {
+            let w = World::generate(world, 8);
+            for pair in 0..4usize {
+                let home = lineup(&w.teams[2 * pair], &w.players);
+                let away = lineup(&w.teams[2 * pair + 1], &w.players);
+                for seed in 0..n {
+                    let (r, rec) = simulate_recorded(&home, &away, &w.rules, &mut Rng::new(seed));
+                    let ids = [0, 1].map(|s| r.boxes[s].iter().map(|b| b.0).collect::<Vec<_>>());
+                    for s in shots(&rec, &ids) {
+                        let ft = crate::court::HOOP.dist(crate::court::v(s.x, s.y)) / 0.3048;
+                        all += 1.0;
+                        if s.zone == Zone::CornerThree { corner += 1.0; }
+                        if s.zone == Zone::AboveBreakThree { atb += 1.0; }
+                        let si = Source::ALL.iter().position(|x| *x == s.source).unwrap();
+                        by[si][3] += 1.0;
+                        if ft < 3.0 { rim += 1.0; rimm += s.made as u8 as f32; }
+                        if (3.0..10.0).contains(&ft) {
+                            sh += 1.0; shm += s.made as u8 as f32;
+                            by[si][0] += 1.0; by[si][1] += s.made as u8 as f32; by[si][2] += s.contest;
+                        }
+                    }
+                }
+            }
+        }
+        let _ = (zero3, zero3m, &mut kick);
+        eprintln!("ZS shots {all}: 0-3ft {:.3} @{:.3} | 3-10ft {:.3} @{:.3} | corner share of 3pa {:.3}", rim / all, rimm / rim, sh / all, shm / sh, corner / (corner + atb));
+        for (i, s) in Source::ALL.iter().enumerate() {
+            if by[i][0] > 0.0 { eprintln!("ZS   3-10ft {:?}: n {} ({:.3} of all) fg {:.3} contest {:.2}", s, by[i][0], by[i][0] / all, by[i][1] / by[i][0], by[i][2] / by[i][0]); }
+        }
     }
 
     #[test]

@@ -43,6 +43,15 @@ mod stance_hooks;
 /// with a crowd and a clock.
 /// What a shot adds to the attention a man draws, and how much of it is
 /// worth in contest on his next look.
+/// What a pass has to beat a driver's own finish by, in points, when he is
+/// still going and when a body set in his way has stopped him.
+const KICK_PREMIUM: [f32; 2] = [0.2, 0.0];
+/// And how far under the bar of his own a man's shot may be for the ball to go to him then.
+const KICK_EAGER: [f32; 2] = [0.0, 0.30];
+pub(crate) static GT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+/// A man without the ball who is lower than this (metres from the baseline) when a
+/// drive starts goes to the corner; the others hold the arc.
+const CORNER_SPOT_Y: f32 = 3.2;
 const SHOT_HEAT: f32 = 0.16;
 const HEAT_CONTEST: f32 = 0.55;
 const HEAT_REAL: f32 = 0.45;
@@ -3273,9 +3282,9 @@ impl Game {
 
     fn foul_chance(&self, kind: ShotKind, c: f32) -> f32 {
         let base = match kind {
-            ShotKind::Rim => 0.060 + 0.180 * c.min(1.0),
-            ShotKind::Mid => 0.040 + 0.130 * c,
-            ShotKind::Three => 0.018 + 0.060 * c,
+            ShotKind::Rim => 0.075 + 0.225 * c.min(1.0),
+            ShotKind::Mid => 0.019 + 0.075 * c,
+            ShotKind::Three => 0.006 + 0.025 * c,
         };
         base * (1.0 + 0.5 * self.def().aggression()) * officiating::SHOOTING_FOULS
     }
@@ -3357,7 +3366,7 @@ impl Game {
     }
 
     /// The teammate with the best look, if it beats `bar` expected points.
-    fn best_pass(&mut self, h: usize, bar: f32, left: f32) -> Option<usize> {
+    fn best_pass(&mut self, h: usize, bar: f32, left: f32, eager: f32) -> Option<usize> {
         // Any teammate with a good enough look is an option, the better
         // the look the likelier; the passer does not always find the best.
         let mut weights = [0.0f32; 5];
@@ -3381,7 +3390,7 @@ impl Game {
             };
             let c = (c + HEAT_CONTEST * self.heat_of(j)).min(1.4);
             let value = self.ev(j, kind, c, near, false) - self.pass_risk(h, j) * 1.6;
-            if value > bar && value > self.threshold(j, left - 1.0) {
+            if value > bar && value > self.threshold(j, left - 1.0) - eager {
                 weights[j] = value - bar + 0.04;
             }
         }
@@ -3465,6 +3474,7 @@ impl Game {
                 0.0
             };
         if value > bar {
+            GT.store(4, std::sync::atomic::Ordering::Relaxed);
             return self.gather(
                 if self.play.dribbled { 0.35 } else { 0.3 },
                 self.play.dribbled,
@@ -3474,7 +3484,7 @@ impl Game {
         self.play.edge = 1.0;
         let vision = (0.35 + (self.oe(h, Attr::Passing) + self.oe(h, Attr::Iq)) / 40.0 * 0.9).min(1.0);
         if self.rng.chance(vision)
-            && let Some(j) = self.best_pass(h, (value + 0.08).max(bar), left)
+            && let Some(j) = self.best_pass(h, (value + 0.08).max(bar), left, 0.0)
         {
             return self.pass(h, j, false);
         }
@@ -3656,14 +3666,13 @@ impl Game {
                 continue;
             }
             let side = if q.x >= 0.0 { 1.0 } else { -1.0 };
-            let to = if q.y < 5.2 {
-                // Baseline: the corner.
+            let to = if q.y < CORNER_SPOT_Y {
+                // Low on the baseline: the corner.
                 v(side * 6.95, 1.0)
             } else {
-                // Above the break: slide to the three-point line on his side
-                // of the drive.
-                let toward = if p.x * q.x >= 0.0 { 0.0 } else { 0.0 };
-                v(side * 6.1 + toward, q.y.clamp(4.2, 8.0))
+                // A wing or the top: he stays out on the three-point line
+                // where a kick-out finds him, rather than sinking to the corner.
+                v(side * 6.1, q.y.clamp(4.2, 8.0))
             };
             if self.rng.chance(0.55 + 0.02 * self.oe(k, Attr::Iq)) {
                 self.play.spots[k] = to;
@@ -3927,6 +3936,7 @@ impl Game {
         }
         let p = self.op(h);
         if p.dist(HOOP) < 1.5 {
+            GT.store(1, std::sync::atomic::Ordering::Relaxed);
             return self.gather(0.12, false);
         }
         if !beaten {
@@ -4016,13 +4026,32 @@ impl Game {
         let (kind, c, near) = self.look_seen(h);
         let value = self.ev(h, kind, c, near, true);
         let vision = (0.35 + (self.oe(h, Attr::Passing) + self.oe(h, Attr::Iq)) / 40.0 * 0.9).min(1.0);
+        if std::env::var("ZZDE").is_ok() {
+            let mut best = (-9.0f32, 0.0f32, 0.0f32, 9usize, 0.0f32);
+            for j in 0..5 {
+                if j == h { continue; }
+                let pj = self.op(j);
+                if pj.y > 12.0 { continue; }
+                let kind = ShotKind::at(pj);
+                let (c_now, near) = self.contest(pj, j, kind == ShotKind::Rim);
+                let dur = Self::pass_time(pj.dist(self.op(h))) + 0.3;
+                let c = if kind == ShotKind::Rim { (c_now + 0.45).min(1.4) } else { (c_now + dur * 0.6).min(1.0) };
+                let c = (c + HEAT_CONTEST * self.heat_of(j)).min(1.4);
+                let ev = self.ev(j, kind, c, near, false);
+                let risk = self.pass_risk(h, j);
+                let v = ev - risk * 1.6;
+                if v > best.0 { best = (v, ev, risk, j, c); }
+            }
+            eprintln!("DE src={:?} class={} dist={:.2} value={:.2} bar={:.2} thr={:.2} best_v={:.2} ev={:.2} risk={:.2} c={:.2} kind={:?}", self.play.source, self.play.drive_class, p.dist(HOOP), value, value + 0.2, self.threshold(h, left), best.0, best.1, best.2, best.4, if best.3 < 5 { Some(ShotKind::at(self.op(best.3))) } else { None });
+        }
         if self.rng.chance(vision)
-            && let Some(j) = self.best_pass(h, value + 0.2, left)
+            && let Some(j) = self.best_pass(h, value + KICK_PREMIUM[(self.play.drive_class == 2) as usize], left, KICK_EAGER[(self.play.drive_class == 2) as usize])
         {
             return self.pass(h, j, false);
         }
         // Deep in the paint he is committed: layup or floater.
         if p.dist(HOOP) < COMMIT_DIST || value > self.threshold(h, left) - 0.2 {
+            GT.store(if p.dist(HOOP) < COMMIT_DIST { 2 } else { 3 }, std::sync::atomic::Ordering::Relaxed);
             return self.gather(0.18, true);
         }
         self.play.phase = if p.y > 10.6 {
@@ -4343,7 +4372,7 @@ impl Game {
         let value = self.ev(h, kind, c * self.play.edge, near, false);
         let vision = 0.55 + (self.oe(h, Attr::Passing) + self.oe(h, Attr::Iq)) / 40.0 * 0.4;
         if self.rng.chance(vision)
-            && let Some(j) = self.best_pass(h, value + 0.05, left + 6.0)
+            && let Some(j) = self.best_pass(h, value + 0.05, left + 6.0, 0.0)
         {
             self.play.edge = 1.0;
             return self.pass(h, j, false);
@@ -4402,6 +4431,9 @@ impl Game {
                 side.eff(slot, Attr::Iq),
             )
         };
+        if std::env::var("ZZDE2").is_ok() && self.play.source == Source::Drive {
+            eprintln!("PS tag={} d={:.2} class={}", GT.load(std::sync::atomic::Ordering::Relaxed), d, self.play.drive_class);
+        }
         let mut style = if free_throw {
             Style::Jumper
         } else if self.play.source == Source::Post && d >= POST_HOOK_FROM {

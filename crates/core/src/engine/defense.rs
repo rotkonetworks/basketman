@@ -231,15 +231,21 @@ fn help(view: &View, a: &mut Aims) {
         on_path
     };
     a.helper = Some(helper);
-    if is_zone(view.scheme) {
-        return;
-    }
-    // The second: a man whose own attacker is not near the ball, one step
-    // behind the first, so the pass out has to beat him too.
-    let second = cands.iter().skip(1).find(|c| view.o[view.guard[c.1]].dist(view.ball) > 3.5);
+    // The second, one step behind the first, so that the pass out has to beat
+    // him too. In a man defense he is a man whose own attacker is not near
+    // the ball; in a zone nobody has an attacker to leave, and the wall of the
+    // paint is what a zone is for, so it is the next nearest.
+    let zone = is_zone(view.scheme);
+    let second = cands
+        .iter()
+        .skip(1)
+        .find(|c| zone || view.o[view.guard[c.1]].dist(view.ball) > 3.5);
     if let Some(&(_, dk, p)) = second {
         let base = if p.dist(HOOP) < 2.2 { HOOP.toward(view.ball, 1.1) } else { p };
         a.at[dk] = base.toward(HOOP, 0.9_f32.min(base.dist(HOOP)));
+    }
+    if zone {
+        return;
     }
     // Help the helper: the nearest free defender splits his own man and the
     // one just left alone.
