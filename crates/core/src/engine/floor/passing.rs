@@ -8,6 +8,7 @@
 use super::*;
 use crate::engine::hands::{self, LEFT, RIGHT};
 use crate::court::BOARD_HIGH;
+use crate::engine::ball::{self, Ball};
 use crate::replay::{Dribble, HandKind, PassKind, PassOutcome, TurnoverKind};
 
 /// Metres of aim error at no distance, and per metre thrown, for a chest
@@ -353,8 +354,9 @@ impl Game {
         // Through the glass is no way to throw it.
         for s in 1..n {
             let (last, now) = (smp[s - 1], smp[s]);
-            if last.1 >= BOARD_Y && now.1 < BOARD_Y && now.0.abs() < BOARD_HALF && now.2 > BOARD_LOW && now.2 < BOARD_HIGH {
-                safe *= 0.2;
+            // Near the glass at all, with the room an error needs.
+            if now.1 < BOARD_Y + 0.9 && last.1 < 99.0 && now.0.abs() < BOARD_HALF + 0.9 && now.2 > BOARD_LOW - 0.4 && now.2 < BOARD_HIGH + 0.4 {
+                safe *= 0.02;
                 break;
             }
         }
@@ -399,7 +401,7 @@ impl Game {
             consider(PassKind::Overhead, self, 0.04);
         }
         let pj = self.m[o][j].pos;
-        if passing >= 9.0 && (pj.dist(HOOP) < 4.0 || d > 7.0) {
+        if passing >= 9.0 && d > 7.0 && pj.dist(HOOP) > 4.5 {
             consider(PassKind::Lob, self, 0.035);
         }
         if live && passing >= 5.0 && d < 9.0 {
@@ -859,8 +861,11 @@ impl Game {
         dbg_out("loose", t, f.dur, bp, bz);
         self.play.ball = bp;
         self.play.ball_h = bz;
-        // The rest of the path goes on from where it is.
-        self.go_live(path, t, false)
+        // The rest of the flight is the ball physics' (the glass, the rim, the
+        // floor), from where it is and how fast it is going.
+        let (_, _, bv, bvz) = path.state(t);
+        let flown = ball::fly(Ball { p: v3(bp.x, bp.y, bz), v: v3(bv.x, bv.y, bvz) }, &[]);
+        self.go_live(flown.path, 0.0, false)
     }
 
     /// The hand of man `k` of side `t` nearest the point, and where it is.
