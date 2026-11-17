@@ -368,11 +368,13 @@ mod tests {
             .messages
             .iter()
             .any(|m| m.subject.starts_with("Promoted") || m.subject.starts_with("Relegated"));
-        // Only while he still has the job: a manager the board has sacked is
-        // not told about the club's promotion (the results decide whether
-        // that happened to him in these three seasons).
+        let moved = moved || w.teams[15].division != w.history[2].division_of(15).unwrap();
+        // Mail only ever follows a move; and a manager who kept the job in
+        // these three seasons was told of every one (one the board sacked
+        // stops hearing about the club, so only the first part holds).
+        assert!(!mail || moved, "promotion mail without a move");
         if w.watch.is_some() {
-            assert_eq!(moved || w.teams[15].division != w.history[2].division_of(15).unwrap(), mail);
+            assert_eq!(moved, mail);
         }
     }
 }

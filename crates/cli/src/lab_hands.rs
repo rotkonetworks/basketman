@@ -404,3 +404,157 @@ pub fn possession(set: usize, nth: usize) {
     }
     println!("no such possession found");
 }
+
+/// `basketman lab hands passes [games]`: what passing buys, offence set by
+/// offence set. Both teams of every game run the same set. For each pass:
+/// how long the passer held the ball, how long the ball flew, how far the
+/// nearest defender was from the receiver at the release and at the catch;
+/// for each shot: whether a pass led to it, how soon after the catch it went
+/// up, how contested it was and what it made.
+pub fn passes(games: usize) {
+    use basketman_core::replay::{PassOutcome, Source};
+    let w = World::generate(7, 12);
+    let n = w.teams.len();
+    println!(
+        "{:<11} {:>5} {:>6} {:>6} {:>6} {:>6} {:>6} | {:>5} {:>5} {:>5} {:>5} {:>5} | {:>5} {:>5} {:>5} {:>5} | {:>6} {:>6} {:>6}",
+        "set", "ppp", "pass/p", "ast/g", "tov/p", "bad/p", "cmp%", "hold", "fly", "open0", "open1", "close", "aft%", "c&s%", "cont", "pps", "u-cont", "u-fg%", "u-pps"
+    );
+    for (si, set) in OffenseSet::ALL.iter().enumerate() {
+        let (mut pts, mut poss, mut npass, mut ast, mut tov, mut bad) = (0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
+        let mut caught = 0u32;
+        let (mut hold, mut fly, mut o0, mut o1, mut nfly, mut nopen) = (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0u32, 0u32);
+        // shots after a pass / not
+        let mut after = (0u32, 0u32, 0.0f64, 0u32, 0u32, 0u32, 0u32); // n, c&s, contest, fga, made, pts-sum for efg numerator (3s count 1.5), threes
+        let mut efg_num_after = 0.0f64;
+        let mut unas = (0u32, 0.0f64, 0u32, 0.0f64);
+        let mut pts_after = 0.0f64;
+        let mut pts_un = 0.0f64;
+        let mut ng = 0u32;
+        for g in 0..games {
+            let (a, b) = ((g * 7 + si) % n, (g * 5 + 1 + g / n + si) % n);
+            if a == b {
+                continue;
+            }
+            ng += 1;
+            let (mut ta, mut tb) = (w.teams[a].tactics().clone(), w.teams[b].tactics().clone());
+            ta.offense = *set;
+            tb.offense = *set;
+            let (la, lb) = (mk(&w, &ta), mk(&w, &tb));
+            let (r, rec) = simulate_recorded(&la, &lb, &w.rules, &mut Rng::new(31_000 + g as u64 * 7919 + si as u64));
+            pts += (r.score[0] + r.score[1]) as u32;
+            poss += (r.possessions[0] + r.possessions[1]) as u32;
+            let id_of = |side: usize, slot: u8, f: &basketman_core::replay::Frame| -> u32 { r.boxes[side][f.who[side][slot as usize] as usize].0 as u32 };
+            for side in 0..2 {
+                for (_, l) in &r.boxes[side] {
+                    ast += l.ast as u32;
+                }
+            }
+            for e in &rec.events {
+                if let EventKind::Turnover { kind, .. } = &e.kind {
+                    tov += 1;
+                    bad += (*kind == TurnoverKind::BadPass) as u32;
+                }
+            }
+            let ps: Vec<_> = rec.passes.iter().filter(|p| !p.inbound).collect();
+            for (pi, p) in ps.iter().enumerate() {
+                npass += 1;
+                caught += (p.outcome == PassOutcome::Caught) as u32;
+                let side = p.side as usize;
+                let fi = rec.frame_at(p.time);
+                let f = &rec.frames[fi];
+                let open = |f: &basketman_core::replay::Frame, k: usize| -> f32 {
+                    (0..5).map(|d| f.pos[1 - side][d].dist(f.pos[side][k])).fold(99.0, f32::min)
+                };
+                // How long the passer held it: back through the frames while he is the holder.
+                let mut j = fi;
+                while j > 0 && rec.frames[j].holder == Some((p.side, p.from)) && !rec.frames[j].cut {
+                    j -= 1;
+                }
+                hold += (f.time - rec.frames[j].time) as f64;
+                if p.outcome == PassOutcome::Caught {
+                    let mut c = fi;
+                    let end = rec.frames.len().min(fi + 25);
+                    while c < end && rec.frames[c].holder != Some((p.side, p.to)) {
+                        c += 1;
+                    }
+                    if c < end {
+                        fly += (rec.frames[c].time - p.time) as f64;
+                        nfly += 1;
+                        o0 += open(f, p.to as usize) as f64;
+                        o1 += open(&rec.frames[c], p.to as usize) as f64;
+                        nopen += 1;
+                        // The shot that follows: his next event before the next pass by the side.
+                        let tc = rec.frames[c].time;
+                        let next_pass = ps.get(pi + 1).filter(|q| q.side == p.side).map_or(f32::MAX, |q| q.time);
+                        let who = id_of(side, p.to, &rec.frames[c]);
+                        if let Some(e) = rec.events.iter().find(|e| {
+                            e.time > tc - 0.01 && e.time < next_pass.min(tc + 6.0)
+                                && matches!(&e.kind, EventKind::Shot { who: s, .. } if *s as u32 == who)
+                        })
+                            && let EventKind::Shot { kind, made, contest, source, .. } = &e.kind
+                        {
+                            after.0 += 1;
+                            after.1 += (e.time - tc < 1.0 || *source == Source::CatchAndShoot) as u32;
+                            after.2 += *contest as f64;
+                            after.3 += 1;
+                            after.4 += *made as u32;
+                            let pt = kind.points() as f64;
+                            efg_num_after += if *made { pt } else { 0.0 };
+                            after.5 += (kind.points() == 3) as u32;
+                            pts_after += if *made { pt } else { 0.0 };
+                        }
+                    }
+                }
+            }
+            // Shots not preceded by a pass in the possession: no pass by the shooter's side
+            // in the six seconds before, from a different man to him.
+            for e in &rec.events {
+                if let EventKind::Shot { who, kind, made, contest, .. } = &e.kind {
+                    let side = e.offense as usize;
+                    let f = &rec.frames[rec.frame_at(e.time)];
+                    let led = ps.iter().any(|p| {
+                        p.side as usize == side
+                            && p.time < e.time
+                            && e.time - p.time < 6.0
+                            && id_of(side, p.to, f) == *who as u32
+                    });
+                    if !led {
+                        unas.0 += 1;
+                        unas.1 += *contest as f64;
+                        unas.2 += *made as u32;
+                        pts_un += if *made { kind.points() as f64 } else { 0.0 };
+                        unas.3 += 1.0;
+                    }
+                }
+            }
+        }
+        let _ = (ng, nfly);
+        let p = poss.max(1) as f32;
+        println!(
+            "{:<11} {:>5.3} {:>6.2} {:>6.1} {:>6.3} {:>6.3} {:>6.1} | {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>5.2} | {:>5.1} {:>5.1} {:>5.2} {:>5.2} | {:>6.2} {:>6.2} {:>6.3}",
+            format!("{set:?}"),
+            pts as f32 / p,
+            npass as f32 / p,
+            ast as f32 / ng.max(1) as f32 / 2.0,
+            tov as f32 / p,
+            bad as f32 / p,
+            caught as f32 * 100.0 / npass.max(1) as f32,
+            hold / npass.max(1) as f64,
+            fly / nopen.max(1) as f64,
+            o0 / nopen.max(1) as f64,
+            o1 / nopen.max(1) as f64,
+            (o0 - o1) / nopen.max(1) as f64,
+            after.0 as f32 * 100.0 / npass.max(1) as f32,
+            after.1 as f32 * 100.0 / after.0.max(1) as f32,
+            after.2 / after.0.max(1) as f64,
+            efg_num_after / after.0.max(1) as f64 / 2.0 * 0.0 + pts_after / after.3.max(1) as f64,
+            unas.1 / unas.0.max(1) as f64,
+            unas.2 as f64 * 100.0 / unas.0.max(1) as f64,
+            pts_un / unas.0.max(1) as f64,
+        );
+        let _ = (pts_after, after.6, unas.3, efg_num_after);
+    }
+    println!("columns: ppp points/possession; pass/p passes per possession; ast/g assists per team-game; tov/p, bad/p turnovers and bad passes per possession; cmp% pass completion;");
+    println!("hold s the passer held the ball; fly s of flight; open0/open1 m from the nearest defender to the receiver at release/catch; close how much he closed;");
+    println!("aft% passes followed by a shot by the receiver; c&s% of those within a second; cont mean contest (0..1); efg% there is points per shot after a pass; u-cont, u-efg, u-pps the same for shots with no pass before (u-efg is FG%).");
+}

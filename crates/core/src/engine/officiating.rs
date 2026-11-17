@@ -60,7 +60,7 @@ const HOUSE: f32 = 0.5;
 /// is whistled more than a simple count of contested shots says. Fitted so
 /// that shooting fouls are about half of all fouls without losing the
 /// free-throw rate (see `docs/realism.md`, "League shape").
-pub(super) const SHOOTING_FOULS: f32 = 0.90;
+pub(super) const SHOOTING_FOULS: f32 = 1.06;
 /// Contact on the ball and off it (reaching, hands, a body in the way) that
 /// is whistled, as a multiple of what the floor calls illegal: the crews
 /// of a FIBA league let little of it go, and a first version let more.

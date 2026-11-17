@@ -1019,6 +1019,10 @@ pub struct Recording {
     /// headed for over two seconds of play. A diagnostic, not game state.
     #[serde(default)]
     pub stuck: u32,
+    /// Possessions the shot clock failed to end and the engine had to end
+    /// by its safety valve. A diagnostic; always zero in a sound engine.
+    #[serde(default)]
+    pub stalls: u32,
     /// Drives stopped by a defender who was set in the lane, and drives
     /// that met a helper still running at the driver. Diagnostics.
     #[serde(default)]

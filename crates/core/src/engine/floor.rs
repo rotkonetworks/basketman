@@ -871,6 +871,9 @@ pub(super) struct Game {
     poke: Poke,
     /// Passes read this tick: (tick, risk) by passer and receiver.
     risk_memo: std::cell::Cell<[Option<(u32, f32)>; 25]>,
+    dbg_sc: f32,
+    /// Possessions the shot clock failed to end (a fault; tests want none).
+    pub(super) stalls: u32,
     /// Arms and hand speeds of the ten.
     hand_k: [HandK; 10],
     /// Where the hand was that has just taken the ball (a catch, a steal),
@@ -960,6 +963,8 @@ impl Game {
             hands_prev: [[Hands::NONE; 5]; 2],
             poke: Poke::NONE,
             risk_memo: std::cell::Cell::new([None; 25]),
+            dbg_sc: 0.0,
+            stalls: 0,
             hand_k: [HandK::NONE; 10],
             catch_at: None,
             ease: 0.0,
@@ -1081,13 +1086,23 @@ impl Game {
                     return Some(p);
                 }
                 let end = self.forced_end().or_else(|| self.tick()).or_else(|| {
-                    // A possession that will not end is ended; not with a shot in the air.
+                    // The shot clock is the only thing that ends a possession by time
+                    // (offensive rebounds and fouls give a new clock inside the same
+                    // possession, so its length means nothing). A clock that has
+                    // run far past zero with the ball dead-still in nobody's flight
+                    // means the check above was bypassed: that is a fault in the
+                    // engine, ended here so a game cannot hang, and reported.
                     let idle = self.play.flight.is_none()
                         && self.play.after.is_none()
                         && !matches!(self.play.phase, Phase::Line { .. });
-                    if idle && self.play.t - self.play.frozen > 45.0 {
-                        // The clock should have ended it long ago: it is a
-                        // violation, and goes in the log as one.
+                    if idle && self.play.shot_clock < -4.0 && self.play.dead <= 0.0 {
+                        if std::env::var("STALL").is_ok() {
+                            eprintln!("STALL sc {:.1} t {:.1} wait {:.1} phase {} holder {:?} fetcher {:?} throw {} loose {}", self.play.shot_clock, self.play.t, self.play.wait, self.phase_name(), self.play.holder, self.play.fetcher, self.play.throw.is_some(), self.loose.is_some());
+                        }
+                        self.stalls += 1;
+                        if let Some(rec) = &mut self.rec {
+                            rec.stalls += 1;
+                        }
                         let who = self.play.holder.unwrap_or(self.play.handler);
                         self.oline(who).tov += 1;
                         let id = self.oid(who);
@@ -1096,6 +1111,14 @@ impl Game {
                             kind: TurnoverKind::ShotClock,
                             stolen_by: None,
                         });
+                        Some(End::Dead)
+                    } else if idle && self.play.t - self.play.frozen > 120.0 {
+                        // The clock is not even running: nothing in the game can
+                        // hold one possession this long.
+                        self.stalls += 1;
+                        if let Some(rec) = &mut self.rec {
+                            rec.stalls += 1;
+                        }
                         Some(End::Dead)
                     } else {
                         None
@@ -1557,6 +1580,19 @@ impl Game {
         self.steal_flew = 0.0;
     }
 
+    fn phase_name(&self) -> &'static str {
+        match self.play.phase {
+            Phase::Advance => "advance",
+            Phase::Set => "set",
+            Phase::Screen { .. } => "screen",
+            Phase::Drive { .. } => "drive",
+            Phase::Post { .. } => "post",
+            Phase::Gather { .. } => "gather",
+            Phase::Air => "air",
+            Phase::Line { .. } => "line",
+        }
+    }
+
     fn tick(&mut self) -> Option<End> {
         // The clocks stand still while a whistle is being answered and while
         // free throws are shot; the floor does not.
@@ -1579,6 +1615,12 @@ impl Game {
             }
         }
         self.ticks += 1;
+        if std::env::var("STALL").is_ok() {
+            if self.play.shot_clock > self.dbg_sc + 0.05 && self.play.t > 8.0 {
+                eprintln!("RESET sc {:.1}->{:.1} at t {:.1} phase {} holder {:?} loose {} flight {} after {}", self.dbg_sc, self.play.shot_clock, self.play.t, self.phase_name(), self.play.holder, self.loose.is_some(), self.play.flight.is_some(), self.play.after.is_some());
+            }
+            self.dbg_sc = self.play.shot_clock;
+        }
         self.officials_tick();
         for side in &mut self.m {
             for m in side {
