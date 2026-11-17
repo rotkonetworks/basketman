@@ -724,6 +724,8 @@ impl Game {
             self.steal_flew = 0.0;
             self.play.flight = None;
             self.play.thrown = None;
+            let (hp, hz) = self.nearest_hand(1 - self.play.o, dk, bp, bz);
+            self.catch_at = Some((hp, hz));
             let end = self.turnover(from, TurnoverKind::BadPass, Some(dk), 1.0);
             self.play.ball = bp;
             return end;
@@ -784,8 +786,11 @@ impl Game {
         if held {
             self.play.flight = None;
             self.play.thrown = None;
-            self.play.ball = bp;
-            self.play.ball_h = bz.min(2.4);
+            let (hp, hz) = self.nearest_hand(o, to, bp, bz);
+            self.play.ball = hp;
+            self.play.ball_h = hz.min(2.4);
+            self.ease = 0.5;
+            self.ease_from = hp;
             return self.land(f);
         }
         // A bobble: it comes off his hands and is loose where he stands.
@@ -809,8 +814,11 @@ impl Game {
         self.cut_log(ts - f.t);
         self.play.flight = None;
         self.play.thrown = None;
-        self.play.ball = bp;
-        self.play.ball_h = bz;
+        let (hp, hz) = self.nearest_hand(self.play.o, k, bp, bz);
+        self.play.ball = hp;
+        self.play.ball_h = hz.min(2.4);
+        self.ease = 0.5;
+        self.ease_from = hp;
         let mut g = f;
         g.kind = FlightKind::Pass { from, to: k };
         let _ = to;
@@ -855,6 +863,16 @@ impl Game {
         self.go_live(path, t, false)
     }
 
+    /// The hand of man `k` of side `t` nearest the point, and where it is.
+    pub(super) fn nearest_hand(&self, t: usize, k: usize, at: Vec2, z: f32) -> (Vec2, f32) {
+        let a = self.hands[t][k].h[RIGHT].p;
+        let b = self.hands[t][k].h[LEFT].p;
+        let da = (a.x - at.x).powi(2) + (a.y - at.y).powi(2) + (a.z - z).powi(2);
+        let db = (b.x - at.x).powi(2) + (b.y - at.y).powi(2) + (b.z - z).powi(2);
+        let h = if da <= db { a } else { b };
+        (v(h.x, h.y), h.z)
+    }
+
     /// Write down what became of the latest pass.
     fn note_pass(&mut self, outcome: PassOutcome, gap: f32, by: Option<usize>) {
         if let Some(rec) = &mut self.rec
@@ -878,11 +896,18 @@ impl Game {
             let dk = who - 5;
             self.steal_flew = 0.0;
             let tipped = sc.tipped_by.is_some();
+            let (hp, hz) = self.nearest_hand(1 - self.play.o, dk, bp, bz);
+            self.catch_at = Some((hp, hz));
             let end = self.turnover(sc.passer, sc.cause, Some(dk), 1.0);
             let _ = tipped;
             return end;
         }
         // The attackers have it back.
+        let (hp, hz) = self.nearest_hand(self.play.o, who, bp, bz);
+        self.play.ball = hp;
+        self.play.ball_h = hz.min(2.4);
+        self.ease = 0.5;
+        self.ease_from = hp;
         self.play.holder = Some(who);
         self.play.phase = if matches!(self.play.phase, Phase::Advance) { Phase::Advance } else { Phase::Set };
         self.play.think = 0.45 + self.rng.f32() * 0.2;

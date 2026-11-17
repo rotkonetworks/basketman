@@ -6,7 +6,7 @@
 //! target. Paths of shots, blocks and tips are written by the ball physics
 //! (`ball.rs`); passes use `Arc::reach`.
 
-use crate::court::{BALL_RADIUS, GRAVITY, LENGTH, Vec2, v};
+use crate::court::{BALL_RADIUS, BOARD_HALF, BOARD_HIGH, BOARD_LOW, BOARD_Y, GRAVITY, LENGTH, Vec2, v};
 
 const G: f32 = GRAVITY;
 /// How much of its speed the ball keeps off the floor.
@@ -160,7 +160,17 @@ impl Path {
         for _ in 0..3 {
             let drop = (vz * vz + 2.0 * G * (z - BALL_RADIUS)).max(0.0).sqrt();
             let t = ((vz + drop) / G).max(0.02);
-            let p1 = clamp(p + vel * t);
+            let mut p1 = clamp(p + vel * t);
+            // The glass: a ball that reaches the backboard is thrown back.
+            if vel.y < 0.0 && p.y >= BOARD_Y && p1.y < BOARD_Y {
+                let tc = (p.y - BOARD_Y) / -vel.y;
+                let (cx, cz) = (p.x + vel.x * tc, z + vz * tc - 0.5 * G * tc * tc);
+                if cx.abs() < BOARD_HALF && cz > BOARD_LOW && cz < BOARD_HIGH {
+                    vel = v(vel.x * 0.5, vel.y.abs() * 0.4);
+                    p1 = clamp(p + v(vel.x, vel.y) * t);
+                    p1.y = p1.y.max(BOARD_Y);
+                }
+            }
             self.push(Arc {
                 p0: p,
                 p1,

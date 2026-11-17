@@ -60,7 +60,7 @@ pub fn run(games: usize) {
             };
             let hl = basketman_core::league::lineup(&w.teams[g % 12], &w.players);
             let al = basketman_core::league::lineup(&w.teams[b2], &w.players);
-            simulate_recorded(&hl, &al, &w.rules, &mut Rng::new(300 + g as u64))
+            simulate_recorded(&hl, &al, &w.rules, &mut Rng::new(std::env::var("HANDS_SEED").ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(300) + g as u64))
         } else {
             simulate_recorded(&la, &lb, &w.rules, &mut rng)
         };
@@ -72,6 +72,16 @@ pub fn run(games: usize) {
                 for f in &rec.frames {
                     if f.time > tt - 1.5 && f.time < tt + 0.5 {
                         println!("t {:.2} cut {} holder {:?} ball {:.1},{:.1} z {:.2} offense {}", f.time, f.cut, f.holder, f.ball.x, f.ball.y, f.ball_height, f.offense);
+                    }
+                }
+                for k in &rec.pokes {
+                    if k.time > tt - 3.0 && k.time < tt + 0.5 {
+                        println!("poke {:.2} {:?} gap {} cm", k.time, k.result, k.gap_cm);
+                    }
+                }
+                for p in &rec.passes {
+                    if p.time > tt - 3.0 && p.time < tt + 0.5 {
+                        println!("pass {:.2} {:?} {:?}", p.time, p.kind, p.outcome);
                     }
                 }
                 for e in &rec.events {

@@ -180,6 +180,8 @@ impl Game {
         let take = (TAKE_BASE + 0.02 * (0.6 * steal + 0.4 * hands - 0.7 * handling - 0.3 * strength) + 0.15 * (1.0 - gap / POKE_HIT)).clamp(0.05, 0.8);
         if self.rng.chance(take) {
             self.note_poke(h, dk, gap, crate::replay::PokeResult::Taken);
+            let (hp, hz) = self.nearest_hand(1 - o, dk, bt.at, bt.z);
+            self.catch_at = Some((hp, hz));
             self.steal_flew = 0.0;
             self.play.ball = bt.at;
             self.play.ball_h = bt.z;

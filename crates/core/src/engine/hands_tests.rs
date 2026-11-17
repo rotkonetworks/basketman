@@ -89,7 +89,7 @@ fn no_pass_leaves_from_a_place_the_hands_were_not_and_nobody_passes_to_himself()
 #[test]
 fn the_ball_never_changes_hands_without_a_hand_event() {
     let (mut handoffs, mut checked) = (0, 0);
-    for rec in games(12) {
+    for (g, rec) in games(12).into_iter().enumerate() {
         for pair in rec.frames.windows(2) {
             let (a, b) = (&pair[0], &pair[1]);
             if b.cut {
@@ -101,11 +101,12 @@ fn the_ball_never_changes_hands_without_a_hand_event() {
             }
             checked += 1;
             let t = b.time;
-            // A pass thrown in the second before: handed or caught.
-            let by_pass = rec.passes.iter().any(|p| p.time <= t && t - p.time < 1.5);
+            // A pass thrown in the three seconds before (a lob and a scramble for the
+            // ball it left loose take that long): handed, caught or recovered.
+            let by_pass = rec.passes.iter().any(|p| p.time <= t && t - p.time < 3.0);
             let by_poke = rec.pokes.iter().any(|k| (k.time - t).abs() < 0.6);
             let by_event = rec.events.iter().any(|e| (e.time - t).abs() < 0.7 && matches!(e.kind, EventKind::Turnover { .. } | EventKind::Foul { .. } | EventKind::Rebound { .. }));
-            assert!(by_pass || by_poke || by_event, "the ball changed hands at {t} with no pass, poke or event near");
+            assert!(by_pass || by_poke || by_event, "game {g}: the ball changed hands at {t} with no pass, poke or event near");
             handoffs += by_pass as u32;
         }
     }

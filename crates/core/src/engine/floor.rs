@@ -873,6 +873,12 @@ pub(super) struct Game {
     risk_memo: std::cell::Cell<[Option<(u32, f32)>; 25]>,
     /// Arms and hand speeds of the ten.
     hand_k: [HandK; 10],
+    /// Where the hand was that has just taken the ball (a catch, a steal),
+    /// for a new possession to start from; and how much of the way from
+    /// there to his body the ball still has to come.
+    catch_at: Option<(Vec2, f32)>,
+    ease: f32,
+    ease_from: Vec2,
 }
 
 impl Game {
@@ -955,6 +961,9 @@ impl Game {
             poke: Poke::NONE,
             risk_memo: std::cell::Cell::new([None; 25]),
             hand_k: [HandK::NONE; 10],
+            catch_at: None,
+            ease: 0.0,
+            ease_from: Vec2::ZERO,
             m,
             frame: 0,
             play: Play::idle(),
@@ -1035,6 +1044,10 @@ impl Game {
                         }
                     }
                     self.handler.flip();
+                    if let Some((p, z)) = self.catch_at {
+                        self.catch_at = Some((p.flipped(), z));
+                    }
+                    self.ease_from = self.ease_from.flipped();
                     for side in &mut self.hands {
                         for hs in side {
                             for h in &mut hs.h {
@@ -1072,7 +1085,21 @@ impl Game {
                     let idle = self.play.flight.is_none()
                         && self.play.after.is_none()
                         && !matches!(self.play.phase, Phase::Line { .. });
-                    (idle && self.play.t - self.play.frozen > 45.0).then_some(End::Dead)
+                    if idle && self.play.t - self.play.frozen > 45.0 {
+                        // The clock should have ended it long ago: it is a
+                        // violation, and goes in the log as one.
+                        let who = self.play.holder.unwrap_or(self.play.handler);
+                        self.oline(who).tov += 1;
+                        let id = self.oid(who);
+                        self.event(EventKind::Turnover {
+                            who: id,
+                            kind: TurnoverKind::ShotClock,
+                            stolen_by: None,
+                        });
+                        Some(End::Dead)
+                    } else {
+                        None
+                    }
                 })?;
                 let o = self.play.o;
                 self.possessions[o] += 1;
@@ -1505,7 +1532,7 @@ impl Game {
                 (INBOUND_WAIT - credit).max(1.2)
             },
             holder: if loose.is_some() { None } else { Some(holder) },
-            ball: loose.map_or(self.m[o][holder].pos, |l| l.0),
+            ball: loose.map_or_else(|| self.catch_at.map_or(self.m[o][holder].pos, |c| c.0), |l| l.0),
             ball_h: loose.map_or(if live_start { carried.max(1.0) } else { 1.0 }, |l| l.1),
             fetcher,
             inbound: fetcher.is_some_and(|f| f != handler),
@@ -1517,6 +1544,9 @@ impl Game {
             big,
             ..Play::idle()
         };
+        // A ball taken by a hand comes in to the new holder's body over a few ticks.
+        self.catch_at = None;
+        self.ease = 0.0;
         if live_start {
             self.start_break(holder);
         } else {
@@ -2387,6 +2417,12 @@ impl Game {
                 let b = self.bounce(o, h);
                 self.play.ball = b.at;
                 self.play.ball_h = b.z;
+            } else if self.ease > 0.0 {
+                // The hand brings the ball in to his body over a few ticks.
+                let body = m.pos + m.vel * 0.08;
+                self.play.ball = body + (self.ease_from - body) * self.ease;
+                self.ease = (self.ease - 0.6).max(0.0);
+                self.play.ball_h = (self.play.ball_h - 4.0 * DT).max(1.0);
             } else {
                 self.play.ball = m.pos + m.vel * 0.08;
                 // The hands come down after a catch.
@@ -5696,6 +5732,10 @@ impl Game {
         let reach = self.sides[wt].slots[self.sides[wt].on[wk]].p.body.standing_reach_cm / 100.0;
         let lift = self.lift_at(wt, wk, 0.0);
         self.play.ball_h = self.play.ball_h.min(reach + lift);
+        // Pressed against or behind the glass he brings it down.
+        if self.m[wt][wk].pos.y < BOARD_Y + 0.35 && self.m[wt][wk].pos.x.abs() < BOARD_HALF + 0.3 {
+            self.play.ball_h = self.play.ball_h.min(BOARD_LOW - 0.25);
+        }
         self.finish_rebound(who, landing, free_throw)
     }
 
