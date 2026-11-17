@@ -441,6 +441,7 @@ pub fn passes(games: usize) {
         let mut pts_un = 0.0f64;
         let mut ng = 0u32;
         let mut bx = BoxLine::default();
+        let mut oc = [[0u32; 6]; 7];
         for g in 0..games {
             let (a, b) = ((g * 7 + si) % n, (g * 5 + 1 + g / n + si) % n);
             if a == b {
@@ -470,6 +471,7 @@ pub fn passes(games: usize) {
             let ps: Vec<_> = rec.passes.iter().filter(|p| !p.inbound).collect();
             for (pi, p) in ps.iter().enumerate() {
                 npass += 1;
+                oc[p.kind as usize][p.outcome as usize] += 1;
                 caught += (p.outcome == PassOutcome::Caught) as u32;
                 let side = p.side as usize;
                 let fi = rec.frame_at(p.time);
@@ -565,6 +567,15 @@ pub fn passes(games: usize) {
             pts_un / unas.0.max(1) as f64,
         );
         let _ = (pts_after, after.6, unas.3, efg_num_after);
+        print!("{:<11}       by kind (n, % lost: bobble/tip/steal/out/miss):", "");
+        for (ki, kn) in ["chest", "bounce", "ovrhd", "lob", "push", "hand", "outlt"].iter().enumerate() {
+            let t: u32 = oc[ki].iter().sum();
+            if t > 40 {
+                let f = |i: usize| oc[ki][i] as f32 * 100.0 / t as f32;
+                print!(" {kn} {t} {:.1}/{:.1}/{:.1}/{:.1}/{:.1};", f(1), f(2), f(3), f(4), f(5));
+            }
+        }
+        println!();
         println!(
             "{:<11}       fga/p {:.3} fg% {:.1} 3pa/p {:.3} 3p% {:.1} fta/p {:.3} ftm/p {:.3} orb/p {:.3} ast/fgm {:.3}",
             "", bx.fga as f32 / p, bx.fgm as f32 * 100.0 / bx.fga.max(1) as f32, bx.tpa as f32 / p, bx.tpm as f32 * 100.0 / bx.tpa.max(1) as f32,

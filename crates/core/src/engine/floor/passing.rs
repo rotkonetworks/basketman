@@ -283,6 +283,48 @@ impl Game {
         None
     }
 
+    /// Where the receiver's hand should meet the ball: not the first point
+    /// of its path he can just touch (the ball is gone from there before the
+    /// hand arrives) but the one that suits him best among those a hand can
+    /// be at by the time the ball is: the nearest to a comfortable arm's
+    /// length from his shoulder, at the earliest such time.
+    pub(super) fn catch_point(&self, t: usize, k: usize, path: &Path, dur: f32, now: f32, see_at: f32) -> Option<(V3, f32)> {
+        let (arm, _, _) = self.arm_of(t, k);
+        let slot = self.sides[t].on[k];
+        let speed = hands::hand_speed(self.sides[t].eff(slot, Attr::Handling), self.sides[t].eff(slot, Attr::Handling));
+        let me = self.m[t][k].pos;
+        let sh = [self.shoulder_of(t, k, RIGHT), self.shoulder_of(t, k, LEFT)];
+        let hand = [self.hands[t][k].h[RIGHT].p, self.hands[t][k].h[LEFT].p];
+        let start = see_at.max(now);
+        let total = dur + 0.05;
+        // The ball comes from this side: he meets it before it is by him.
+        let from = (path.at(0.0).0 - me).norm();
+        let mut best: Option<(f32, V3, f32)> = None;
+        let mut tau = start + 0.02;
+        while tau < total {
+            let (bp, bz) = path.at(tau);
+            // A step or two to the ball is part of a catch.
+            let lean = (me.dist(bp) - 0.35).max(0.0) - LUNGE_REACH;
+            if bz < 2.9 && bz > 0.3 && lean <= arm && (bp - me).dot(from) > -0.1 {
+                let p = v3(bp.x, bp.y, bz);
+                for i in 0..2 {
+                    let reach = V3 { x: p.x - sh[i].x, y: p.y - sh[i].y, z: p.z - sh[i].z }.len();
+                    let dist = V3 { x: p.x - hand[i].x, y: p.y - hand[i].y, z: p.z - hand[i].z }.len();
+                    let time = dist / speed + (reach - arm).max(0.0) / 3.0;
+                    if time <= tau - start + 0.01 {
+                        // Comfortable: an arm's length times 0.6, and early is better.
+                        let score = (reach - 0.6 * arm).abs() + 0.15 * (tau - start);
+                        if best.is_none_or(|b| score < b.0) {
+                            best = Some((score, p, tau));
+                        }
+                    }
+                }
+            }
+            tau += 0.04;
+        }
+        best.map(|b| (b.1, b.2))
+    }
+
     /// The chance a pass of `kind` is picked off or tipped, from where the
     /// defenders' hands are and how fast they get anywhere: the passer's
     /// reading of the lane. The flight itself decides what really happens.
@@ -397,14 +439,14 @@ impl Game {
         }
 
         if passing >= 6.0 {
-            consider(PassKind::Bounce, self, 0.02);
+            consider(PassKind::Bounce, self, 0.05);
         }
         if passing >= 8.0 && d < 13.0 {
-            consider(PassKind::Overhead, self, 0.04);
+            consider(PassKind::Overhead, self, 0.07);
         }
         let pj = self.m[o][j].pos;
         if passing >= 9.0 && d > 7.0 && pj.dist(HOOP) > 4.5 {
-            consider(PassKind::Lob, self, 0.035);
+            consider(PassKind::Lob, self, 0.09);
         }
         if live && passing >= 5.0 && d < 9.0 {
             consider(PassKind::Push, self, 0.0);

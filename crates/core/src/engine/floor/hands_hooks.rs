@@ -205,7 +205,7 @@ impl Game {
                                 });
                                 let choice = kept.or_else(|| {
                                     let see = 0.06 + 0.25 * (1.0 - (self.st[t][k].gaze.dot((self.m[t][from].pos - me).norm()) * 0.5 + 0.5).clamp(0.0, 1.0));
-                                    self.reach_for(t, k, &p, dur, ft, see)
+                                    self.catch_point(t, k, &p, dur, ft, see)
                                 });
                                 if let Some(th) = self.play.thrown.as_mut() {
                                     th.catch = choice;
