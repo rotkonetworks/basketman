@@ -20,6 +20,8 @@ const SEE_BASE: f32 = 0.16;
 const SEE_SKILL: f32 = 0.008;
 /// Seconds, past seeing the ball go, a defender takes to read where it is going.
 const REACT_READ: f32 = 0.12;
+/// The share of the reading time the man who guards the receiver needs: he is watching both.
+const CLOSEOUT_EARLY: f32 = 0.45;
 /// How far past his arm a defender can get a hand to a ball by leaning.
 const LUNGE_REACH: f32 = 0.35;
 /// How likely a defender who can reach a pass goes for it, at rating 10.
@@ -641,7 +643,14 @@ impl Game {
         {
             self.play.task[h] = Task::Cut(to);
         }
-        let react: [f32; 5] = std::array::from_fn(|dk| self.see_time(dk, rel.xy()) * (1.3 - 0.6 * self.pass_skill(h)) + REACT_READ);
+        // The man guarding the one who will catch it is watching his man and the
+        // ball both, and is out to him early; the rest read the pass. (A zone
+        // has no such man: all of its defenders read it.)
+        let mine = if is_zone(self.def().tactics.defense) { usize::MAX } else { self.defender_of(j) };
+        let react: [f32; 5] = std::array::from_fn(|dk| {
+            let r = self.see_time(dk, rel.xy()) * (1.3 - 0.6 * self.pass_skill(h)) + REACT_READ;
+            if dk == mine { r * CLOSEOUT_EARLY } else { r }
+        });
         self.play.pre_aims = Some((self.cache.aims, react));
         self.cut_log(0.0);
         self.log_path(&plan.path, 0.0, 0.0);
