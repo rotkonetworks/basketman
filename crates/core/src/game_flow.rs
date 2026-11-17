@@ -222,8 +222,18 @@ impl Read<'_> {
     /// The four factors of both sides as they stand.
     pub fn factors(&self) -> [Factors; 2] {
         let mut f = [Factors::default(); 2];
+        // The charge that a challenge turned over: its turnover stays in the
+        // log, but it is not in the box score.
+        let mut charge: Option<(usize, f32)> = None;
         for e in self.events() {
             match &e.kind {
+                EventKind::Review { overturned: true, .. } => {
+                    if let Some((s, at)) = charge.take()
+                        && (e.time - at).abs() < 0.5
+                    {
+                        f[s].tov = f[s].tov.saturating_sub(1);
+                    }
+                }
                 EventKind::Shot {
                     who,
                     kind,
@@ -252,9 +262,10 @@ impl Read<'_> {
                         f[s].pts += *made as u16;
                     }
                 }
-                EventKind::Turnover { who, .. } => {
+                EventKind::Turnover { who, kind, .. } => {
                     if let Some(s) = self.side_of(*who) {
                         f[s].tov += 1;
+                        charge = (*kind == crate::replay::TurnoverKind::OffensiveFoul).then_some((s, e.time));
                     }
                 }
                 EventKind::Rebound { who, offensive } => {

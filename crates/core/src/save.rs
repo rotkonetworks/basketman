@@ -149,11 +149,19 @@ mod tests {
         panic!("no rounds were played");
     }
 
+    /// A world whose manager has played `seasons` seasons and still has his
+    /// job (a sacked manager has no games, so no tapes to save): the first
+    /// of the worlds from seed 11 on that fits.
     fn career(seasons: u16) -> World {
-        let mut w = World::generate(11, 8);
-        w.apply(Command::TakeCharge(0)).unwrap();
-        play(&mut w, seasons);
-        w
+        for seed in 11..40 {
+            let mut w = World::generate(seed, 8);
+            w.apply(Command::TakeCharge(0)).unwrap();
+            play(&mut w, seasons);
+            if w.watch.is_some() {
+                return w;
+            }
+        }
+        panic!("every manager was sacked");
     }
 
     #[test]
