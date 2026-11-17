@@ -311,6 +311,11 @@ impl Backdrop {
 
     /// A frosted card sized to its contents.
     pub fn card<R>(&self, ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+        self.card_padded(ui, 18, add)
+    }
+
+    /// The same, with its own margin where the card floats over the photograph.
+    pub fn card_padded<R>(&self, ui: &mut Ui, margin: i8, add: impl FnOnce(&mut Ui) -> R) -> R {
         if self.inset {
             // A box inside a panel: a lighter sheet and a hairline.
             let slot = ui.painter().add(Shape::Noop);
@@ -329,7 +334,7 @@ impl Backdrop {
         }
         let slot = ui.painter().add(Shape::Noop);
         let out = egui::Frame::NONE
-            .inner_margin(Margin::same(18))
+            .inner_margin(Margin::same(margin))
             .show(ui, add);
         ui.painter().set(
             slot,
