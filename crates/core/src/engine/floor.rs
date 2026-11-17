@@ -47,7 +47,7 @@ mod stance_hooks;
 /// still going and when a body set in his way has stopped him.
 const KICK_PREMIUM: [f32; 2] = [0.2, 0.0];
 /// And how far under the bar of his own a man's shot may be for the ball to go to him then.
-const KICK_EAGER: [f32; 2] = [0.0, 0.30];
+const KICK_EAGER: [f32; 2] = [0.0, 0.45];
 pub(crate) static GT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 /// A man without the ball who is lower than this (metres from the baseline) when a
 /// drive starts goes to the corner; the others hold the arc.
@@ -4904,6 +4904,9 @@ impl Game {
         } else {
             self.play.source
         };
+        if std::env::var("ZZSS").is_ok() && (made || !fouled) {
+            eprintln!("SS {:?} {:?} d={:.2} made={} fouled={} c={:.2} src={:?}", style, kind, p.dist(HOOP), made as u8, fouled as u8, c_takeoff, source);
+        }
         let event = EventKind::Shot {
             who,
             kind,
