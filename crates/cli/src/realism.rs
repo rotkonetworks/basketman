@@ -25,10 +25,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use basketman_core::command::Command;
 use basketman_core::court::{HOOP, KEY_DEPTH, KEY_HALF_WIDTH, ShotKind, v};
-use basketman_core::engine::{BoxLine, GameResult, simulate_recorded};
+use basketman_core::engine::{BoxLine, GameResult, simulate_recorded_crewed};
 use basketman_core::inbox::Stop;
 use basketman_core::league::{Fixture, World, lineup};
 use basketman_core::player::Position;
+use basketman_core::officials::Ruling;
 use basketman_core::replay::{EventKind, FoulKind, Recording, Source, TurnoverKind};
 use basketman_core::rng::Rng;
 use basketman_core::shotchart::{Shot, Zone, shots};
@@ -282,7 +283,7 @@ fn sd(x: &[f64]) -> f64 {
     (x.iter().map(|a| (a - m).powi(2)).sum::<f64>() / (n - 1.0)).sqrt()
 }
 
-fn pearson(a: &[f64], b: &[f64]) -> Option<f64> {
+pub(crate) fn pearson(a: &[f64], b: &[f64]) -> Option<f64> {
     let n = a.len().min(b.len());
     if n < 3 {
         return None;
@@ -647,11 +648,21 @@ fn event_rows(rec: &Recording, r: &GameResult, setup: Setup) -> Rows {
     // possessions by kind
     let np = segs.len() as f64;
     let pts_all: f64 = segs.iter().map(|s| s.pts as f64).sum();
+    // A crew may count a shot on the line wrongly: the event says what the
+    // shot was, the score what the crew called.
+    let miscount: f64 = rec
+        .calls
+        .iter()
+        .filter_map(|c| match (c.truth, c.called) {
+            (Ruling::Value(t), Ruling::Value(k)) => Some(k as f64 - t as f64),
+            _ => None,
+        })
+        .sum();
     out.push(("diag_engine_poss", (r.possessions[0] + r.possessions[1]) as f64, 1.0));
     out.push(("diag_segment_poss", np, 1.0));
     out.push((
         "diag_segment_points_ok",
-        (pts_all == (r.score[0] + r.score[1]) as f64) as u8 as f64,
+        (pts_all + miscount == (r.score[0] + r.score[1]) as f64) as u8 as f64,
         1.0,
     ));
     out.push(("diag_poss_seconds", 2.0 * 2400.0, np.max(1.0)));
@@ -934,7 +945,7 @@ fn table_rows(games: &[Played], division: usize, x: &Extras) -> (Rows, BTreeMap<
 // ---------------------------------------------------------------------------
 // Running the simulations
 
-fn threads() -> usize {
+pub(crate) fn threads() -> usize {
     std::env::var("RAYON_NUM_THREADS")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -943,7 +954,7 @@ fn threads() -> usize {
 }
 
 /// `f(0..n)` on worker threads, results in index order.
-fn par_map<R: Send>(workers: usize, n: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
+pub(crate) fn par_map<R: Send>(workers: usize, n: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
     let next = AtomicUsize::new(0);
     let out: Mutex<Vec<Option<R>>> = Mutex::new((0..n).map(|_| None).collect());
     std::thread::scope(|s| {
@@ -993,7 +1004,9 @@ fn league_games(games: usize, division: usize, seed_base: u64, workers: usize) -
             (away.tactics.defense, away.tactics.press),
         ];
         let mut rng = Rng::new(seed_base.wrapping_mul(1_000_003).wrapping_add(i as u64 * 7919 + 17));
-        let (r, rec) = simulate_recorded(&home, &away, &w.rules, &mut rng);
+        // A real game has a crew and a house; so does this one.
+        let crew = w.bare_crew(h, seed_base.wrapping_add(i as u64));
+        let (r, rec) = simulate_recorded_crewed(&home, &away, &w.rules, &mut rng, crew.as_ref());
         let mut rows = box_rows(&r);
         rows.extend(event_rows(&rec, &r, setup));
         rows
@@ -1001,13 +1014,13 @@ fn league_games(games: usize, division: usize, seed_base: u64, workers: usize) -
 }
 
 /// One season of a career world, played to the draft.
-struct SeasonData {
-    division_games: Vec<Fixture>,
-    extras: Extras,
-    teams_division: Vec<usize>,
+pub(crate) struct SeasonData {
+    pub division_games: Vec<Fixture>,
+    pub extras: Extras,
+    pub teams_division: Vec<usize>,
 }
 
-fn strength_of(w: &World, t: usize) -> f64 {
+pub(crate) fn strength_of(w: &World, t: usize) -> f64 {
     let l = lineup(&w.teams[t], &w.players);
     let (mut s, mut m) = (0.0, 0.0);
     for (slot, p) in l.tactics.rotation.iter().zip(&l.players) {
@@ -1031,7 +1044,7 @@ fn bodies_of(w: &World) -> BTreeMap<u32, (Position, f64, f64, f64)> {
 
 /// Play `seasons` consecutive seasons of a three-division career world and
 /// hand each, when its regular season is over, to `f`.
-fn play_world(seed: u64, seasons: usize, mut f: impl FnMut(SeasonData, &World)) {
+pub(crate) fn play_world(seed: u64, seasons: usize, mut f: impl FnMut(SeasonData, &World)) {
     let mut w = World::new_career_tiers(seed, 12, 3);
     let mut done = 0usize;
     let mut start: Option<(usize, Extras)> = None;
@@ -1562,7 +1575,7 @@ mod tests {
         let w = World::generate_tiers(3, 12, 3);
         let (h, a) = (lineup(&w.teams[0], &w.players), lineup(&w.teams[1], &w.players));
         let mut rng = Rng::new(1);
-        let (r, _) = simulate_recorded(&h, &a, &w.rules, &mut rng);
+        let (r, _) = basketman_core::engine::simulate_recorded(&h, &a, &w.rules, &mut rng);
         let bare = serde_json::to_string(&vec![&r]).unwrap();
         let (_, g) = load_external(&bare).unwrap();
         assert_eq!(g.len(), 1);

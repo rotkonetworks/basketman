@@ -1102,6 +1102,7 @@ impl Game {
                     }
                 })?;
                 let o = self.play.o;
+                self.book_orphan();
                 self.possessions[o] += 1;
                 let pace = self.sides[o].tactics.pace as f32 * 0.7
                     + self.sides[1 - o].tactics.pace as f32 * 0.3
@@ -1727,7 +1728,7 @@ impl Game {
         // Three seconds: nobody camps in the lane while his team has the ball
         // in the frontcourt. Going to the basket with the ball or going up
         // for the shot is not camping.
-        if !matches!(self.play.phase, Phase::Advance) && self.play.wait <= 0.0 {
+        if !matches!(self.play.phase, Phase::Advance) && self.play.wait <= 0.0 && !self.whistled() {
             let o = self.play.o;
             let going = matches!(
                 self.play.phase,
@@ -3198,7 +3199,7 @@ impl Game {
             ShotKind::Mid => 0.019 + 0.075 * c,
             ShotKind::Three => 0.006 + 0.025 * c,
         };
-        base * (1.0 + 0.5 * self.def().aggression())
+        base * (1.0 + 0.5 * self.def().aggression()) * officiating::SHOOTING_FOULS
     }
 
     /// Expected points of that shot, as the player would judge it.

@@ -16,6 +16,13 @@ use crate::league::{TeamId, World};
 use crate::player::PlayerId;
 use crate::rng::Rng;
 
+/// How much a point of difference in the squads' quality changes the odds a
+/// squad gives itself, and what the hall is worth to the home side. They are
+/// what the game really does (`docs/realism.md`, "League shape"): a squad
+/// that expected less than it got would find more belief in every win and
+/// the strong would grow stronger.
+const EXPECT_PER_POINT: f32 = 0.28;
+const EXPECT_HOME: f32 = 0.09;
 /// Where belief settles with nothing happening.
 const NEUTRAL: f32 = 0.55;
 
@@ -85,10 +92,10 @@ impl World {
         for (side, team) in [home, away].into_iter().enumerate() {
             let sign = if side == 0 { 1.0 } else { -1.0 };
             // What the squad thought its chances were.
-            let expected = (0.5 + sign * (edge * 0.17 + 0.05)).clamp(0.1, 0.9);
+            let expected = (0.5 + sign * (edge * EXPECT_PER_POINT + EXPECT_HOME)).clamp(0.1, 0.9);
             let margin = result.score[side] as f32 - result.score[1 - side] as f32;
             let won = if margin > 0.0 { 1.0 } else { 0.0 };
-            let mut change = 0.055 * (won - expected) + (margin / 800.0).clamp(-0.02, 0.02);
+            let mut change = 0.04 * (won - expected) + (margin / 800.0).clamp(-0.02, 0.02);
 
             // The things players hold against a coach whatever the score.
             let t = &self.teams[team];
@@ -571,6 +578,42 @@ mod tests {
             mood(top),
             mood(bottom)
         );
+    }
+
+    /// The odds a squad gives itself are the odds the game gives it: over
+    /// whole seasons, the home side's results are as good as it expected,
+    /// among the clubs that are the favourites and among those that are not.
+    /// (If the squads expected less than they got, belief would climb with
+    /// every win of the strong and fall with every defeat of the weak.)
+    #[test]
+    fn squads_expect_what_the_game_gives_them() {
+        let (mut fav, mut dog) = ((0.0f32, 0.0f32), (0.0f32, 0.0f32));
+        for seed in [31u64, 32, 33, 34, 35, 36] {
+            let mut w = World::generate(seed, 12);
+            let mut edges = Vec::new();
+            for f in &w.fixtures {
+                edges.push(w.strength(f.home) - w.strength(f.away));
+            }
+            while !w.season_over() {
+                w.play_round();
+            }
+            for (f, edge) in w.fixtures.iter().zip(edges) {
+                let r = f.result.as_ref().unwrap();
+                let expected = (0.5 + edge * EXPECT_PER_POINT + EXPECT_HOME).clamp(0.1, 0.9);
+                let got = match r.score[0].cmp(&r.score[1]) {
+                    std::cmp::Ordering::Greater => 1.0,
+                    std::cmp::Ordering::Equal => 0.5,
+                    _ => 0.0,
+                };
+                let bucket = if edge > 0.0 { &mut fav } else { &mut dog };
+                bucket.0 += got - expected;
+                bucket.1 += 1.0;
+            }
+        }
+        for (name, b) in [("favourites", fav), ("underdogs", dog)] {
+            let miss = b.0 / b.1;
+            assert!(miss.abs() < 0.06, "{name} got {miss:+.3} more wins a game than they expected over {} games", b.1);
+        }
     }
 
     #[test]

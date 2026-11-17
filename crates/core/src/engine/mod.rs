@@ -44,6 +44,18 @@ use crate::tactics::{DefenseScheme, OffenseSet, Press, Tactics};
 const DT: f32 = 0.1;
 /// How much of a man's heat is gone after a possession of fourteen seconds.
 const HEAT_FADE: f32 = 0.08;
+/// How much a squad's trust in its coach (0..1) and a player's mood (0..1)
+/// move every effective attribute, per unit above or below the middle. Small:
+/// belief and morale follow results, and a large effect makes the winners
+/// stronger and the losers weaker (`docs/realism.md`, "League shape").
+const BELIEF_EFFECT: f32 = 0.04;
+const MORALE_EFFECT: f32 = 0.03;
+/// Garbage time: the lead at the end of the game that is out of reach, and
+/// how much more it takes per minute left.
+const GARBAGE_BASE: f32 = 8.0;
+const GARBAGE_PER_MIN: f32 = 1.2;
+/// Seconds of need taken off a starter while the game is decided.
+const GARBAGE_REST: f32 = 900.0;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Rules {
@@ -250,6 +262,14 @@ struct Side {
     voice: f32,
     /// System change waiting for the next dead ball, with its familiarity.
     orders: Option<(Orders, f32)>,
+    /// What the other side has scored, kept by `conceded`.
+    opp_score: u16,
+    /// The hall's pull on concentration: positive for the home side in a
+    /// loud house, negative for the visitors; 0 with no crowd.
+    house: f32,
+    /// The game is decided and the bench has the starters sit; see
+    /// `garbage_time`.
+    garbage: bool,
 }
 
 impl Side {
@@ -287,7 +307,7 @@ impl Side {
                         + (rng.f32() - 0.5)
                             * 0.008
                             * (21 - p.personality.consistency.min(20)) as f32)
-                        * (1.0 + 0.05 * (p.morale - 0.5))
+                        * (1.0 + MORALE_EFFECT * (p.morale - 0.5))
                         * (1.0 - 0.12 * (1.0 - p.sharp)),
                     played: 0.0,
                     heat: 0.0,
@@ -317,6 +337,9 @@ impl Side {
             unanswered: 0,
             voice: 0.0,
             orders: None,
+            opp_score: 0,
+            house: 0.0,
+            garbage: false,
         }
     }
 
@@ -329,7 +352,7 @@ impl Side {
             * s.form
             * (1.0 + 0.035 * s.drive + 0.02 * s.focus)
             * (1.0 - 0.14 * (1.0 - s.fit))
-            * (1.0 + 0.07 * (self.belief - 0.5))
+            * (1.0 + BELIEF_EFFECT * (self.belief - 0.5))
     }
 
     /// How readily a defender fouls, 1 for an average one. A strong, sharp,
@@ -417,13 +440,40 @@ impl Side {
             return -1e6;
         }
         let frac = (elapsed + 120.0) / regulation;
-        let stay = if self.on.contains(&i) { 240.0 } else { 0.0 };
-        s.target_secs * frac - s.played + stay - s.fatigue * 150.0
+        let stay = if self.on.contains(&i) { 300.0 } else { 0.0 };
+        // Once the game is decided the five planned for the most minutes sit.
+        let rested = if self.garbage && self.is_regular(i) { GARBAGE_REST } else { 0.0 };
+        s.target_secs * frac - s.played + stay - s.fatigue * 150.0 - rested
+    }
+
+    /// Is slot `i` one of the five planned for the most minutes?
+    fn is_regular(&self, i: usize) -> bool {
+        let t = self.slots[i].target_secs;
+        let above = self.slots.iter().filter(|s| s.target_secs > t).count();
+        above < 5
+    }
+
+    /// Both benches clear the starters when the game is out of reach: a lead
+    /// of about twenty with ten minutes left, fifteen with five, ten with
+    /// two. The trailing side gives up two points later than the leader.
+    /// Once resting, the starters come back only if the game closes by four
+    /// points. A bench with a person on it leaves this to him.
+    fn garbage_time(&mut self, elapsed: f32, regulation: f32) {
+        let left = regulation - elapsed;
+        if self.coached || left <= 0.0 {
+            self.garbage = false;
+            return;
+        }
+        let lead = self.score as i32 - self.opp_score as i32;
+        let thr = GARBAGE_BASE + GARBAGE_PER_MIN * left / 60.0 + if lead < 0 { 2.0 } else { 0.0 };
+        let thr = if self.garbage { thr - 4.0 } else { thr };
+        self.garbage = lead.abs() as f32 >= thr;
     }
 
     /// Put the five players furthest behind their minutes target on court.
     /// Being on court already is worth a bonus so stints last a few minutes.
     fn substitute(&mut self, elapsed: f32, regulation: f32, foul_limit: u16) {
+        self.garbage_time(elapsed, regulation);
         if !self.auto_subs && !self.on.is_empty() {
             self.apply_queue(foul_limit);
             let slots = &self.slots;
@@ -534,6 +584,10 @@ impl Side {
             s.heat *= 1.0 - HEAT_FADE * (dur / 14.0).min(2.0);
             s.drive -= s.drive.clamp(-fade, fade);
             s.focus -= s.focus.clamp(-fade, fade);
+            // The crowd keeps it up for the men on court.
+            if self.on.contains(&i) && self.house != 0.0 {
+                s.focus = if self.house > 0.0 { s.focus.max(self.house) } else { s.focus.min(self.house) };
+            }
         }
         self.voice = (self.voice - dur / 400.0).max(0.0);
     }
@@ -581,6 +635,7 @@ impl Side {
     /// The other team scored again without reply; past seven points the
     /// five on the floor start to lose their heads.
     fn conceded(&mut self, points: u16) {
+        self.opp_score += points;
         self.unanswered += points;
         if self.unanswered >= 7 {
             for &i in &self.on {
@@ -1134,5 +1189,7 @@ pub fn simulate_recorded_crewed(
     (game.result(), game.rec.unwrap_or_default())
 }
 
+#[cfg(test)]
+mod shape_tests;
 #[cfg(test)]
 mod stance_tests;

@@ -321,7 +321,7 @@ impl World {
             let division = id / per_division;
             // Clubs differ, but not by so much that the better squad cannot
             // be outcoached. Each division down is a step weaker.
-            let quality = 9.1 - crate::divisions::QUALITY_STEP * division as f32 + rng.f32() * 1.8;
+            let quality = 10.35 - crate::divisions::QUALITY_STEP * division as f32 + rng.f32() * CLUB_SPREAD;
             let mut roster = Vec::new();
             for slot in 0..12 {
                 let pid = players.len() as PlayerId;
@@ -1379,7 +1379,10 @@ fn generate_body(base_height: f32, guardness: f32, strength: f32, rng: &mut Rng)
     let ape = 1.0 + (rng.f32() + rng.f32()) * 6.5;
     let wingspan_cm = height_cm + ape;
     let standing_reach_cm = height_cm * 1.30 + ape * 0.5 + rng.f32() * 5.0 - 2.5;
-    let bmi = 23.3 - guardness * 0.9 + (strength - 10.0) * 0.18 + rng.f32() * 1.6 - 0.8;
+    // Guards are lean, but not as lean as the formula for the bigs would have
+    // them: a European guard of 191 cm weighs about 88 kg.
+    let build = if guardness > 0.0 { 24.2 - guardness * 0.1 } else { 23.3 - guardness * 0.9 };
+    let bmi = build + (strength - 10.0) * 0.18 + rng.f32() * 1.6 - 0.8;
     let metres = height_cm / 100.0;
     Body {
         height_cm,
@@ -1396,10 +1399,62 @@ fn generate_body(base_height: f32, guardness: f32, strength: f32, rng: &mut Rng)
     }
 }
 
+/// How far apart clubs' squads are generated, and how far apart the players
+/// of a club: the width of the uniform draws, in attribute points. The clubs
+/// of a real league are closer than the first version of this game made them
+/// (net rating sd about 5 points, win percentage sd 0.14 beyond luck), and a
+/// point of average attribute is worth about ten points a game here, so the
+/// club spread is narrow and most of the variety is between men.
+const CLUB_SPREAD: f32 = 0.8;
+const PLAYER_SPREAD: f32 = 4.2;
+/// Share (per hundred) of a league's first-team players at each age from 19,
+/// as in a European top division: a few teenagers, the bulk between 23 and
+/// 31, a tail of veterans into the late thirties.
+const AGE_SHARE: [u32; 20] = [1, 2, 4, 5, 6, 7, 8, 8, 9, 9, 8, 8, 7, 6, 5, 4, 3, 2, 1, 1];
+
+/// An age for a roll of 0..104 on `AGE_SHARE`.
+fn age_of_roll(mut roll: u32) -> u8 {
+    for (i, n) in AGE_SHARE.iter().enumerate() {
+        if roll < *n {
+            return 19 + i as u8;
+        }
+        roll -= n;
+    }
+    38
+}
+
+/// How far below his best a player of `age` is, in attribute points: the
+/// young have not grown into their bodies and games, the old have lost the
+/// legs. The players' development (`training.rs`) closes the first gap and
+/// opens the second, so a world generated this way stays this way.
+pub(crate) fn age_gap(age: u8) -> f32 {
+    let a = age as f32;
+    if age < 27 {
+        (27.0 - a) * 0.25
+    } else if age > 27 {
+        (a - 27.0) * 0.15
+    } else {
+        0.0
+    }
+}
+
 pub(crate) fn generate_player(
     id: PlayerId,
     slot: usize,
     team_quality: f32,
+    rng: &mut Rng,
+) -> Player {
+    let age = age_of_roll(rng.range(0, AGE_SHARE.iter().sum()));
+    generate_player_at(id, slot, team_quality, age, rng)
+}
+
+/// A player of the given age whose `team_quality` is what he would be in
+/// his prime: at this age he is `age_gap` below it.
+pub(crate) fn generate_player_at(
+    id: PlayerId,
+    slot: usize,
+    team_quality: f32,
+    age: u8,
     rng: &mut Rng,
 ) -> Player {
     use Position::*;
@@ -1414,7 +1469,7 @@ pub(crate) fn generate_player(
     };
 
     let bench = if slot >= 5 { 1.5 } else { 0.0 };
-    let quality = team_quality + (rng.f32() - 0.5) * 5.0 - bench;
+    let quality = team_quality + (rng.f32() - 0.5) * PLAYER_SPREAD - bench - age_gap(age);
     let mut attrs = Attributes([0.0; Attr::COUNT]);
     // Footwork is rolled below from the body, not from this stream, so the
     // other twenty attributes come out exactly as they did before it existed.
@@ -1423,7 +1478,6 @@ pub(crate) fn generate_player(
             (quality + guardness * perimeter_lean(a) + (rng.f32() - 0.5) * 4.0).clamp(1.0, 20.0);
     }
 
-    let age = 18 + rng.range(0, 17) as u8;
     // Two rolls averaged, so most traits are middling and extremes are rare.
     let mut trait_roll = || 1 + ((rng.range(0, 20) + rng.range(0, 20)) / 2) as u8;
     let personality = Personality {
@@ -1478,7 +1532,9 @@ pub(crate) fn generate_player(
         24..=27 => rng.f32() * 1.5,
         _ => 0.0,
     };
-    player.potential = (overall + upside).min(20.0);
+    // He is expected to grow into what he would be in his prime.
+    let grow = if age < 27 { age_gap(age) } else { 0.0 };
+    player.potential = (overall + grow + upside).min(20.0);
     player.contract.salary = (overall * overall * overall * 60.0) as u32;
     player.assign_signatures();
     player
@@ -1950,20 +2006,40 @@ mod tests {
     /// learns it by being played there.
     #[test]
     fn a_position_is_learned_by_playing_it() {
-        let mut w = World::generate(5, 4);
-        let slot = w.teams[0].playbook[0].tactics.rotation[0].clone();
-        let p = &w.players[slot.player as usize];
-        let other = Position::ALL
-            .into_iter()
-            .find(|&x| x != p.position && p.knows(x) < 0.9)
-            .unwrap();
-        let before = p.knows(other);
-        w.teams[0].playbook[0].tactics.rotation[0].position = Some(other);
-        for _ in 0..6 {
-            w.play_round();
+        // How fast he learns depends on his age and wits, so the claim is
+        // about men in general: three starters of each club in several
+        // worlds, the young ones' mean gain and everybody's sign.
+        let (mut young, mut n) = (0.0f32, 0.0f32);
+        for seed in [5u64, 6, 7, 8, 9, 10] {
+            let mut w = World::generate(seed, 4);
+            let mut asked = Vec::new();
+            for t in 0..4 {
+                for k in 0..3 {
+                    let slot = w.teams[t].playbook[0].tactics.rotation[k].clone();
+                    let p = &w.players[slot.player as usize];
+                    let other = Position::ALL
+                        .into_iter()
+                        .find(|&x| x != p.position && p.knows(x) < 0.9)
+                        .unwrap();
+                    asked.push((t, k, slot.player, other, p.knows(other), p.age));
+                    w.teams[t].playbook[0].tactics.rotation[k].position = Some(other);
+                }
+            }
+            for _ in 0..6 {
+                w.play_round();
+            }
+            for (_, _, id, other, before, age) in asked {
+                let after = w.players[id as usize].knows(other);
+                // He may be hurt or have lost his place; nobody unlearns it.
+                assert!(after >= before, "{before} -> {after}");
+                if age <= 26 {
+                    young += after - before;
+                    n += 1.0;
+                }
+            }
         }
-        let after = w.players[slot.player as usize].knows(other);
-        assert!(after > before + 0.08, "{before} -> {after}");
+        assert!(n >= 20.0, "too few young men to say: {n}");
+        assert!(young / n > 0.08, "mean gain of the young {}", young / n);
     }
 
     #[test]

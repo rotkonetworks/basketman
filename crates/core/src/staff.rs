@@ -575,6 +575,9 @@ mod tests {
         deal.cash = going - ours + going * 5 / 100 + 1000;
         w.teams[0].budget = 10_000_000;
         w.teams[1].budget = 10_000_000;
+        // The transfer budget is not what is being tested either: the best
+        // man of a club may be a young one who is priced for what he will be.
+        w.econ.books[0].transfer_budget = 10_000_000;
         assert_eq!(w.trade_verdict(&deal).err(), None);
         // A hard bargainer wants more than that; a soft one took less.
         set(&mut w, 20, 20, 10);

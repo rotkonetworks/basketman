@@ -266,3 +266,35 @@ Report: 16 of 23 checks fail (16 of 23 before as well, but not the same ones).
   run cannot tell which change caused which: the shot physics, the tip-ins, the lane rule and fronting all
   went in between the pre-physics reading and this one. Do not tune from it before a reading with the
   changes in separate runs.
+
+## After league shape (2026-11-17)
+
+Quick mode, seed 1, 16-team league, `basketman balance --quick` on the branch `league-shape` (garbage time and
+a ten-man default rotation, belief and morale that no longer snowball, clubs generated closer, a hall that helps the
+home side, a late hack-a-foul, an age curve; see `docs/realism.md`, "League shape"). Measured, not tuned. Report:
+**15 of 23 checks fail** (16 of 23 on the last reading, `physics-shots`; I did not run the untouched tree again, so the
+two are not the same worlds). The balance lab sets its own plans and squads, so what moved here is mostly the
+generated clubs and the engine's new states, not the default plan.
+
+* **Seasons.** Win % against rotation quality r = **0.59** (R^2 0.35; was 0.79 on the old clubs, target 0.55 to 0.85:
+  still passes, near the floor), within a league rank correlation 0.57, against the coach's system r = 0.42 (was 0.16),
+  together R^2 0.49. Spread of win % **0.203** against 0.091 for luck alone (was 0.200). The clubs are closer (rotation
+  mean attribute sd between teams 0.45, best to worst 1.63 points), so quality explains less of a table and
+  the system explains more.
+* **Talent.** d = 0.5 wins 65.6% (target at least 60), d = 3 wins 100%. The naive coach's stronger squad is an even bet
+  against the best counter at d = 0.81 attribute points (1.8 league standard deviations).
+* **Minutes (finding 8).** Mirror against the standard 30/10 plan: deep (20 each) **40.8 +- 6.6** (was 52.9), starters 36/4
+  26.2 (25.4), starters only 17.9 (19.6). Top-heavy squad (starters +2, bench -3): control 47.9, deep 27.9 (25.0),
+  heavy 37.5 (36.7), only 36.2 (33.3). Playing everybody 20 minutes no longer beats the 30/10 plan: with fatigue as
+  it was, a deep rotation had won only because garbage time did not exist (the leading side's starters kept playing
+  and the deep side's bench kept the margin), and the bench is now worth what it is on a ten-man rotation. Fatigue still
+  punishes 36/4 and 40/1 hard. In league games `lab minutes` puts the optimum at 24 to 27 planned minutes a starter
+  (30: -0.5 points a game, 33: -1.6; 18: -1.1). The 30/10 "standard" here is written into the balance lab, so it
+  does not exercise the new default plan (`AUTO_MINUTES`).
+* **Matrix.** Strongest Iso/3-2 65.3, weakest PnR/Switch 33.5 (spread 31.8 points, was 44.8 on the last reading);
+  21 of 25 systems still dominated, all by Iso/3-2; equilibrium support still one system (Iso). Familiarity 0
+  costs 31.7 win points (target 5 to 25, failing: unchanged in kind). `no-exploit` and `no-absurd-lines` still fail
+  (threes attempted 14.2 for the found line against 26.2 for the league; blocks 5.6).
+* **What this says.** The shape work did not change the tactical picture (it is the other branches' ground), and it made seasons
+  slightly less quality-driven. Do not read the matrix's move in the spread (44.8 to 31.8) as caused by the shape work: the
+  worlds are generated differently (club spread, ages) and the previous reading was another branch.

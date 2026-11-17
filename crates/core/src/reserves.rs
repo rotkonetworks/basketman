@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::engine::{BoxLine, Lineup, simulate_game};
 use crate::inbox::{MAX_ROSTER, MIN_ROSTER};
-use crate::league::{Standing, TeamId, World, generate_player};
+use crate::league::{Standing, TeamId, World};
 use crate::player::{Player, PlayerId};
 use crate::rng::Rng;
 use crate::tactics::Tactics;
@@ -33,9 +33,9 @@ pub struct ReserveGame {
 /// A youngster for a reserve squad: raw, cheap, with room to grow.
 fn youth(id: PlayerId, quality: f32, rng: &mut Rng) -> Player {
     let slot = rng.range(0, 5) as usize;
-    let mut p = generate_player(id, slot, quality, rng);
-    p.age = 17 + rng.range(0, 4) as u8;
-    p.potential = (p.overall() + 1.0 + rng.f32() * 5.0).min(20.0);
+    let age = 17 + rng.range(0, 4) as u8;
+    let mut p = crate::league::generate_player_at(id, slot, quality, age, rng);
+    p.potential = (p.overall() + crate::league::age_gap(age) + 1.0 + rng.f32() * 5.0).min(20.0);
     p.assign_signatures();
     p.contract.salary = 8_000;
     p.contract.years_left = 2;
@@ -369,21 +369,21 @@ mod tests {
             )
         };
         // How many reserve games he gets in five weeks is down to the fixtures
-        // of one club, so look at several worlds.
+        // of one club, and to whether he is fit and still out of the rotation,
+        // so look at several worlds (eight: the claims are per world).
         let (mut idle_sum, mut played_sum, mut games_sum) = (0.0, 0.0, 0);
-        for seed in 4..8 {
+        for seed in 4..12 {
             let (idle, none) = run(seed, false);
             let (played, games) = run(seed, true);
             assert_eq!(none, 0);
-            assert!(games >= 1, "{games} reserve games in five weeks");
             games_sum += games;
             idle_sum += idle;
             played_sum += played;
         }
-        assert!(games_sum >= 8, "{games_sum} reserve games in four worlds");
+        assert!(games_sum >= 16, "{games_sum} reserve games in eight worlds");
         assert!(
-            played_sum / 4.0 > 0.8 && played_sum - idle_sum > 0.6,
-            "idle {idle_sum}, reserves {played_sum} (sums over four worlds)"
+            played_sum / 8.0 > 0.8 && played_sum - idle_sum > 1.2,
+            "idle {idle_sum}, reserves {played_sum} (sums over eight worlds)"
         );
     }
 

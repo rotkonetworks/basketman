@@ -11,7 +11,7 @@
 //! - the edge goes into the game as the squad's `belief` in the `Lineup`
 //!   the engine is handed, `PREP_BELIEF` for a full edge, capped at 1.
 //!   Belief is the engine's existing "plays above itself" input: it scales
-//!   every effective attribute by `1 + 0.07 * (belief - 0.5)`. Nothing
+//!   every effective attribute by `1 + 0.04 * (belief - 0.5)`. Nothing
 //!   inside the engine was touched; both places that build lineups for a
 //!   game (`simulate_batch` and `kickoff_scoped`) go through `lineups_for`.
 //!

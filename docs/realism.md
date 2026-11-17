@@ -578,3 +578,155 @@ from further out; a transition possession with a shot is worth 1.49 (the instrum
 shot or a fast-break event, so 1.19, Synergy's figure for every transition possession, is not the same quantity: per
 chance, including turnovers and misses without a shot, `lab transition` gives 1.10); layups from 1.3 to 2.2 m that were
 not floated are still made only 20% of the time (a swarmed rim).
+
+## League shape (2026-11-17, branch `league-shape`)
+
+The misses that are about the shape of the league and of a game, not about how a possession is played: blowouts
+and margins, the spread between clubs, minutes, home advantage, fouls, ages. Everything below was measured with
+`basketman lab shape / minutes / foulkinds / payroll / level` (new, `crates/cli/src/lab.rs`) and `basketman realism`;
+`basketman lab league-shape 20` runs all of the labs, `basketman realism` prints the whole table.
+
+**The instrument changed in one way.** The league games of `basketman realism` and `lab shape` are now played with a
+crew and a house (`World::bare_crew`: three active referees by a salt, the loudness of the home club's usual crowd),
+as every real game is. Before, they had no officials at all, which is why the table showed home sides fouling more
+(+0.62) and shooting fewer free throws (-0.86): the engine's home lean of the whistle was switched off in the
+measurement, not wrong in sign. The "before" column below is the untouched tree as the brief reported it
+(uncrewed); the "after" column is crewed. A crewed league scores a little differently, so a few metrics outside this
+section moved for that reason too.
+
+### Where the margins come from (measured before changing anything)
+
+`lab shape 30` (30 generated worlds, every ordered pair of the first division, 3,960 games a row), untouched engine:
+
+| | mean abs margin | won by 20+ | decided by 5 or fewer | rms margin |
+|---|---|---|---|---|
+| the league as generated | 15.18 | 30.5% | 22.2% | 18.9 |
+| each club against a copy of itself (game noise only) | 11.68 | 18.0% | 29.6% | 14.65 |
+| club differences halved | 13.49 | 23.7% | 24.5% | 16.9 |
+| club differences removed (equal averages) | 12.84 | 21.8% | 25.8% | 16.1 |
+| club differences x1.5 | 17.44 | 37.4% | 20.2% | 21.8 |
+
+* **Game noise is 60% of the variance of a margin (rms 14.65 of 18.9) and the clubs 40%.** A point of average
+  attribute across a club's rotation is worth **10.6 points of margin a game**, and the clubs were 0.69 points apart
+  (sd), so the clubs alone were worth 7 points of sd. Real EuroLeague clubs are about 5 points apart (win % sd 0.14 beyond luck).
+* The noise is in the possessions: a game of 136 possessions at the engine's 1.46 points of variance a possession
+  (real: about 1.25, taking the whole margin spread of 13.5 over 146 possessions) is 14.1. What I could test as
+  game-long noise does nothing: switching off each player's form for the night, or the loss of concentration after
+  seven unanswered points, moves the clone-game margin from 13.95 to 14.3 and 13.9 (noise). So **the rest of the
+  excess is possession-level variance, which is the other branch's ground** (scoring concentration, three-point
+  share, free-throw trips); it will move when that lands.
+* **Snowball (36 seasons of careers, `realism --games 0 --seasons 36`).** Win % sd 0.247, true talent sd 0.222. With
+  every squad's belief held at 0.6 and every player's morale at 0.5: **0.194 and 0.161**. Belief and morale were
+  worth 38% of the variance of win %. Why: `judge_coaches` thought a point of squad quality was worth 0.17 of
+  win probability and the game gives 0.28 (a point of rotation quality is 10.6 points of margin; sd 13.7), so
+  every club that was better than the room expected was rewarded each week; belief had sd 0.22 to 0.30 across the clubs
+  and moved every attribute by 7% per unit (`1 + 0.07 (belief - 0.5)`, morale 5%).
+* **Minutes (`lab minutes`: a club's starters planned for x of 40 minutes against the same club planned 24):**
+  18: -1.07 points +-0.56, 21: -0.38, 24: +0.53 (the club against itself, i.e. noise and home), 27: +0.04, 30: -0.48,
+  33: -1.62. Fatigue already makes 24 to 27 the best plan and 30 or more worse; the default plan
+  (`Tactics::auto`: 30 for each starter, 10 for each bench man) simply asked for the wrong thing. Starters played 29.6.
+* **Payroll to wins.** `lab payroll` over 108 division-seasons after the age work below: r(payroll, rotation strength)
+  0.52 to 0.70, r(strength, win %) 0.57 to 0.60, **r(payroll, win %) 0.32 to 0.35**. In the untouched tree the 36-season
+  reading was 0.000 (+-0.18). I did not isolate which of the changes brought it: salary is the cube of overall at
+  every renewal, so it follows quality, and the correlation appeared once ages were spread realistically and the
+  clubs' random spread was cut. What the game still lacks is any way for money to buy talent: AI clubs have no free
+  agency (every expiring contract is renewed, `season.rs`), so the correlation is carried by who starts richer and
+  by the draft, not by budgets.
+
+### What was changed
+
+1. **Garbage time** (`Side::garbage_time`, `engine/mod.rs`). A bench without a person on it sits the five
+   players planned for the most minutes when the game is out of reach: a lead of `8 + 1.2 x minutes left` (20 with ten left,
+   15 with five, 10 with two); the trailing side gives up two points later; they come back when the lead falls
+   by four. A human's own bench keeps his minutes plan. Worth about -0.8 of mean margin and -1.4 points of blowouts;
+   also about -1.0 point a game of scoring (the bench scores less) and -0.4 three-point attempts.
+2. **Rotation.** `Tactics::auto` plans ten men by rank, `AUTO_MINUTES = [28, 27, 26, 25, 23, 14, 13, 12, 10, 10]`
+   (after the engine's normalisation about 27.5 for the best five and 12.5 for the next five; played 24.0 and
+   17.9 after garbage time, foul trouble and tired legs), stints a minute longer (`stay` 240 to 300 s).
+   Test: `playing_the_starters_too_long_loses`.
+3. **Belief and morale** do not snowball: the expectation in `judge_coaches` is the game's (0.28 a point, home 0.09:
+   test `squads_expect_what_the_game_gives_them`), a squad's trust moves attributes by 4% a unit (was 7), morale by 3%
+   (was 5), the weekly belief step is 0.04 (was 0.055).
+4. **Clubs are generated closer** (`league.rs`): the club offset is a uniform draw of width 0.8 (was 1.8), the
+   player's 4.2 (was 5.0), base quality raised by 0.35 so that the league's attribute level is where it was (top eight of a rotation: overall 9.93
+   before, 9.94 now: `lab level`). Strength sd between clubs is now about 0.5 (was 0.69). Test: `clubs_are_generated_close_together`.
+5. **Home advantage** (`engine/officiating.rs`, `engine/mod.rs`): `crew.crowd` (the loudness `crowd_effect` already
+   computed and the engine only used for the whistle) now also (a) makes the visitors less sure of the hall: their
+   set's unfamiliarity goes up by `0.3 x loudness` (rhythm in the shot), (b) lifts the home five and rattles the
+   visitors as concentration (`+-0.5 x loudness`, kept up by `Side::tick`), and (c) leans the whistle, with the lean
+   shift cut from 0.22 to 0.16. Sizes, clubs against copies of themselves with a crew: nothing but what was there
+   +2.26 points (55.7% wins), concentration off +3.26 (60.2%), hall twice as strong +3.73 (61.2%), all as shipped
+   +3.96 (62.6%). The hidden `HOME` constant of the shot in `floor.rs` (0.016 of launch error) was left alone: it is worth about
+   +1.4. Test: `the_home_side_wins_sixty_percent`.
+   **Travel** (`travel.rs`, only in a managed career's calendar): not extended to the bare league. It spends
+   condition, persists between games, needs fixture days the lab does not have, and the existing test
+   (`home_court_stays_realistic_with_travel`) reads +3.5 with it and +4.5 without over twelve careers: a difference
+   inside the noise of the measurement. The lab's meaning of "home advantage" is therefore the hall, the whistle and the floor.
+6. **Fouls.** Every contact the floor generates is called with probability 0.85 x the crew's tightness, so the whistle
+   hardly moves the number of fouls (scaling the severity of shooting contact by 1.2 gave +3.6% shooting fouls); the number
+   is set where the floor generates contact (`foul_chance`, a `floor.rs` line). Measured in crewed games, personal
+   fouls a team a game by kind: shooting 7.2 (40%), reach-in 7.0 (39%), blocking 1.4, pushing 1.1, charging 0.6, screens
+   0.4. `SHOOTING_FOULS` (1.15 gives 8.6 shooting fouls, 19.1 PF, FTA 19.7, FTA/FGA 34.7%; 1.30 gives 10.0 shooting fouls,
+   49%, but 22.5 FTA and an FT rate of 40%): **half of all fouls cannot be shooting fouls with the shots the league takes
+   today without leaving the FT rate's band**, which is a function of 56 field-goal attempts a game (real 63).
+   Shipped: shooting x1.06 and the whistle on reaching, hands and body contact x1.1 (`HAND_CHECKS`): PF 19.3, shooting
+   share 41.6%, FTA 19.1, FTA/FGA 34.0%. When field-goal attempts rise the room appears (19.1 FTA on 63 attempts is 30%).
+   **Intentional fouling** (`Game::hacking`, in `call`): a bench without a person, behind by one to nine
+   (`3 + seconds/15`) in the last two minutes of the last period (in the bonus, or inside the last minute),
+   fouls the ball handler at the next reach. Test: `the_side_that_is_behind_fouls_late`.
+   A whistle that was blown while a shot was being gathered and the possession then died some other way (a violation,
+   the ball out) left the call on the record with no foul behind it; it is booked now (`book_orphan`) and a violation
+   cannot be called on a stopped play (`whistled`). Found by `truth_and_call_are_both_recorded`: 1 whistle in 1,400.
+7. **Ages and bodies** (`league.rs`, `season.rs`, `reserves.rs`). A first-team age is drawn from a table of a
+   European top division (19 to 38, mean 27.8; before: 18 to 34 uniform) and a player is `age_gap(age)` below his best:
+   0.25 attribute points a year under 27, 0.15 a year over it. His potential includes the growth that closes it. The
+   draft class (19 to 21) and the reserves' youth get the same gap, so rookies no longer arrive as good as veterans (the
+   cause of a league whose peak age was 23.5). Guards were generated at a BMI of 22.4 to 22.7, so a 191 cm guard weighed 81 kg;
+   now 24.1 to 24.2: 87 kg. Tests: `the_men_who_play_have_a_real_age_structure`. Career lengths (`career_length`) are not
+   in the default run and were not measured.
+
+### Before and after (`basketman realism`, 3,000 league games and 12 seasons)
+
+| metric | before | after | real target (band) |
+|---|---|---|---|
+| games won by 20 or more | 28.1 | 23.3 | 13 (9 to 18) |
+| mean / median margin | 14.87 / 13 | 13.62 / 11 | 10.8 (9.5 to 12.5) / 9 (8 to 10.5) |
+| games decided by 5 or fewer | 21.8 | 21.7 | 29 (25 to 33) |
+| win % sd / true talent sd / Noll-Scully | 0.230 / 0.203 / 2.16 | 0.209 / 0.179 / 1.96 | 0.176 / 0.14 / 1.65 |
+| team offensive rating sd | 10.96 | 9.27 | 5.0 (3.8 to 6.8) |
+| half-time leader wins | 80.7 | 78.4 | 72 (68 to 77) |
+| starters / bench minutes | 29.6 / 13.7 | 24.0 / 17.9 | 24.3 (22.5 to 26) / 16 (14 to 18) |
+| home win % | 53.4 | 59.7 | 62 (57 to 67) |
+| home minus away: fouls, FTA | +0.62, -0.86 | -0.71, +0.73 | -0.06, +0.24 |
+| personal fouls per team | 18.0 | 19.3 | 20.4 (19 to 22) |
+| shooting fouls share | 40.1 | 41.6 | 52.6 (47 to 58) |
+| overtime rate | 1.9 | 2.3 | 4 (2.5 to 6) |
+| mean age / peak age | 26.0 / 23.5 | 28.3 / 28.0 | 28.7 / 27 |
+| guards' weight, kg | 81.4 | 87.3 | 88.6 (84 to 93) |
+| payroll to wins correlation | 0.01 | 0.62 (+-0.14) | 0.39 (0.2 to 0.55) |
+| comebacks from 10 / from 15 (no target) | 13.5 / 3.0 | 15.2 / 3.5 | |
+
+Inside its band before and outside now: `tpa_pg` 24.05 to 22.5 (band 24 to 28) and `fga_pg` 57.2 to 56.0 (the hall's
+effect on the visitors' rhythm costs about 0.9 three-point attempts a team, garbage time 0.4; the three-point rate
+itself, 41.3, is inside), `ft_rate` 29.4 to 34.0 (band top 34; the price of the fouls above, and within noise), and by
+less than half a half-band and within noise: `blk_pg` 2.07 to 1.95, `dist_10_16_share`, `dist_3_10_fg`, `tov_pg`,
+`prev_win_r` 0.70 to 0.79. Newly inside: starters' and bench minutes, home win %, both home differences, PF, FTA,
+mean and peak age, guards' weight, payroll correlation, offensive-foul share.
+
+### What is not solved, and why
+
+* **Blowouts, margins, close games, half-time leader, offensive rating sd, win % sd (a little) are still out.** Clubs
+  playing copies of themselves already give a mean margin of 11.4 to 11.7, 15.7 to 18.0% blowouts and 25 to 27% close games
+  in the engine as it plays; the league adds the clubs on top. The remaining excess is the variance of a possession
+  (1.46 against about 1.25 real) and the 70-point scoring level, not the shape of the league. When the possession work lands,
+  re-run `basketman lab shape 30`: the first row is the answer.
+* **Club spread**: the clubs are now about 0.5 apart in strength, a good fit for a 5-point net-rating spread, yet win % sd is
+  still 0.209 (band to 0.200): about a third of the true-talent sd is how different clubs' *compositions* play, which
+  an average of ratings cannot see (clubs with equal averages still have a slope of 13 and a margin sd 2.7).
+* **Shooting-foul share** stays at 41.6% for the reason given; **home minus away fouls** is -0.7 (the band allows -1.0).
+* Probably shifting after the possession work: every margin, close-game and half-time number, `ortg_sd`, the shooting
+  share of fouls and `ft_rate`, `tpa_pg`/`fga_pg`, the home win % (the shot's home term is in `floor.rs`), and
+  the exact size of garbage time's effect on scoring. Unlikely to shift: minutes and rotation size, ages, weights, the
+  expectation calibration, home lean of the whistle, hacking.
+* AI clubs still have no free agency, so budgets do not buy talent over the seasons; the payroll correlation is
+  carried by generation and the draft.

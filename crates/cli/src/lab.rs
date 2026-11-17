@@ -3285,3 +3285,363 @@ pub fn finish(games: usize) {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// League shape: margins, blowouts, close games, home advantage, minutes.
+
+/// What one game contributes to the shape statistics.
+#[derive(Default, Clone)]
+struct ShapeGame {
+    margin: i32,
+    total: i32,
+    ot: bool,
+    half_lead_won: Option<bool>,
+    strength_gap: f64,
+    starters: f64,
+    bench: f64,
+    pf: [u16; 2],
+    fta: [u16; 2],
+    shoot_fouls_known: bool,
+    /// Margin at the end of each period (home minus away).
+    by_period: Vec<i32>,
+}
+
+fn shape_report(label: &str, games: &[ShapeGame]) {
+    let n = games.len() as f64;
+    let mut abs: Vec<f64> = games.iter().map(|g| g.margin.abs() as f64).collect();
+    abs.sort_by(|a, b| a.total_cmp(b));
+    let mean_abs = abs.iter().sum::<f64>() / n;
+    let sdm = (games.iter().map(|g| (g.margin as f64).powi(2)).sum::<f64>() / n).sqrt();
+    let share = |f: &dyn Fn(&ShapeGame) -> bool| games.iter().filter(|g| f(g)).count() as f64 / n * 100.0;
+    let hl: Vec<bool> = games.iter().filter_map(|g| g.half_lead_won).collect();
+    let hl = hl.iter().filter(|&&b| b).count() as f64 / hl.len().max(1) as f64 * 100.0;
+    let ppg = games.iter().map(|g| g.total as f64).sum::<f64>() / n / 2.0;
+    let st = games.iter().map(|g| g.starters).sum::<f64>() / n;
+    let bn = games.iter().map(|g| g.bench).sum::<f64>() / n;
+    let hpf = games.iter().map(|g| g.pf[0] as f64 - g.pf[1] as f64).sum::<f64>() / n;
+    let hft = games.iter().map(|g| g.fta[0] as f64 - g.fta[1] as f64).sum::<f64>() / n;
+    // slope of margin on strength gap
+    let mx = games.iter().map(|g| g.strength_gap).sum::<f64>() / n;
+    let my = games.iter().map(|g| g.margin as f64).sum::<f64>() / n;
+    let sxx = games.iter().map(|g| (g.strength_gap - mx).powi(2)).sum::<f64>();
+    let sxy = games.iter().map(|g| (g.strength_gap - mx) * (g.margin as f64 - my)).sum::<f64>();
+    let slope = if sxx > 0.0 { sxy / sxx } else { 0.0 };
+    println!(
+        "{label:<34} n {:>5} ppg {:5.1} |m| {:5.2} med {:4.1} rmsMargin {:5.2} blow20 {:5.1}% close5 {:5.1}% OT {:4.1}% half {:4.1}% homewin {:4.1}% hm {:+5.2} dPF {:+5.2} dFTA {:+5.2} st/bn {:4.1}/{:4.1} gapsd {:4.2} slope {:5.2}",
+        games.len(),
+        ppg,
+        mean_abs,
+        abs[abs.len() / 2],
+        sdm,
+        share(&|g| g.margin.abs() >= 20),
+        share(&|g| g.margin.abs() <= 5),
+        share(&|g| g.ot),
+        hl,
+        share(&|g| g.margin > 0),
+        my,
+        hpf,
+        hft,
+        st,
+        bn,
+        (games.iter().map(|g| (g.strength_gap - mx).powi(2)).sum::<f64>() / n).sqrt(),
+        slope,
+    );
+}
+
+/// One game of the shape experiments.
+fn shape_game(w: &World, h: usize, a: usize, away_is_home_squad: bool, seed: u64) -> ShapeGame {
+    use basketman_core::league::lineup;
+    let home = lineup(&w.teams[h], &w.players);
+    let away = if away_is_home_squad { lineup(&w.teams[h], &w.players) } else { lineup(&w.teams[a], &w.players) };
+    let mut rng = Rng::new(seed);
+    let crew = w.bare_crew(h, seed);
+    let r = basketman_core::engine::simulate_game_crewed(&home, &away, &w.rules, &mut rng, crew.as_ref());
+    let margin = r.score[0] as i32 - r.score[1] as i32;
+    let half = r.periods.iter().take(2).fold(0i32, |s, p| s + p[0] as i32 - p[1] as i32);
+    let mut g = ShapeGame {
+        margin,
+        total: (r.score[0] + r.score[1]) as i32,
+        ot: r.periods.len() > 4,
+        half_lead_won: (half != 0 && margin != 0).then_some((half > 0) == (margin > 0)),
+        strength_gap: if away_is_home_squad {
+            0.0
+        } else {
+            crate::realism::strength_of(w, h) - crate::realism::strength_of(w, a)
+        },
+        ..Default::default()
+    };
+    let mut run = 0;
+    for p in &r.periods {
+        run += p[0] as i32 - p[1] as i32;
+        g.by_period.push(run);
+    }
+    for side in 0..2 {
+        let mut mins: Vec<f64> = r.boxes[side].iter().map(|(_, l)| l.secs as f64 / 60.0).collect();
+        mins.sort_by(|a, b| b.total_cmp(a));
+        if side == 0 {
+            g.starters = mins.iter().take(5).sum::<f64>() / 5.0;
+            g.bench = mins.iter().skip(5).take(5).sum::<f64>() / 5.0;
+        }
+        g.pf[side] = r.boxes[side].iter().map(|(_, l)| l.pf).sum();
+        g.fta[side] = r.boxes[side].iter().map(|(_, l)| l.fta).sum();
+    }
+    g
+}
+
+/// Compress (or stretch) the differences between clubs: each club's players
+/// are shifted by `-(1-k)` times the club's distance from its division's
+/// mean quality.
+fn compress_clubs(w: &World, k: f32) -> World {
+    let mut out = w.clone();
+    let div = w.division_count();
+    let mut mean = vec![0.0f32; div];
+    let mut cnt = vec![0.0f32; div];
+    let team_mean: Vec<f32> = w
+        .teams
+        .iter()
+        .map(|t| t.roster.iter().map(|&p| w.players[p as usize].overall()).sum::<f32>() / t.roster.len() as f32)
+        .collect();
+    for (t, m) in w.teams.iter().zip(&team_mean) {
+        mean[t.division] += m;
+        cnt[t.division] += 1.0;
+    }
+    for d in 0..div {
+        mean[d] /= cnt[d];
+    }
+    for (t, m) in w.teams.iter().zip(&team_mean) {
+        let shift = (1.0 - k) * (m - mean[t.division]);
+        for &p in &t.roster {
+            for a in Attr::ALL {
+                let v = &mut out.players[p as usize].attrs[a];
+                *v = (*v - shift).clamp(1.0, 20.0);
+            }
+        }
+    }
+    out
+}
+
+/// `lab shape [worlds]`: the shape of games in the first division under
+/// controlled conditions. Prints margins, blowouts, close games, home
+/// advantage and minutes for: the league as generated; each club against a
+/// copy of itself (pure game noise); the clubs' differences halved and
+/// removed; and so on.
+pub fn shape(worlds: usize) {
+    let seed0 = 7000u64;
+    let ws: Vec<World> = (0..worlds).map(|k| World::generate_tiers(seed0 + k as u64, 12, 3)).collect();
+    let variants: Vec<(&str, Box<dyn Fn(&World) -> World + Sync>, bool)> = vec![
+        ("league as generated", Box::new(|w: &World| w.clone()), false),
+        ("clubs vs a copy of themselves", Box::new(|w: &World| w.clone()), true),
+        ("club spread x0.5", Box::new(|w: &World| compress_clubs(w, 0.5)), false),
+        ("club spread x0 (equal clubs)", Box::new(|w: &World| compress_clubs(w, 0.0)), false),
+        ("club spread x1.5", Box::new(|w: &World| compress_clubs(w, 1.5)), false),
+    ];
+    for (label, make, clone) in &variants {
+        let made: Vec<World> = ws.iter().map(|w| make(w)).collect();
+        let per = 132;
+        let games = crate::realism::par_map(crate::realism::threads(), worlds * per, |i| {
+            let w = &made[i / per];
+            let teams = w.division_teams(0);
+            let n = teams.len();
+            let j = i % per;
+            let (a, mut b) = (j / (n - 1), j % (n - 1));
+            if b >= a {
+                b += 1;
+            }
+            shape_game(w, teams[a], teams[b], *clone, 90_000 + i as u64 * 7919)
+        });
+        shape_report(label, &games);
+    }
+}
+
+/// `lab minutes [worlds]`: does playing the starters longer win? Each club of
+/// the first division plays a copy of itself whose starters (the first five of
+/// the rotation) are planned for `x` of every 40 minutes, the bench for
+/// `(200 - 5x) / 5`, against the same club planned 24/16. Home and away are
+/// swapped, so only the plan decides.
+pub fn minutes(worlds: usize) {
+    use basketman_core::league::lineup;
+    let plans = [18.0f32, 21.0, 24.0, 27.0, 30.0, 33.0];
+    let ws: Vec<World> = (0..worlds).map(|k| World::generate_tiers(7100 + k as u64, 12, 3)).collect();
+    for x in plans {
+        let games = crate::realism::par_map(crate::realism::threads(), worlds * 12 * 2, |i| {
+            let w = &ws[i / 24];
+            let t = w.division_teams(0)[(i / 2) % 12];
+            let mut ta = w.teams[t].tactics().clone();
+            let mut tb = ta.clone();
+            let plan = |tac: &mut Tactics, s: f32| {
+                for (k, slot) in tac.rotation.iter_mut().enumerate() {
+                    slot.minutes = if k < 5 { (s * 10.0) as u8 } else { ((200.0 - 5.0 * s) / 5.0 * 10.0) as u8 };
+                }
+            };
+            plan(&mut ta, x);
+            plan(&mut tb, 24.0);
+            let base = lineup(&w.teams[t], &w.players);
+            let la = Lineup { tactics: &ta, players: line(w, &ta), ..Lineup { tactics: &ta, players: vec![], familiarity: base.familiarity, belief: base.belief, coach: base.coach } };
+            let lb = Lineup { tactics: &tb, players: line(w, &tb), familiarity: base.familiarity, belief: base.belief, coach: base.coach };
+            let mut rng = Rng::new(500_000 + i as u64 * 7919);
+            let (r, ahome) = if i % 2 == 0 {
+                (basketman_core::engine::simulate_game(&la, &lb, &w.rules, &mut rng), true)
+            } else {
+                (basketman_core::engine::simulate_game(&lb, &la, &w.rules, &mut rng), false)
+            };
+            let (sa, sb) = if ahome { (r.score[0], r.score[1]) } else { (r.score[1], r.score[0]) };
+            let side = if ahome { 0 } else { 1 };
+            let mut mins: Vec<f64> = r.boxes[side].iter().map(|(_, l)| l.secs as f64 / 60.0).collect();
+            mins.sort_by(|a, b| b.total_cmp(a));
+            (sa as f64 - sb as f64, (sa > sb) as u8 as f64 + (sa == sb) as u8 as f64 * 0.5, mins.iter().take(5).sum::<f64>() / 5.0)
+        });
+        let n = games.len() as f64;
+        let m = games.iter().map(|g| g.0).sum::<f64>() / n;
+        let wp = games.iter().map(|g| g.1).sum::<f64>() / n;
+        let st = games.iter().map(|g| g.2).sum::<f64>() / n;
+        let se = (games.iter().map(|g| (g.0 - m).powi(2)).sum::<f64>() / n / n).sqrt();
+        println!("starters planned {x:4.1} vs 24: starters played {st:4.1}  margin {m:+5.2} +-{se:.2}  win% {:.1}", wp * 100.0);
+    }
+}
+
+/// `lab payroll [worlds]`: does money become quality, and quality wins?
+/// Plays `worlds` career worlds of three seasons and prints, over divisions
+/// and seasons, the correlations between a club's payroll at the start of
+/// the season, the strength of its rotation and its win percentage.
+pub fn payroll(worlds: usize) {
+    let mut rows: Vec<[f64; 3]> = Vec::new();
+    let mut ages: std::collections::BTreeMap<u8, (f64, f64)> = Default::default();
+    for k in 0..worlds {
+        crate::realism::play_world(9000 + k as u64, 3, |s, w| {
+            {
+                let b: Vec<f64> = w.teams.iter().filter(|t| t.division == 0).map(|t| t.belief as f64).collect();
+                let m: Vec<f64> = w.teams.iter().filter(|t| t.division == 0).map(|t| {
+                    t.roster.iter().map(|&p| w.players[p as usize].morale as f64).sum::<f64>() / t.roster.len() as f64
+                }).collect();
+                let st: Vec<f64> = w.teams.iter().filter(|t| t.division == 0).map(|t| crate::realism::strength_of(w, t.id)).collect();
+                let sd = |v: &[f64]| { let mu = v.iter().sum::<f64>() / v.len() as f64; (v.iter().map(|x| (x - mu).powi(2)).sum::<f64>() / v.len() as f64).sqrt() };
+                println!("season {}: belief mean {:.2} sd {:.3} r(strength) {:.2}; morale sd {:.3} r(strength) {:.2}; strength sd {:.2}",
+                    w.season, b.iter().sum::<f64>() / b.len() as f64, sd(&b), crate::realism::pearson(&b, &st).unwrap_or(0.0), sd(&m), crate::realism::pearson(&m, &st).unwrap_or(0.0), sd(&st));
+            }
+            for t in w.teams.iter().filter(|t| t.division == 0) {
+                for &p in &t.roster {
+                    let pl = &w.players[p as usize];
+                    let e = ages.entry(pl.age).or_default();
+                    e.0 += pl.overall() as f64;
+                    e.1 += 1.0;
+                }
+            }
+            for d in 0..3 {
+                let ids: Vec<usize> = s.extras.strength.keys().copied().filter(|&t| s.teams_division[t] == d).collect();
+                let wp: Vec<f64> = ids
+                    .iter()
+                    .map(|&t| {
+                        let (mut w, mut n) = (0.0f64, 0.0f64);
+                        for g in &s.division_games {
+                            if g.home == t || g.away == t {
+                                let r = g.result.as_ref().unwrap();
+                                let (a, b) = if g.home == t { (r.score[0], r.score[1]) } else { (r.score[1], r.score[0]) };
+                                w += (a > b) as u8 as f64;
+                                n += 1.0;
+                            }
+                        }
+                        w / n.max(1.0)
+                    })
+                    .collect();
+                let st: Vec<f64> = ids.iter().map(|t| s.extras.strength[t]).collect();
+                let pr: Vec<f64> = ids.iter().map(|t| s.extras.payroll[t]).collect();
+                if let (Some(a), Some(b), Some(c)) = (
+                    crate::realism::pearson(&pr, &st),
+                    crate::realism::pearson(&st, &wp),
+                    crate::realism::pearson(&pr, &wp),
+                ) {
+                    rows.push([a, b, c]);
+                }
+            }
+        });
+    }
+    let n = rows.len() as f64;
+    let m = |i: usize| rows.iter().map(|r| r[i]).sum::<f64>() / n;
+    println!(
+        "{} division-seasons: r(payroll, strength) {:.2}  r(strength, win%) {:.2}  r(payroll, win%) {:.2}",
+        rows.len(),
+        m(0),
+        m(1),
+        m(2)
+    );
+    let total: f64 = ages.values().map(|e| e.1).sum();
+    let mean_age = ages.iter().map(|(a, e)| *a as f64 * e.1).sum::<f64>() / total;
+    println!("first-division rosters: mean age {mean_age:.1}");
+    for (a, e) in &ages {
+        println!("  age {a:>2}: {:>5.1}% of players, mean overall {:.2}", e.1 / total * 100.0, e.0 / e.1);
+    }
+}
+
+/// `lab foulkinds [worlds]`: personal fouls per team per game by kind, in
+/// crewed league games, with the free throws they brought and the fouls in
+/// the last two minutes.
+pub fn foulkinds(worlds: usize) {
+    use basketman_core::league::lineup;
+    use basketman_core::replay::FoulKind;
+    let ws: Vec<World> = (0..worlds).map(|k| World::generate_tiers(7300 + k as u64, 12, 3)).collect();
+    let per = 132;
+    let rows = crate::realism::par_map(crate::realism::threads(), worlds * per, |i| {
+        let w = &ws[i / per];
+        let teams = w.division_teams(0);
+        let j = i % per;
+        let (a, mut b) = (j / 11, j % 11);
+        if b >= a {
+            b += 1;
+        }
+        let home = lineup(&w.teams[teams[a]], &w.players);
+        let away = lineup(&w.teams[teams[b]], &w.players);
+        let mut rng = Rng::new(31_000 + i as u64 * 7919);
+        let crew = w.bare_crew(teams[a], i as u64);
+        let (r, rec) = basketman_core::engine::simulate_recorded_crewed(&home, &away, &w.rules, &mut rng, crew.as_ref());
+        let mut kinds = [0u32; 8];
+        let mut late = 0u32;
+        for e in &rec.events {
+            if let EventKind::Foul { kind, .. } = e.kind {
+                kinds[kind as usize] += 1;
+                if e.period >= 3 && e.clock <= 120.0 {
+                    late += 1;
+                }
+            }
+        }
+        let fta: u32 = (0..2).map(|s| r.boxes[s].iter().map(|(_, l)| l.fta as u32).sum::<u32>()).sum();
+        let fga: u32 = (0..2).map(|s| r.boxes[s].iter().map(|(_, l)| l.fga as u32).sum::<u32>()).sum();
+        (kinds, late, fta, fga, r.score[0] as i32 - r.score[1] as i32)
+    });
+    let n = rows.len() as f64 * 2.0;
+    let mut tot = [0f64; 8];
+    for r in &rows {
+        for k in 0..8 {
+            tot[k] += r.0[k] as f64;
+        }
+    }
+    let pf: f64 = tot.iter().sum();
+    println!("games {}  PF per team {:.2}  FTA per team {:.2}  FTA/FGA {:.3}  late fouls per game {:.2}",
+        rows.len(), pf / n,
+        rows.iter().map(|r| r.2 as f64).sum::<f64>() / n,
+        rows.iter().map(|r| r.2 as f64).sum::<f64>() / rows.iter().map(|r| r.3 as f64).sum::<f64>(),
+        rows.iter().map(|r| r.1 as f64).sum::<f64>() / rows.len() as f64);
+    for k in FoulKind::ALL {
+        println!("  {:<14} {:5.2} per team ({:4.1}%)", k.label(), tot[k as usize] / n, tot[k as usize] / pf * 100.0);
+    }
+}
+
+/// `lab level [worlds]`: the level of the league as generated: mean overall,
+/// three-point and close-shot ratings of the first division's top eight, and
+/// the mean age.
+pub fn level(worlds: usize) {
+    let (mut ov, mut tp, mut cs, mut age, mut n) = (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    for k in 0..worlds {
+        let w = World::generate_tiers(7000 + k as u64, 12, 3);
+        for &t in &w.division_teams(0) {
+            for s in w.teams[t].tactics().rotation.iter().take(8) {
+                let p = &w.players[s.player as usize];
+                ov += p.overall() as f64;
+                tp += p.attrs[Attr::ThreePoint] as f64;
+                cs += p.attrs[Attr::CloseShot] as f64;
+                age += p.age as f64;
+                n += 1.0;
+            }
+        }
+    }
+    println!("top-8 rotation: overall {:.2}  three-point {:.2}  close shot {:.2}  age {:.1}", ov / n, tp / n, cs / n, age / n);
+}
