@@ -416,12 +416,11 @@ fn a_star_with_poor_passers_scores_more_in_isolation() {
 }
 
 /// Ball movement pays: a squad of good passers scores more per possession
-/// with the passing offence than with isolation. Measured today over 24
-/// worlds: Motion 1.17, Isolation 1.20. The star's share of the shots is
-/// still worth more than the passers' swings; see docs/hands.md ("what is
-/// still off").
+/// with the passing offence than with isolation. Measured over 24 worlds:
+/// Motion 1.151, Isolation 1.146 (the margin is thin: the lab, over 100
+/// games of one world, has Motion 1.10 and Isolation 1.07; for the star
+/// variant it is Isolation 1.23 against Motion 1.13).
 #[test]
-#[ignore = "balance: measured over 24 worlds Motion 1.170 against Isolation 1.199 for a squad of good passers (the star variant, Isolation 1.31 against Motion 1.17, holds)"]
 fn a_squad_of_passers_scores_more_with_ball_movement_than_in_isolation() {
     let r = passers_and_star();
     assert!(r[0][0] > r[0][1], "a squad of passers scores {:.3} with Motion and {:.3} with Isolation", r[0][0], r[0][1]);
