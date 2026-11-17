@@ -102,6 +102,49 @@ pub(crate) fn moments(rec: &Recording, what: &str) -> Vec<f32> {
         "pnrpass" => passes(&|p, rec| {
             rec.events.iter().any(|e| matches!(e.kind, EventKind::Screen { .. }) && p.time > e.time && p.time - e.time < 3.0)
         }),
+        // A swing, a swing, and a three from the corner: the second of two
+        // passes in a chain, the last to a man in a corner who shoots it
+        // within a second of the catch. The moment starts before the first.
+        "swingcorner" => {
+            let in_corner = |p: basketman_core::court::Vec2| (p.x < 4.5 || p.x > 23.5) && (p.y - 7.5).abs() > 5.0;
+            let mut out = Vec::new();
+            for e in &rec.events {
+                let EventKind::Shot { kind: ShotKind::Three, .. } = &e.kind else { continue };
+                let side = e.offense;
+                let f = &rec.frames[rec.frame_at(e.time)];
+                let before: Vec<&basketman_core::replay::PassRec> = rec.passes.iter().filter(|p| !p.inbound && p.side == side && p.time < e.time && e.time - p.time < 7.0).collect();
+                let Some((&p2, rest)) = before.split_last() else { continue };
+                if e.time - p2.time > 2.2 || !in_corner(f.pos[side as usize][p2.to as usize]) {
+                    continue;
+                }
+                if let Some(p1) = rest.iter().rev().find(|q| q.to == p2.from && p2.time - q.time < 4.5) {
+                    out.push((p1.time - 0.4).max(0.0));
+                }
+            }
+            out
+        }
+        // A man cutting to the basket, thrown the ball: five metres out and
+        // running at the rim at three metres a second when it leaves, within
+        // three of it a second on.
+        "backdoor" => passes(&|p, rec| {
+            let h = hoop_of(rec, p);
+            let hp = basketman_core::court::Vec2 { x: h.0, y: h.1 };
+            let i = rec.frame_at(p.time);
+            let (a, b) = (&rec.frames[i.saturating_sub(3)], &rec.frames[i]);
+            let (q0, q1) = (a.pos[p.side as usize][p.to as usize], b.pos[p.side as usize][p.to as usize]);
+            let toward = (q0.dist(hp) - q1.dist(hp)) / (b.time - a.time).max(0.05);
+            let g = &rec.frames[rec.frame_at(p.time + 0.9)];
+            !p.inbound && q1.dist(hp) > 4.5 && toward > 2.5 && g.pos[p.side as usize][p.to as usize].dist(hp) < 3.0
+        }),
+        // A ball screen, then a pass to the man who rolled to the rim.
+        "roller" => passes(&|p, rec| {
+            let h = hoop_of(rec, p);
+            let hp = basketman_core::court::Vec2 { x: h.0, y: h.1 };
+            let g = &rec.frames[rec.frame_at(p.time + 0.9)];
+            !p.inbound
+                && g.pos[p.side as usize][p.to as usize].dist(hp) < 3.0
+                && rec.events.iter().any(|e| matches!(e.kind, EventKind::Screen { .. }) && p.time > e.time && p.time - e.time < 4.0)
+        }),
         "poke" => rec.pokes.iter().map(|k| (k.time - 0.6).max(0.0)).collect(),
         "pokeaway" => rec.pokes.iter().filter(|k| k.result == basketman_core::replay::PokeResult::Loose).map(|k| (k.time - 0.6).max(0.0)).collect(),
         // A defender slides with the ball handler, who is dribbling.
@@ -290,7 +333,7 @@ fn subject(rec: &Recording, what: &str, time: f32) -> Option<(usize, usize)> {
             let f = rec.frames.get(rec.frame_at(time + 0.05))?;
             f.holder.map(|(s, k)| (s as usize, k as usize))
         }
-        "pass" | "deflect" | "bounce" | "lob" | "rimpass" | "kickout" | "pnrpass" => rec
+        "pass" | "deflect" | "bounce" | "lob" | "rimpass" | "kickout" | "pnrpass" | "swingcorner" | "backdoor" | "roller" => rec
             .passes
             .iter()
             .find(|p| (p.time - 0.4 - time).abs() < 0.011)
