@@ -3834,7 +3834,7 @@ impl Game {
         // protects the ball and gets himself fouled draws more.
         let closeness = (1.0 + (1.3 - q.dist(p)) * 0.5).clamp(0.4, 1.5);
         let protect = 1.4 - self.oe(h, Attr::Handling) / 20.0 * 0.8;
-        let foul = 0.044
+        let foul = 0.040
             * (1.0 + 0.8 * aggression)
             * temper
             * closeness
