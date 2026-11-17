@@ -143,6 +143,15 @@ impl Game {
                 let body = self.st[t][k].body;
                 let lift = self.lift_at(t, k, 0.0);
                 let sh = [self.shoulder_of(t, k, RIGHT), self.shoulder_of(t, k, LEFT)];
+                // The hand goes with the shoulder: a body that runs, turns, jumps or is
+                // put somewhere else takes its hands with it, and everything below
+                // (where a hand can meet the ball, who can reach what) starts from there.
+                for i in 0..2 {
+                    let r = self.hand_rel[t][k][i];
+                    if !r.z.is_nan() {
+                        self.hands[t][k].h[i].p = v3(sh[i].x + r.x, sh[i].y + r.y, sh[i].z + r.z);
+                    }
+                }
                 let mut goal = [
                     (hands::rest_goal(sh[0], body, RIGHT, arm), HandKind::Rest),
                     (hands::rest_goal(sh[1], body, LEFT, arm), HandKind::Rest),
@@ -310,12 +319,6 @@ impl Game {
                 let rel = &mut self.hand_rel[t][k];
                 let hs = &mut self.hands[t][k];
                 for i in 0..2 {
-                    // The hand goes with the shoulder: a body that runs, turns, jumps
-                    // or is put somewhere else takes its hands with it, and the hand
-                    // moves from there by its own speed.
-                    if !rel[i].z.is_nan() {
-                        hs.h[i].p = v3(sh[i].x + rel[i].x, sh[i].y + rel[i].y, sh[i].z + rel[i].z);
-                    }
                     hs.h[i].kind = goal[i].1;
                     hands::step(&mut hs.h[i], goal[i].0, sh[i], arm, speed, DT);
                     rel[i] = V3 { x: hs.h[i].p.x - sh[i].x, y: hs.h[i].p.y - sh[i].y, z: hs.h[i].p.z - sh[i].z };

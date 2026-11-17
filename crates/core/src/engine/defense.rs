@@ -13,6 +13,9 @@ use crate::tactics::DefenseScheme;
 const FRONT_RANGE: f32 = 2.4;
 const FRONT_GAP: f32 = 0.7;
 
+/// A man whose own attacker is a better shooter than this does not leave him to be the second helper.
+const SECOND_HELP_THREAT: f32 = 0.9;
+
 pub(super) struct View {
     pub scheme: DefenseScheme,
     /// Attackers and defenders, current positions.
@@ -239,7 +242,14 @@ fn help(view: &View, a: &mut Aims) {
     let second = cands
         .iter()
         .skip(1)
-        .find(|c| zone || view.o[view.guard[c.1]].dist(view.ball) > 3.5);
+        .find(|c| {
+            zone || {
+                let i = view.guard[c.1];
+                // Never off a dangerous shooter (as the stunt in `man` is not):
+                // the kick-out would find him alone.
+                view.o[i].dist(view.ball) > 3.5 && view.threat[i] <= SECOND_HELP_THREAT
+            }
+        });
     if let Some(&(_, dk, p)) = second {
         let base = if p.dist(HOOP) < 2.2 { HOOP.toward(view.ball, 1.1) } else { p };
         a.at[dk] = base.toward(HOOP, 0.9_f32.min(base.dist(HOOP)));
