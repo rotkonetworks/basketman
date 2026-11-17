@@ -48,6 +48,11 @@ const HEAT_CONTEST: f32 = 0.55;
 const HEAT_REAL: f32 = 0.45;
 /// A pass the passer reads as likelier than this to be lost is not thrown.
 const SWING_RISK_MAX: f32 = 0.22;
+/// The chance a man with under three seconds on the clock lets it run out, at
+/// no contest and rating 10, and what a hand in his face and a rating point add and take away.
+const LATE_PANIC: f32 = 0.03;
+const LATE_PANIC_CONTEST: f32 = 0.05;
+const LATE_PANIC_IQ: f32 = 0.003;
 /// Metres from the basket past which a three is judged a worse shot, and by how much a metre.
 const THREE_LONG: f32 = 7.4;
 const LONG_SLOPE: f32 = 0.022;
@@ -3479,6 +3484,16 @@ impl Game {
             return self.pass(h, j, false);
         }
         if left < 3.2 {
+            // Late in the clock a man with a hand in his face and not enough
+            // head sometimes holds it too long: no shot is let go in time.
+            let panic = (LATE_PANIC + LATE_PANIC_CONTEST * c.min(1.0)
+                - LATE_PANIC_IQ * (self.oe(h, Attr::Iq) - 10.0))
+                .max(0.01);
+            if self.play.source != Source::Forced && self.rng.chance(panic) {
+                self.play.source = Source::Forced;
+                self.play.think = left + 0.3;
+                return None;
+            }
             self.play.source = Source::Forced;
             return self.gather(0.3, true);
         }

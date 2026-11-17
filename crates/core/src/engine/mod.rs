@@ -44,6 +44,8 @@ use crate::tactics::{DefenseScheme, OffenseSet, Press, Tactics};
 const DT: f32 = 0.1;
 /// How much of a man's heat is gone after a possession of fourteen seconds.
 const HEAT_FADE: f32 = 0.08;
+/// How much faster a man tires for each unit of the attention the defense has paid him.
+const USAGE_TIRE: f32 = 3.0;
 /// How much a squad's trust in its coach (0..1) and a player's mood (0..1)
 /// move every effective attribute, per unit above or below the middle. Small:
 /// belief and morale follow results, and a large effect makes the winners
@@ -586,6 +588,10 @@ impl Side {
                     * 0.0009
                     * (1.6 - s.p.attrs[Attr::Stamina] / 20.0)
                     * load
+                    // The man the offence is run through works harder: every
+                    // shot, drive and dribble he takes against a defense that
+                    // is looking for him is effort the others do not spend.
+                    * (1.0 + USAGE_TIRE * s.heat)
                     * (1.0 + 0.4 * s.drive.max(0.0));
             } else {
                 s.fatigue -= dur * 0.0025;
