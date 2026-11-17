@@ -474,6 +474,8 @@ pub fn passes(games: usize) {
         let mut sp = [[0u32; 2]; 5];
         let mut dl = [[0.0f64; 4]; 5];
         let mut src = [[0.0f64; 3]; 9];
+        let mut fk = [[0.0f64; 2]; 8];
+        let mut tk = [0.0f64; 6];
         for g in 0..games {
             let (a, b) = ((g * 7 + si) % n, (g * 5 + 1 + g / n + si) % n);
             if a == b {
@@ -496,6 +498,7 @@ pub fn passes(games: usize) {
             }
             for e in &rec.events {
                 if let EventKind::Turnover { kind, .. } = &e.kind {
+                    tk[*kind as usize] += 1.0;
                     tov += 1;
                     bad += (*kind == TurnoverKind::BadPass) as u32;
                 }
@@ -569,6 +572,10 @@ pub fn passes(games: usize) {
                 }
             }
             for e in &rec.events {
+                if let EventKind::Foul { kind, shots, .. } = &e.kind {
+                    fk[*kind as usize][0] += 1.0;
+                    fk[*kind as usize][1] += *shots as f64;
+                }
                 if let EventKind::Shot { made, kind, source, fouled, .. } = &e.kind {
                     let k = *source as usize;
                     src[k][0] += 1.0;
@@ -631,6 +638,19 @@ pub fn passes(games: usize) {
             }
             println!();
         }
+        {
+            print!("{:<11}       fouls per 100 poss (n, ft-trips ordered):", "");
+            for (i, k) in basketman_core::replay::FoulKind::ALL.iter().enumerate() {
+                if fk[i][0] > 0.0 {
+                    print!(" {:?} {:.1} ({:.1} shots);", k, fk[i][0] * 100.0 / p as f64, fk[i][1] * 100.0 / p as f64);
+                }
+            }
+            println!();
+        }
+        println!(
+            "{:<11}       turnovers per 100 poss: bad pass {:.1} stripped {:.1} off foul {:.1} clock {:.1} pressed {:.1} 3s {:.1}",
+            "", tk[0] * 100.0 / p as f64, tk[1] * 100.0 / p as f64, tk[2] * 100.0 / p as f64, tk[3] * 100.0 / p as f64, tk[4] * 100.0 / p as f64, tk[5] * 100.0 / p as f64
+        );
         print!("{:<11}       catch to shot (<.5,<.8,<1.2,<2,more s): ", "");
         for b in dl {
             print!(" n {} cont {:.2} pps {:.2} 3s {:.0}%;", b[0], b[1] / b[0].max(1.0), b[2] / b[0].max(1.0), b[3] * 100.0 / b[0].max(1.0));

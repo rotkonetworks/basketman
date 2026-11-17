@@ -297,7 +297,8 @@ fn ball_movement_pays_for_passers_and_isolation_for_a_star() {
     // [variant][set] points and possessions of the altered side.
     let mut pts = [[0.0f64; 2]; 2];
     let mut poss = [[0.0f64; 2]; 2];
-    for seed in 1..=8u64 {
+    let worlds: u64 = std::env::var("WORLDS").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
+    for seed in 1..=worlds {
         let base = World::generate(seed, 12);
         for variant in 0..2 {
             let mut w = base.clone();

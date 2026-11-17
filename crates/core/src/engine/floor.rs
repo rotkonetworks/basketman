@@ -48,6 +48,12 @@ const HEAT_CONTEST: f32 = 0.55;
 const HEAT_REAL: f32 = 0.45;
 /// A pass the passer reads as likelier than this to be lost is not thrown.
 const SWING_RISK_MAX: f32 = 0.22;
+const SWING_MOVER: f32 = 0.25;
+/// What a shot has to be worth, in points, with twelve seconds on the clock, and how much
+/// more early in the possession (and less late) over twelve seconds: the
+/// worth of going on with the ball.
+const THRESHOLD_BASE: f32 = 1.18;
+const THRESHOLD_SLOPE: f32 = 0.40;
 /// How much worse a jumper is for a pass that was off the hands, and better for one on them.
 const PASS_RHYTHM: f32 = 0.30;
 /// How much likelier a swing is to the man who handles the offence.
@@ -1494,11 +1500,9 @@ impl Game {
             None,
         );
         let set = side.tactics.offense;
-        let lead = if set == OffenseSet::Isolation {
-            star
-        } else {
-            handler
-        };
+        // The ball is brought up by the man who runs the offence in every set; in
+        // an isolation it is then fed to the star.
+        let lead = handler;
         let height = |k: usize| side.slots[side.on[k]].p.body.height_cm;
         let big = match set {
             OffenseSet::Motion | OffenseSet::PostUp if post != lead => post,
@@ -2229,7 +2233,16 @@ impl Game {
                     }
                     Task::Roll => {
                         let side = if pos.x >= 0.0 { 1.0 } else { -1.0 };
-                        (HOOP + v(side, 0.9), 0.85)
+                        if self.play.lane[k] > LANE_WARN {
+                            // Two seconds under the basket and the ball has not come:
+                            // out to the dunker spot, the lane is not his to camp in.
+                            self.play.spots[k] = v(side * (KEY_HALF_WIDTH + 0.65), 0.9);
+                            self.play.task[k] = Task::Spot;
+                            self.play.lane[k] = 0.0;
+                            (self.play.spots[k], 0.6)
+                        } else {
+                            (HOOP + v(side, 0.9), 0.85)
+                        }
                     }
                     Task::Pop(p) => (p, 0.85),
                     Task::Crash => (HOOP.toward(pos, 1.4), 1.0),
@@ -3260,7 +3273,7 @@ impl Game {
             ShotKind::Mid => 0.040 + 0.130 * c,
             ShotKind::Three => 0.018 + 0.060 * c,
         };
-        base * (1.0 + 0.5 * self.def().aggression()) * officiating::SHOOTING_FOULS
+        base * if kind == ShotKind::Rim { 1.0 } else { 1.0 } * (1.0 + 0.5 * self.def().aggression()) * officiating::SHOOTING_FOULS
     }
 
     /// Expected points of that shot, as the player would judge it.
@@ -3295,7 +3308,7 @@ impl Game {
             Brief::Pass => 0.07,
             _ => 0.0,
         };
-        1.18 + 0.40 * (left - 12.0) / 12.0 - pace - (usage - 0.9) * 0.035 + told
+        THRESHOLD_BASE + THRESHOLD_SLOPE * (left - 12.0) / 12.0 - pace - (usage - 0.9) * 0.035 + told
     }
 
     /// Seconds a ball picked off at `from` takes to reach defender `dk`'s hand:
@@ -3670,7 +3683,10 @@ impl Game {
             if risk > SWING_RISK_MAX {
                 continue;
             }
-            *w = (1.0 - risk * 3.0).max(0.05) / (1.0 + p.dist(pj)) * (0.3 + open * open);
+            // A man who has stopped at his spot is the one to give it to; one
+            // still running is thrown to when he is open and nobody else is.
+            let standing = (1.0 - SWING_MOVER * (self.m[self.play.o][j].vel.len() - 1.5).max(0.0)).max(0.3);
+            *w = (1.0 - risk * 3.0).max(0.05) / (1.0 + p.dist(pj)) * (0.3 + open * open) * standing;
             if self.play.from == Some(j) {
                 *w *= 0.4;
             }
@@ -4533,7 +4549,7 @@ impl Game {
         let (kind, c, near) = self.look(h);
         // The defense has had its eye on a man who has been shooting: help
         // comes sooner and hands are closer, for his shots as for his looks.
-        let c = (c + HEAT_REAL * self.heat_of(h)).min(1.4);
+                let c = (c + HEAT_REAL * self.heat_of(h)).min(1.4);
         let edge = self.play.edge;
         let c = c * edge;
         self.play.edge = 1.0;
