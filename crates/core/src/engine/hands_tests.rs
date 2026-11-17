@@ -275,3 +275,91 @@ fn the_hands_are_the_same_recorded_or_not() {
         assert_eq!(a.possessions, b.possessions);
     }
 }
+
+fn lineup_of<'a>(w: &'a World, t: &'a crate::tactics::Tactics) -> super::Lineup<'a> {
+    super::Lineup {
+        tactics: t,
+        players: t.rotation.iter().map(|s| &w.players[s.player as usize]).collect(),
+        familiarity: 1.0,
+        belief: 0.55,
+        coach: 0,
+    }
+}
+
+/// Ball movement pays, honestly: for a squad of good passers the passing
+/// offence scores more per possession than isolation, and for one star with
+/// four poor passers it is the other way round. Worlds aggregated (the
+/// same opponents, home and away, for every cell), never a picked seed.
+#[test]
+fn ball_movement_pays_for_passers_and_isolation_for_a_star() {
+    use crate::tactics::OffenseSet;
+    let sets = [OffenseSet::Motion, OffenseSet::Isolation];
+    // [variant][set] points and possessions of the altered side.
+    let mut pts = [[0.0f64; 2]; 2];
+    let mut poss = [[0.0f64; 2]; 2];
+    for seed in 1..=8u64 {
+        let base = World::generate(seed, 12);
+        for variant in 0..2 {
+            let mut w = base.clone();
+            let ids: Vec<usize> = w.teams[0].roster.iter().map(|&p| p as usize).collect();
+            if variant == 0 {
+                // Passers: every man sees the floor and hits the target.
+                for &p in &ids {
+                    let a = &mut w.players[p].attrs;
+                    a[Attr::Passing] = a[Attr::Passing].max(17.0);
+                    a[Attr::Iq] = a[Attr::Iq].max(15.0);
+                }
+            } else {
+                // One star who can do it all against his man, and nobody
+                // who can pass.
+                let star = *ids
+                    .iter()
+                    .max_by(|&&x, &&y| {
+                        let s = |p: usize| {
+                            let a = &w.players[p].attrs;
+                            a[Attr::CloseShot] + a[Attr::MidRange] + a[Attr::ThreePoint] + a[Attr::Handling] + a[Attr::Speed]
+                        };
+                        s(x).total_cmp(&s(y))
+                    })
+                    .unwrap();
+                for &p in &ids {
+                    let a = &mut w.players[p].attrs;
+                    if p == star {
+                        for at in [Attr::CloseShot, Attr::MidRange, Attr::ThreePoint, Attr::Handling, Attr::Speed, Attr::Strength] {
+                            a[at] = 19.0;
+                        }
+                    } else {
+                        a[Attr::Passing] = 4.0;
+                        a[Attr::Iq] = a[Attr::Iq].min(8.0);
+                    }
+                }
+            }
+            for (si, set) in sets.iter().enumerate() {
+                for b in 1..=4usize {
+                    for home in [true, false] {
+                        let mut ta = w.teams[0].tactics().clone();
+                        ta.offense = *set;
+                        let tb = w.teams[b].tactics().clone();
+                        let (la, lb) = (lineup_of(&w, &ta), lineup_of(&w, &tb));
+                        let sd = seed * 7919 + b as u64 * 31 + home as u64;
+                        let r = if home {
+                            simulate_game(&la, &lb, &w.rules, &mut Rng::new(sd))
+                        } else {
+                            simulate_game(&lb, &la, &w.rules, &mut Rng::new(sd))
+                        };
+                        let me = if home { 0 } else { 1 };
+                        pts[variant][si] += r.score[me] as f64;
+                        poss[variant][si] += r.possessions[me] as f64;
+                    }
+                }
+            }
+        }
+    }
+    let ppp = |v: usize, s: usize| pts[v][s] / poss[v][s];
+    eprintln!(
+        "passers: Motion {:.3} Isolation {:.3}; star: Motion {:.3} Isolation {:.3}",
+        ppp(0, 0), ppp(0, 1), ppp(1, 0), ppp(1, 1)
+    );
+    assert!(ppp(0, 0) > ppp(0, 1), "a squad of passers scores {:.3} with Motion and {:.3} with Isolation", ppp(0, 0), ppp(0, 1));
+    assert!(ppp(1, 1) > ppp(1, 0), "a star with weak passers scores {:.3} with Isolation and {:.3} with Motion", ppp(1, 1), ppp(1, 0));
+}

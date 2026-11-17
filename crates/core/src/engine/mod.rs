@@ -390,7 +390,7 @@ impl Side {
             + 0.15 * self.eff(i, Attr::Composure)
             + 0.15 * self.eff(i, Attr::Iq))
             / 10.0;
-        ((skill - 1.0) * 1.6 + 1.0).clamp(0.35, 2.2)
+        ((skill - 1.0) * 1.1 + 1.0).clamp(0.45, 2.0)
     }
 
     /// 0..=1: how likely a defender is to step in front of a driver and take

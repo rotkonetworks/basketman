@@ -200,7 +200,10 @@ fn man(view: &View) -> Aims {
 
 /// Step into the path of a beaten defender's man, and cover for whoever did.
 fn help(view: &View, a: &mut Aims) {
-    let mut best: Option<(f32, usize, Vec2)> = None;
+    // The two defenders best placed to stop the ball leave their men for the
+    // path to the basket: the nearest first, and a second from the other
+    // side of the floor, a step behind him. Whoever they leave is open.
+    let mut cands: Vec<(f32, usize, Vec2)> = Vec::new();
     for dk in 0..5 {
         if Some(dk) == a.on_ball {
             continue;
@@ -214,11 +217,12 @@ fn help(view: &View, a: &mut Aims) {
         if view.drop == Some(dk) {
             cost -= 1.5;
         }
-        if cost < 3.8 && best.is_none_or(|b| cost < b.0) {
-            best = Some((cost, dk, on_path));
+        if cost < 3.8 {
+            cands.push((cost, dk, on_path));
         }
     }
-    let Some((_, helper, on_path)) = best else {
+    cands.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let Some(&(_, helper, on_path)) = cands.first() else {
         return;
     };
     a.at[helper] = if on_path.dist(HOOP) < 2.2 {
@@ -230,12 +234,19 @@ fn help(view: &View, a: &mut Aims) {
     if is_zone(view.scheme) {
         return;
     }
+    // The second: a man whose own attacker is not near the ball, one step
+    // behind the first, so the pass out has to beat him too.
+    let second = cands.iter().skip(1).find(|c| view.o[view.guard[c.1]].dist(view.ball) > 3.5);
+    if let Some(&(_, dk, p)) = second {
+        let base = if p.dist(HOOP) < 2.2 { HOOP.toward(view.ball, 1.1) } else { p };
+        a.at[dk] = base.toward(HOOP, 0.9_f32.min(base.dist(HOOP)));
+    }
     // Help the helper: the nearest free defender splits his own man and the
     // one just left alone.
     let left = view.o[view.guard[helper]];
     let mut cover: Option<(f32, usize)> = None;
     for dk in 0..5 {
-        if Some(dk) == a.on_ball || dk == helper {
+        if Some(dk) == a.on_ball || dk == helper || second.is_some_and(|s| s.1 == dk) {
             continue;
         }
         let dist = view.d[dk].dist(left);

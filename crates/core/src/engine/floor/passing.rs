@@ -838,6 +838,7 @@ impl Game {
             self.play.ball_h = hz.min(2.4);
             self.ease = 0.5;
             self.ease_from = hp;
+            self.play.catch_err = th.err;
             return self.land(f);
         }
         // A bobble: it comes off his hands and is loose where he stands.

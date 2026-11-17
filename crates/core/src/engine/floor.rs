@@ -48,6 +48,8 @@ const HEAT_CONTEST: f32 = 0.55;
 const HEAT_REAL: f32 = 0.45;
 /// A pass the passer reads as likelier than this to be lost is not thrown.
 const SWING_RISK_MAX: f32 = 0.22;
+/// How much likelier a swing is to the man who handles the offence.
+const HANDLER_SWING: f32 = 1.8;
 const GAME: f32 = 1.14;
 /// What a live two, a three and a finish at the rim add or take off the
 /// error, on top of their own base: the part of in-game difficulty that
@@ -738,6 +740,8 @@ struct Play {
     pre_aims: Option<(defense::Aims, [f32; 5])>,
     /// A man who cuts as soon as the pass he is throwing is let go.
     cut_after: Option<(usize, Vec2)>,
+    /// How far off the aim the pass that was just caught was thrown.
+    catch_err: f32,
     /// How the current drive met the defense: 0 clean, 1 late help, 2 stopped.
     drive_class: usize,
     /// The driver has seen the help defender now running at him.
@@ -2096,15 +2100,22 @@ impl Game {
                 _ => false,
             };
             let receiving = match self.play.flight {
-                Some(Flight { kind: FlightKind::Pass { to, .. }, to: aim, path: Some(_), .. }) if to == k => Some(aim),
+                Some(Flight { kind: FlightKind::Pass { to, .. }, to: aim, path: Some(_), t, dur, .. }) if to == k => Some((aim, dur - t)),
                 _ => None,
             };
-            let (target, pace) = if let Some(aim) = receiving {
-                // Coming to the ball: running through the place it is going,
-                // not stopping short of it.
+            let (target, pace) = if let Some((aim, left)) = receiving {
                 let go = aim - pos;
-                let dir = if go.len() > 0.4 { go.norm() } else { Vec2::ZERO };
-                (aim + dir * 1.1, 1.0)
+                if matches!(self.play.task[k], Task::Cut(_) | Task::Roll) {
+                    // A man on a cut runs through the place the ball is going,
+                    // not stopping short of it.
+                    let dir = if go.len() > 0.4 { go.norm() } else { Vec2::ZERO };
+                    (aim + dir * 1.1, 1.0)
+                } else {
+                    // Coming to the ball so as to be there when it is, and
+                    // stopping there.
+                    let top = self.cache.top[o * 5 + k].max(1.0);
+                    (aim, (go.len() / left.max(0.15) / top).clamp(0.3, 1.0))
+                }
             } else if reacting {
                 // The ball is going the other way: he turns and runs back.
                 (v(pos.x * 0.7, (pos.y + 9.0).min(LENGTH - 2.0)), 1.0)
@@ -3244,8 +3255,8 @@ impl Game {
     fn foul_chance(&self, kind: ShotKind, c: f32) -> f32 {
         let base = match kind {
             ShotKind::Rim => 0.075 + 0.225 * c.min(1.0),
-            ShotKind::Mid => 0.019 + 0.075 * c,
-            ShotKind::Three => 0.006 + 0.025 * c,
+            ShotKind::Mid => 0.040 + 0.130 * c,
+            ShotKind::Three => 0.018 + 0.060 * c,
         };
         base * (1.0 + 0.5 * self.def().aggression()) * officiating::SHOOTING_FOULS
     }
@@ -3442,7 +3453,7 @@ impl Game {
         }
         // Whatever room a dribble made is gone once he does not shoot.
         self.play.edge = 1.0;
-        let vision = 0.6 + (self.oe(h, Attr::Passing) + self.oe(h, Attr::Iq)) / 40.0 * 0.4;
+        let vision = (0.35 + (self.oe(h, Attr::Passing) + self.oe(h, Attr::Iq)) / 40.0 * 0.9).min(1.0);
         if self.rng.chance(vision)
             && let Some(j) = self.best_pass(h, (value + 0.08).max(bar), left)
         {
@@ -3663,7 +3674,12 @@ impl Game {
             }
             // The ball goes round: not back to a man who has just had it.
             if self.play.t - self.play.held_at[j] < 7.0 {
-                *w *= 0.3;
+                *w *= if j == self.play.handler { 0.6 } else { 0.3 };
+            }
+            // The ball comes back to the man who runs the offence: the one
+            // with the vision to make the next pass.
+            if j == self.play.handler {
+                *w *= HANDLER_SWING;
             }
         }
         if weights.iter().sum::<f32>() <= 0.0 {
@@ -3781,7 +3797,7 @@ impl Game {
         // protects the ball and gets himself fouled draws more.
         let closeness = (1.0 + (1.3 - q.dist(p)) * 0.5).clamp(0.4, 1.5);
         let protect = 1.4 - self.oe(h, Attr::Handling) / 20.0 * 0.8;
-        let foul = 0.045
+        let foul = 0.030
             * (1.0 + 0.8 * aggression)
             * temper
             * closeness
@@ -3977,7 +3993,7 @@ impl Game {
 
         let (kind, c, near) = self.look_seen(h);
         let value = self.ev(h, kind, c, near, true);
-        let vision = 0.6 + (self.oe(h, Attr::Passing) + self.oe(h, Attr::Iq)) / 40.0 * 0.4;
+        let vision = (0.35 + (self.oe(h, Attr::Passing) + self.oe(h, Attr::Iq)) / 40.0 * 0.9).min(1.0);
         if self.rng.chance(vision)
             && let Some(j) = self.best_pass(h, value + 0.2, left)
         {
@@ -5027,8 +5043,13 @@ impl Game {
                     Some((from, self.play.t))
                 };
                 self.play.from = Some(from);
-                self.play.think =
-                    0.12 + self.rng.f32() * 0.2 + self.off().unfamiliar * self.rng.f32() * 0.5;
+                // A pass that comes on the hands, in his shooting pocket, is a shot
+                // that is ready; one that has to be reached for or gathered is not.
+                let rhythm = (self.play.catch_err / 0.45).min(1.0);
+                self.play.think = 0.08
+                    + 0.14 * rhythm
+                    + self.rng.f32() * 0.14
+                    + self.off().unfamiliar * self.rng.f32() * 0.5;
                 if matches!(self.play.phase, Phase::Advance) && self.op(to).y < 10.6 {
                     self.play.phase = Phase::Set;
                 }
@@ -6698,6 +6719,7 @@ impl Play {
             late_help: None,
             pre_aims: None,
             cut_after: None,
+            catch_err: 0.0,
             drive_class: 0,
             late_seen: false,
             hit: None,

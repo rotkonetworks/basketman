@@ -35,6 +35,7 @@ pub fn run(games: usize) {
     let mut secs = 0.0f64;
     let mut by_set = [(0u32, 0u32, 0u32, 0u32); 5];
     let mut fouls = [0u32; 8];
+    let mut by_slot = [[0u32; 3]; 5];
     for g in 0..games {
         let (a, b) = (g % n, (g * 5 + 1 + g / n) % n);
         if a == b {
@@ -100,6 +101,24 @@ pub fn run(games: usize) {
             }
             for (_, l) in &r.boxes[side] {
                 tot.add(l);
+            }
+        }
+        for p in rec.passes.iter().filter(|p| !p.inbound) {
+            by_slot[p.from as usize][0] += 1;
+        }
+        for e in &rec.events {
+            if let EventKind::Shot { made: true, assist: Some(a), who, .. } = &e.kind {
+                let f = &rec.frames[rec.frame_at(e.time)];
+                let side = e.offense as usize;
+                for k in 0..5 {
+                    let id = r.boxes[side][f.who[side][k] as usize].0;
+                    if id == *a {
+                        by_slot[k][1] += 1;
+                    }
+                    if id == *who {
+                        by_slot[k][2] += 1;
+                    }
+                }
             }
         }
         for p in &rec.passes {
@@ -201,6 +220,16 @@ pub fn run(games: usize) {
         for (i, k) in basketman_core::replay::FoulKind::ALL.iter().enumerate() {
             print!(" {:?} {:.1}%", k, fouls[i] as f32 * 100.0 / tot.max(1) as f32);
         }
+        println!();
+    }
+    {
+        let t: Vec<f32> = (0..3).map(|i| by_slot.iter().map(|b| b[i]).sum::<u32>().max(1) as f32).collect();
+        print!("by slot PG..C: passes made");
+        for b in by_slot { print!(" {:.1}%", b[0] as f32 * 100.0 / t[0]); }
+        print!("; assists");
+        for b in by_slot { print!(" {:.1}%", b[1] as f32 * 100.0 / t[1]); }
+        print!("; assisted baskets scored");
+        for b in by_slot { print!(" {:.1}%", b[2] as f32 * 100.0 / t[2]); }
         println!();
     }
     shares.sort_by(|a, b| a.total_cmp(b));
@@ -443,6 +472,8 @@ pub fn passes(games: usize) {
         let mut bx = BoxLine::default();
         let mut oc = [[0u32; 6]; 7];
         let mut sp = [[0u32; 2]; 5];
+        let mut dl = [[0.0f64; 4]; 5];
+        let mut src = [[0.0f64; 3]; 9];
         for g in 0..games {
             let (a, b) = ((g * 7 + si) % n, (g * 5 + 1 + g / n + si) % n);
             if a == b {
@@ -516,6 +547,14 @@ pub fn passes(games: usize) {
                         })
                             && let EventKind::Shot { kind, made, contest, source, .. } = &e.kind
                         {
+                            {
+                                let d = (e.time - tc) as f64;
+                                let k = if d < 0.5 { 0 } else if d < 0.8 { 1 } else if d < 1.2 { 2 } else if d < 2.0 { 3 } else { 4 };
+                                dl[k][0] += 1.0;
+                                dl[k][1] += *contest as f64;
+                                dl[k][2] += if *made { kind.points() as f64 } else { 0.0 };
+                                dl[k][3] += (kind.points() == 3) as u32 as f64;
+                            }
                             after.0 += 1;
                             after.1 += (e.time - tc < 1.0 || *source == Source::CatchAndShoot) as u32;
                             after.2 += *contest as f64;
@@ -527,6 +566,14 @@ pub fn passes(games: usize) {
                             pts_after += if *made { pt } else { 0.0 };
                         }
                     }
+                }
+            }
+            for e in &rec.events {
+                if let EventKind::Shot { made, kind, source, fouled, .. } = &e.kind {
+                    let k = *source as usize;
+                    src[k][0] += 1.0;
+                    src[k][1] += if *made { kind.points() as f64 } else { 0.0 };
+                    src[k][2] += *fouled as u32 as f64;
                 }
             }
             // Shots not preceded by a pass in the possession: no pass by the shooter's side
@@ -576,6 +623,19 @@ pub fn passes(games: usize) {
             pts_un / unas.0.max(1) as f64,
         );
         let _ = (pts_after, after.6, unas.3, efg_num_after);
+        {
+            let tot: f64 = src.iter().map(|s| s[0]).sum::<f64>().max(1.0);
+            print!("{:<11}       shots by source (share, pps):", "");
+            for (i, n) in ["trans", "drive", "pullup", "c&s", "cut", "roll", "post", "putbk", "forced"].iter().enumerate() {
+                print!(" {n} {:.0}% {:.2};", src[i][0] * 100.0 / tot, src[i][1] / src[i][0].max(1.0));
+            }
+            println!();
+        }
+        print!("{:<11}       catch to shot (<.5,<.8,<1.2,<2,more s): ", "");
+        for b in dl {
+            print!(" n {} cont {:.2} pps {:.2} 3s {:.0}%;", b[0], b[1] / b[0].max(1.0), b[2] / b[0].max(1.0), b[3] * 100.0 / b[0].max(1.0));
+        }
+        println!();
         print!("{:<11}       lost by receiver speed (<1, <2.5, <4, <5.5, more m/s): ", "");
         for b in sp {
             print!(" {:.1}% of {};", b[1] as f32 * 100.0 / b[0].max(1) as f32, b[0]);

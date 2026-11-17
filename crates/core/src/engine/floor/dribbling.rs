@@ -12,11 +12,11 @@ use crate::replay::{Dribble, TurnoverKind};
 const POKE_HIT: f32 = 0.20;
 /// How likely a defender within reach goes for the ball in a bounce, at
 /// rating 10, and how it moves with his steal rating and aggression.
-const GO_BASE: f32 = 0.20;
+const GO_BASE: f32 = 0.32;
 const GO_SKILL: f32 = 0.02;
 const GO_AGGRESSION: f32 = 0.10;
 /// The chance a touch takes the ball cleanly, at equal ratings.
-const TAKE_BASE: f32 = 0.22;
+const TAKE_BASE: f32 = 0.26;
 /// A hand reaching and missing costs this much balance, and this long frozen.
 const MISS_BALANCE: f32 = 0.10;
 const MISS_STUN: f32 = 0.35;
