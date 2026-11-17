@@ -654,6 +654,8 @@ fn event_rows(rec: &Recording, r: &GameResult, setup: Setup) -> Rows {
         .calls
         .iter()
         .filter_map(|c| match (c.truth, c.called) {
+            // A count a review turned over stands as the engine saw it.
+            _ if c.review.is_some_and(|v| v.overturned) => None,
             (Ruling::Value(t), Ruling::Value(k)) => Some(k as f64 - t as f64),
             _ => None,
         })

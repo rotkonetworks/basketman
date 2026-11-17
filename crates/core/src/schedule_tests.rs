@@ -238,7 +238,8 @@ fn prep_world(seed: u64, boost: f32) -> (f32, f32, f32, f32, usize) {
 #[ignore = "a measurement that prints numbers; run with --ignored --nocapture"]
 fn measure_prep_edge() {
     let boost: f32 = std::env::var("BOOST").ok().and_then(|s| s.parse().ok()).unwrap_or(crate::prep::PREP_BELIEF);
-    let seeds: Vec<u64> = (1..=16).collect();
+    let from: u64 = std::env::var("FROM").ok().and_then(|s| s.parse().ok()).unwrap_or(1);
+    let seeds: Vec<u64> = (from..from + 16).collect();
     let results: Vec<_> = std::thread::scope(|s| {
         let hs: Vec<_> = seeds.iter().map(|&sd| s.spawn(move || prep_world(sd, boost))).collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
