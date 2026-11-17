@@ -48,7 +48,6 @@ mod stance_hooks;
 const KICK_PREMIUM: [f32; 2] = [0.2, 0.0];
 /// And how far under the bar of his own a man's shot may be for the ball to go to him then.
 const KICK_EAGER: [f32; 2] = [0.0, 0.35];
-pub(crate) static GT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 /// A man without the ball who is lower than this (metres from the baseline) when a
 /// drive starts goes to the corner; the others hold the arc.
 const CORNER_SPOT_Y: f32 = 3.2;
@@ -3488,7 +3487,6 @@ impl Game {
                 0.0
             };
         if value > bar {
-            GT.store(4, std::sync::atomic::Ordering::Relaxed);
             return self.gather(
                 if self.play.dribbled { 0.35 } else { 0.3 },
                 self.play.dribbled,
@@ -3950,7 +3948,6 @@ impl Game {
         }
         let p = self.op(h);
         if p.dist(HOOP) < 1.5 {
-            GT.store(1, std::sync::atomic::Ordering::Relaxed);
             return self.gather(0.12, false);
         }
         if !beaten {
@@ -4040,24 +4037,6 @@ impl Game {
         let (kind, c, near) = self.look_seen(h);
         let value = self.ev(h, kind, c, near, true);
         let vision = (0.35 + (self.oe(h, Attr::Passing) + self.oe(h, Attr::Iq)) / 40.0 * 0.9).min(1.0);
-        if std::env::var("ZZDE").is_ok() {
-            let mut best = (-9.0f32, 0.0f32, 0.0f32, 9usize, 0.0f32);
-            for j in 0..5 {
-                if j == h { continue; }
-                let pj = self.op(j);
-                if pj.y > 12.0 { continue; }
-                let kind = ShotKind::at(pj);
-                let (c_now, near) = self.contest(pj, j, kind == ShotKind::Rim);
-                let dur = Self::pass_time(pj.dist(self.op(h))) + 0.3;
-                let c = if kind == ShotKind::Rim { (c_now + 0.45).min(1.4) } else { (c_now + dur * 0.6).min(1.0) };
-                let c = (c + HEAT_CONTEST * self.heat_of(j)).min(1.4);
-                let ev = self.ev(j, kind, c, near, false);
-                let risk = self.pass_risk(h, j);
-                let v = ev - risk * 1.6;
-                if v > best.0 { best = (v, ev, risk, j, c); }
-            }
-            eprintln!("DE src={:?} class={} dist={:.2} value={:.2} bar={:.2} thr={:.2} best_v={:.2} ev={:.2} risk={:.2} c={:.2} kind={:?}", self.play.source, self.play.drive_class, p.dist(HOOP), value, value + 0.2, self.threshold(h, left), best.0, best.1, best.2, best.4, if best.3 < 5 { Some(ShotKind::at(self.op(best.3))) } else { None });
-        }
         if self.rng.chance(vision)
             && let Some(j) = self.best_pass(h, value + KICK_PREMIUM[(self.play.drive_class == 2) as usize], left, KICK_EAGER[(self.play.drive_class == 2) as usize])
         {
@@ -4065,7 +4044,6 @@ impl Game {
         }
         // Deep in the paint he is committed: layup or floater.
         if p.dist(HOOP) < COMMIT_DIST || value > self.threshold(h, left) - 0.2 {
-            GT.store(if p.dist(HOOP) < COMMIT_DIST { 2 } else { 3 }, std::sync::atomic::Ordering::Relaxed);
             return self.gather(0.18, true);
         }
         self.play.phase = if p.y > 10.6 {
@@ -4445,9 +4423,6 @@ impl Game {
                 side.eff(slot, Attr::Iq),
             )
         };
-        if std::env::var("ZZDE2").is_ok() && self.play.source == Source::Drive {
-            eprintln!("PS tag={} d={:.2} class={}", GT.load(std::sync::atomic::Ordering::Relaxed), d, self.play.drive_class);
-        }
         let mut style = if free_throw {
             Style::Jumper
         } else if self.play.source == Source::Post && d >= POST_HOOK_FROM {
@@ -4918,9 +4893,6 @@ impl Game {
         } else {
             self.play.source
         };
-        if std::env::var("ZZSS").is_ok() && (made || !fouled) {
-            eprintln!("SS {:?} {:?} d={:.2} made={} fouled={} c={:.2} src={:?}", style, kind, p.dist(HOOP), made as u8, fouled as u8, c_takeoff, source);
-        }
         let event = EventKind::Shot {
             who,
             kind,
