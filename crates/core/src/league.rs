@@ -2082,7 +2082,7 @@ mod tests {
     /// the handler's day is different: under, he gets the pull-up and not the
     /// lane; over, he is contested at the shot and gets the lane.
     #[test]
-    #[ignore = "engine: over 150 games, 6900 screens each way, the handler shoots after 11.1% of the screens he goes under and 11.4% of those he goes over (the pull-up is open, 0.24 against 0.74 contest, but he moves the ball more); the gap the test asserts is not there"]
+    #[ignore = "REGRESSION of the hands branch, not luck: over 150 games and 8400 screens each way main has the handler shooting after 6.3% of the screens he goes under and 4.3% of those he goes over; this branch has 11.1% under and 11.4% over (he shoots more than twice as often in both, and the open pull-up no longer draws more shots)"]
     fn going_under_gives_the_pull_up_and_going_over_gives_the_lane() {
         use crate::replay::EventKind;
         use crate::tactics::{DefenseScheme, OffenseSet};
@@ -2304,7 +2304,7 @@ mod tests {
     /// The tactics are not a table of bonuses: a zone packs the paint
     /// because of where its defenders stand, and pays for it outside.
     #[test]
-    #[ignore = "engine: over 3 worlds x 160 games a zone gives up rim shots (0.361 against 0.381) but not more threes (0.401 against 0.406: mid-range shots take the place of the rim ones); at 40 games a world it passed and failed by luck"]
+    #[ignore = "REGRESSION of the hands branch, not luck: over 3 worlds x 160 games main has the zone at rim 0.364 and threes 0.391 against man to man at 0.426 and 0.366; this branch has 0.361 and 0.401 against 0.381 and 0.406 (the zone still gives up rim shots, a third as many, and no longer gives up threes)"]
     fn a_zone_trades_shots_at_the_rim_for_threes() {
         use crate::court::ShotKind;
         use crate::tactics::DefenseScheme;
