@@ -120,6 +120,16 @@ pub(super) struct Scramble {
 use crate::engine::ball::V3;
 
 impl Game {
+    /// The pass of `kind` as man `h` throws it: a good passer gets it away
+    /// sooner and puts more on it, so the defense has less time to read it.
+    fn spec_of(&self, h: usize, kind: PassKind) -> Spec {
+        let mut sp = spec(kind);
+        let x = self.pass_skill(h);
+        sp.speed *= 0.88 + 0.26 * x;
+        sp.wind *= 1.35 - 0.7 * x;
+        sp
+    }
+
     /// Passing skill and vision of man `h`, 0 to 1.
     fn pass_skill(&self, h: usize) -> f32 {
         ((self.oe(h, Attr::Passing) + self.oe(h, Attr::Iq)) * 0.5 / 20.0).clamp(0.0, 1.0)
@@ -190,8 +200,7 @@ impl Game {
     }
 
     /// The path of a pass released at `rel` to `aim` at height `z`.
-    pub(super) fn plan_pass(&self, kind: PassKind, rel: V3, aim: Vec2, z: f32) -> Plan {
-        let sp = spec(kind);
+    pub(super) fn plan_pass(&self, sp: Spec, kind: PassKind, rel: V3, aim: Vec2, z: f32) -> Plan {
         let from = rel.xy();
         let d = from.dist(aim).max(0.3);
         let mut path = Path::new();
@@ -225,9 +234,9 @@ impl Game {
     /// The ball a pass of `kind` makes, with no error: for judging it.
     fn ideal_plan(&self, h: usize, j: usize, kind: PassKind) -> Plan {
         let (rel, _, _) = self.release_point(h, j, kind);
-        let sp = spec(kind);
+        let sp = self.spec_of(h, kind);
         let aim = self.pass_aim(h, j, rel.xy(), sp.speed);
-        self.plan_pass(kind, rel, aim, sp.z)
+        self.plan_pass(sp, kind, rel, aim, sp.z)
     }
 
     /// Seconds a defender takes to see a pass go and start for it.
@@ -412,7 +421,7 @@ impl Game {
         // Even an open lane has a ball that can be fumbled or thrown wide.
         let len = from.dist(plan.aim);
         let skill = self.pass_skill(h);
-        let sp = spec(kind);
+        let sp = self.spec_of(h, kind);
         risk += (0.004 + len * 0.0011) * sp.err * (1.6 - 1.1 * skill);
         // A man running onto it is harder to hit with the ball: the passer
         // has to lead him, and he has to meet it at speed.
@@ -470,7 +479,7 @@ impl Game {
         debug_assert_ne!(h, j);
         let kind = self.pass_kind(h, j);
         let (rel, hand, two) = self.release_point(h, j, kind);
-        let wind = spec(kind).wind + self.pass_stance_delay(h, j);
+        let wind = self.spec_of(h, kind).wind + self.pass_stance_delay(h, j);
         // Walking up to the throw: the hands have to get there.
         let sh = self.shoulder_of(o, h, hand);
         let hp = self.hands[o][h].h[hand].p;
@@ -514,9 +523,9 @@ impl Game {
 
     /// A defender's hand is on the ball's way out of the passer's hands.
     fn hands_in_the_way(&self, h: usize, j: usize, kind: PassKind, rel: V3) -> bool {
-        let sp = spec(kind);
+        let sp = self.spec_of(h, kind);
         let aim = self.pass_aim(h, j, rel.xy(), sp.speed);
-        let plan = self.plan_pass(kind, rel, aim, sp.z);
+        let plan = self.plan_pass(sp, kind, rel, aim, sp.z);
         let d = 1 - self.play.o;
         for dk in 0..5 {
             for i in 0..2 {
@@ -562,7 +571,7 @@ impl Game {
                 }
             }
         }
-        let sp = spec(kind);
+        let sp = self.spec_of(h, kind);
         let aim = self.pass_aim(h, j, rel.xy(), sp.speed);
         // The error: from skill, pressure, balance, and how he stands to the
         // man; bigger the further and the stranger the throw.
@@ -592,7 +601,7 @@ impl Game {
         let ey = shot::gauss(&mut self.rng) * sigma;
         let ez = shot::gauss(&mut self.rng) * sigma * 0.5;
         let aim_err = v((aim.x + ex).clamp(-7.35, 7.35), (aim.y + ey).clamp(0.2, LENGTH - 0.2));
-        let plan = self.plan_pass(kind, rel, aim_err, (sp.z + ez).clamp(0.5, 2.6));
+        let plan = self.plan_pass(sp, kind, rel, aim_err, (sp.z + ez).clamp(0.5, 2.6));
         // The defenders see it go: who goes for it, and where.
         let mut attempt = [None; 5];
         for dk in 0..5 {
@@ -618,7 +627,7 @@ impl Game {
         {
             self.play.task[h] = Task::Cut(to);
         }
-        let react: [f32; 5] = std::array::from_fn(|dk| self.see_time(dk, rel.xy()) + REACT_READ);
+        let react: [f32; 5] = std::array::from_fn(|dk| self.see_time(dk, rel.xy()) * (1.3 - 0.6 * self.pass_skill(h)) + REACT_READ);
         self.play.pre_aims = Some((self.cache.aims, react));
         self.cut_log(0.0);
         self.log_path(&plan.path, 0.0, 0.0);

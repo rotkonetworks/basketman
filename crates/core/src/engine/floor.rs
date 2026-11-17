@@ -48,6 +48,8 @@ const HEAT_CONTEST: f32 = 0.55;
 const HEAT_REAL: f32 = 0.45;
 /// A pass the passer reads as likelier than this to be lost is not thrown.
 const SWING_RISK_MAX: f32 = 0.22;
+/// How much worse a jumper is for a pass that was off the hands, and better for one on them.
+const PASS_RHYTHM: f32 = 0.30;
 /// How much likelier a swing is to the man who handles the offence.
 const HANDLER_SWING: f32 = 1.8;
 const GAME: f32 = 1.14;
@@ -4655,6 +4657,11 @@ impl Game {
             m *= CONTACT_ERR;
         }
         m *= stance_mult;
+        // A shot off a pass: on the hands and in his pocket is a ball he can
+        // shoot, one he has to reach for or gather is not.
+        if self.play.source == Source::CatchAndShoot && !matches!(style, Style::Layup | Style::Dunk | Style::Floater) {
+            m *= 1.0 + PASS_RHYTHM * (self.play.catch_err / 0.45).min(1.0) - 0.5 * PASS_RHYTHM;
+        }
         // Close in the ball travels a hand's length: an error that is a launch
         // angle would vanish with it. A finish's error is where the ball
         // meets the ring (a hand in the way, the shoulder, the glass), so it
