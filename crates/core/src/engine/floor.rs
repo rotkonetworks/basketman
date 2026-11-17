@@ -3351,14 +3351,14 @@ impl Game {
     }
 
     fn pass_risk_fresh(&self, h: usize, j: usize) -> f32 {
-        let kind = self.pass_kind(h, j);
+        let (_, lane) = self.pass_kind_risk(h, j);
         // A man who has been in the lane for most of his three seconds is
         // not a man to throw it to: he has to leave.
         let camping = if self.play.lane[j] > 1.6 { 0.4 } else { 0.0 };
         // What he sees of the lane: a passer with little vision reads it
         // as clearer than it is.
         let sees = 0.25 + 1.5 * ((self.oe(h, Attr::Passing) + self.oe(h, Attr::Iq)) / 40.0).clamp(0.0, 1.0);
-        self.lane_risk(h, j, kind) * sees + camping
+        lane * sees + camping
     }
 
     /// The teammate with the best look, if it beats `bar` expected points.

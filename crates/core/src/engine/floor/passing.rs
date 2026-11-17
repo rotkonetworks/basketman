@@ -433,22 +433,36 @@ impl Game {
     /// Which kind of pass man `h` throws to man `j`: the one that fits the
     /// lane best. He knows the ones he can throw.
     pub(super) fn pass_kind(&self, h: usize, j: usize) -> PassKind {
+        self.pass_kind_risk(h, j).0
+    }
+
+    /// The kind, and the lane risk of that kind as the passer reads it.
+    pub(super) fn pass_kind_risk(&self, h: usize, j: usize) -> (PassKind, f32) {
         let o = self.play.o;
         let d = self.m[o][h].pos.dist(self.m[o][j].pos);
         let passing = self.oe(h, Attr::Passing);
         let live = self.handler.who == Some((o, h)) && self.handler.state == Dribble::Live;
         if d < 1.9 {
-            return PassKind::Handoff;
+            return (PassKind::Handoff, self.lane_risk(h, j, PassKind::Handoff));
         }
-        let mut best = (PassKind::Chest, self.lane_risk(h, j, PassKind::Chest));
+        let chest = self.lane_risk(h, j, PassKind::Chest);
+        // (kind, its risk with what it costs over a chest pass, its risk)
+        let mut best = (PassKind::Chest, chest, chest);
         // An open lane: a chest pass, and no need to look further.
-        if best.1 < 0.035 && !live && d <= 13.0 {
-            return PassKind::Chest;
+        if chest < 0.035 && !live && d <= 13.0 {
+            return (PassKind::Chest, chest);
         }
+        // A kind that costs `extra` more than its lane can only win with a
+        // lane that is clearer by more than that: no use looking at it when
+        // the best so far is already that clear.
         let mut consider = |kind: PassKind, game: &Self, extra: f32| {
-            let r = game.lane_risk(h, j, kind) + extra;
+            if best.1 <= extra {
+                return;
+            }
+            let pure = game.lane_risk(h, j, kind);
+            let r = pure + extra;
             if r < best.1 {
-                best = (kind, r);
+                best = (kind, r, pure);
             }
         };
         if d > 13.0 {
@@ -468,7 +482,7 @@ impl Game {
         if live && passing >= 5.0 && d < 9.0 {
             consider(PassKind::Push, self, 0.0);
         }
-        best.0
+        (best.0, best.2)
     }
 
     /// Man `h` passes to man `j`: the throw starts. `safe` is a throw to a
