@@ -101,3 +101,7 @@ Points a hundred possessions 101.6 -> 104.0 (target 113, band 109 to 117; the fi
 
 Still off target: points a hundred possessions (104 against 113), FG% and two-point % (the shooting model has its own calibration that was not touched), the assist leader (assists are spread over the five by slot, 23, 24, 22, 19, 11%; real teams have a point guard with 40%), 0 to 3 ft share (16% against 23%: a beaten drive meets two helpers), 3 to 10 ft accuracy (36% against 45.5%), corner threes (30% of threes against 20%), and-ones (10% of baskets against 6%), shot-clock violations, and the speed of the engine (see the report).
 
+## The balance laboratory after this stage (`basketman balance --sections matrix --games 4`, seed 1)
+
+Pooled points per possession by offense (against the five defenses), main against this branch: Motion 1.073 -> 1.082, Pick and roll 1.010 -> 1.087, Post up 1.083 -> 1.128, Isolation 1.086 -> 1.105, Five-out 1.061 -> 1.106. Equilibrium of the offense-against-defense game: Isolation 79% and Motion 21% -> Isolation 56% and Five-out 44% (defense: Zone 2-3 82%, Zone 3-2 18%). Spread of strength over the 25 systems: 28.1 points (63.8 best, 35.7 worst) -> 16.4 (58.3, 41.9). Isolation still edges Motion by 0.02 on generic squads here, although in the hands laboratory (100 games of one world) Motion is ahead 1.10 to 1.07 and in the squad test by 0.005: three measures of the same thing, with a noise of about 0.015 each. Of the balance checks `bounded`, `support-offense` and `support-defense` fail as they did before.
+
