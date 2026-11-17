@@ -368,6 +368,11 @@ mod tests {
             .messages
             .iter()
             .any(|m| m.subject.starts_with("Promoted") || m.subject.starts_with("Relegated"));
-        assert_eq!(moved || w.teams[15].division != w.history[2].division_of(15).unwrap(), mail);
+        // Only while he still has the job: a manager the board has sacked is
+        // not told about the club's promotion (the results decide whether
+        // that happened to him in these three seasons).
+        if w.watch.is_some() {
+            assert_eq!(moved || w.teams[15].division != w.history[2].division_of(15).unwrap(), mail);
+        }
     }
 }

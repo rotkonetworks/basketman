@@ -109,7 +109,7 @@ impl Game {
         } else {
             0.5 * (self.sides[t].eff(self.sides[t].on[k], Attr::Handling) + pl.off_hand_skill())
         };
-        let out = (0.42 - 0.012 * skill + 0.012 * speed).clamp(0.18, 0.6);
+        let out = (0.55 - 0.025 * skill + 0.012 * speed).clamp(0.16, 0.7);
         let side = hands::right_of(st.body) * (hands::sign(hand) * out);
         // The ball is furthest from him at the floor and back at the hand.
         let near = (1.0 - ((z - r) / (top - r)).clamp(0.0, 1.0)) * 0.8 + 0.2;
