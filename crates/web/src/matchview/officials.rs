@@ -419,6 +419,17 @@ impl App {
                 "Fouls called: {} {}, {} {}",
                 teams[0], o.fouls[0], teams[1], o.fouls[1]
             ));
+            // The balance while ahead and behind: a crew that keeps games
+            // close turns the whistle on the side with the lead.
+            let (ahead, behind) = (o.fouls_state[0][0] + o.fouls_state[1][0], o.fouls_state[0][2] + o.fouls_state[1][2]);
+            if ahead + behind > 0 {
+                ui.label(
+                    RichText::new(format!(
+                        "Fouls on the side leading: {ahead}, on the side trailing: {behind}"
+                    ))
+                    .color(theme::TEXT_DIM),
+                );
+            }
             if live {
                 ui.label(
                     RichText::new("What the film shows is told after the game.").color(theme::TEXT_DIM),

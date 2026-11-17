@@ -42,13 +42,14 @@ fn crew(acc: f32, strict: f32, lean: f32, crowd: f32) -> Crew {
         composure: 0.55,
         charge_lean: 0.5,
         flop_buyer: 0.5,
+        manager: 0.0,
     };
     Crew { refs: [o; 3], crowd }
 }
 
 fn play(w: &World, games: usize, make: &(dyn Fn(usize) -> Option<Crew> + Sync)) -> Tot {
     let n = w.teams.len();
-    let workers = 6;
+    let workers = 4;
     let parts: Vec<Tot> = std::thread::scope(|s| {
         let hs: Vec<_> = (0..workers)
             .map(|k| {
@@ -155,6 +156,11 @@ fn row(name: &str, t: &Tot) {
 pub fn run(games: usize) {
     let w = World::generate(7, 12);
     println!("{games} games per arm, the same pairings and seeds in every arm.\n");
+    // MGMT_ONLY=1: just the game-management table (the rest is slow).
+    if std::env::var_os("MGMT_ONLY").is_some() {
+        managers(&w, games);
+        return;
+    }
     let none = play(&w, games, &|_| None);
     row("no officials (old rule)", &none);
     println!();
@@ -213,6 +219,153 @@ pub fn run(games: usize) {
         100.0 * pool.decided as f32 / pool.games.max(1) as f32,
     );
     let _ = kinds;
+    managers(&w, games);
+}
+
+/// What one arm of the game-management table reads off.
+#[derive(Default, Clone)]
+struct Mg {
+    games: u32,
+    margin: f32,
+    blow20: u32,
+    close5: u32,
+    /// Fouls on the side leading and on the side trailing, summed over games.
+    lead_fouls: u32,
+    trail_fouls: u32,
+    calls: u32,
+    wrong: u32,
+    home_wins: u32,
+    down10: u32,
+    came_back: u32,
+    pf: u32,
+}
+
+fn play_mg(w: &World, games: usize, crew_of: &(dyn Fn(usize) -> Crew + Sync)) -> Mg {
+    let n = w.teams.len();
+    let workers = 4;
+    let parts: Vec<Mg> = std::thread::scope(|s| {
+        let hs: Vec<_> = (0..workers)
+            .map(|k| {
+                s.spawn(move || {
+                    let mut t = Mg::default();
+                    for g in (k..games).step_by(workers) {
+                        let (a, b) = (g % n, (g * 5 + 1 + g / n) % n);
+                        if a == b {
+                            continue;
+                        }
+                        let (a, b) = if g % 2 == 0 { (a, b) } else { (b, a) };
+                        let home = lineup(&w.teams[a], &w.players);
+                        let away = lineup(&w.teams[b], &w.players);
+                        let crew = crew_of(g);
+                        let mut rng = Rng::new(9000 + g as u64);
+                        let r = simulate_game_crewed(&home, &away, &w.rules, &mut rng, Some(&crew));
+                        t.games += 1;
+                        let m = r.score[0] as i32 - r.score[1] as i32;
+                        t.margin += m.abs() as f32;
+                        t.blow20 += (m.abs() >= 20) as u32;
+                        t.close5 += (m.abs() <= 5) as u32;
+                        t.home_wins += (m > 0) as u32;
+                        for side in 0..2 {
+                            for (_, l) in &r.boxes[side] {
+                                t.pf += l.pf as u32;
+                            }
+                        }
+                        let half = w.rules.periods as usize / 2;
+                        let (h0, h1) = r.periods.iter().take(half).fold((0i32, 0i32), |acc, p| {
+                            (acc.0 + p[0] as i32, acc.1 + p[1] as i32)
+                        });
+                        let ht = h0 - h1;
+                        if ht.abs() >= 10 {
+                            t.down10 += 1;
+                            // The side that trailed at half-time: did it win?
+                            let trailing_won = if ht > 0 { m < 0 } else { m > 0 };
+                            t.came_back += trailing_won as u32;
+                        }
+                        if let Some(o) = &r.officiating {
+                            t.calls += o.calls as u32;
+                            t.wrong += (o.errors[0] + o.errors[1] + o.errors[2]) as u32;
+                            for side in 0..2 {
+                                t.lead_fouls += o.fouls_state[side][0] as u32;
+                                t.trail_fouls += o.fouls_state[side][2] as u32;
+                            }
+                        }
+                    }
+                    t
+                })
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().expect("worker")).collect()
+    });
+    let mut t = Mg::default();
+    for p in parts {
+        t.games += p.games;
+        t.margin += p.margin;
+        t.blow20 += p.blow20;
+        t.close5 += p.close5;
+        t.lead_fouls += p.lead_fouls;
+        t.trail_fouls += p.trail_fouls;
+        t.calls += p.calls;
+        t.wrong += p.wrong;
+        t.home_wins += p.home_wins;
+        t.down10 += p.down10;
+        t.came_back += p.came_back;
+        t.pf += p.pf;
+    }
+    t
+}
+
+fn mg_row(name: &str, t: &Mg) {
+    let g = t.games.max(1) as f32;
+    println!(
+        "{name:<30} margin {:>5.2}  >=20 {:>4.1}%  <=5 {:>4.1}%  fouls lead-trail {:>+5.2}/g (lead {:>5.2}, trail {:>5.2})  wrong {:>4.2}% of calls  home win {:>4.1}%  comeback from 10+ at half {:>4.1}% (of {:>4.1}% of games)  PF/g {:>5.2}",
+        t.margin / g,
+        100.0 * t.blow20 as f32 / g,
+        100.0 * t.close5 as f32 / g,
+        (t.lead_fouls as f32 - t.trail_fouls as f32) / g,
+        t.lead_fouls as f32 / g,
+        t.trail_fouls as f32 / g,
+        100.0 * t.wrong as f32 / t.calls.max(1) as f32,
+        100.0 * t.home_wins as f32 / g,
+        100.0 * t.came_back as f32 / t.down10.max(1) as f32,
+        100.0 * t.down10 as f32 / g,
+        t.pf as f32 / g,
+    );
+}
+
+/// Game management by level: the same pairings, seeds and referees, with
+/// the trait zeroed, as the league pool has it, as an NBA-style pool has it
+/// (`GAME_MGMT_NBA`), and at the top for every referee.
+fn managers(w: &World, games: usize) {
+    use basketman_core::officials::GAME_MGMT_NBA;
+    println!("\nGame management (the referees' tendency to keep games close), same games and referees in every row:");
+    let crew_from = |pool: &basketman_core::officials::Officials, g: usize, force: Option<f32>| {
+        let len = pool.pool.len();
+        let ids = [(g * 7 % len) as u16, ((g * 7 + 19) % len) as u16, ((g * 7 + 41) % len) as u16];
+        let mut c = pool.crew(ids);
+        c.crowd = 0.45;
+        if let Some(f) = force {
+            for r in &mut c.refs {
+                r.manager = f;
+            }
+        }
+        c
+    };
+    let mut nba = w.officials.clone();
+    nba.restyle(GAME_MGMT_NBA);
+    let rows: [(&str, Mg); 4] = [
+        ("none (trait zero)", play_mg(w, games, &|g| crew_from(&w.officials, g, Some(0.0)))),
+        ("league pool (Europe, mean 4)", play_mg(w, games, &|g| crew_from(&w.officials, g, None))),
+        ("NBA-style pool (mean 12)", play_mg(w, games, &|g| crew_from(&nba, g, None))),
+        ("strong (all three at 1.0)", play_mg(w, games, &|g| crew_from(&w.officials, g, Some(1.0)))),
+    ];
+    for (name, t) in &rows {
+        mg_row(name, t);
+    }
+    let pool_mean = w.officials.pool.iter().filter(|r| r.active).map(|r| r.game_mgmt as f32).sum::<f32>()
+        / w.officials.pool.iter().filter(|r| r.active).count().max(1) as f32;
+    let nba_mean = nba.pool.iter().filter(|r| r.active).map(|r| r.game_mgmt as f32).sum::<f32>()
+        / nba.pool.iter().filter(|r| r.active).count().max(1) as f32;
+    println!("pool means of game management (1..20): league {pool_mean:.1}, NBA-style {nba_mean:.1}");
 }
 
 /// `basketman lab survival [worlds] [first seed] [with|without]`: how often a

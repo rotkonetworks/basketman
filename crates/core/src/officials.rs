@@ -26,6 +26,17 @@ const AUDIT_GAMES: u16 = 14;
 /// The share of his calls a referee may have wrong (as the film shows)
 /// before the office acts.
 const AUDIT_WRONG: f32 = 0.115;
+/// From this game management (1..=20) a referee is known for keeping games
+/// close, and from the second for making up for his mistakes.
+const MANAGER_TAG: u8 = 9;
+const MAKEUP_TAG: u8 = 13;
+/// The mean of the game management of a referee pool when nothing says
+/// otherwise: a European league's, where it is rare (see `Rules`).
+pub const GAME_MGMT_EUROPE: f32 = 4.0;
+/// An NBA-style league's, where it is the custom.
+pub const GAME_MGMT_NBA: f32 = 12.0;
+/// The spread of it among referees of one league.
+const GAME_MGMT_SPREAD: f32 = 3.5;
 
 /// What a referee did over one season.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -42,6 +53,13 @@ pub struct RefRecord {
     /// Calls a coach challenged that were overturned, and challenges heard.
     pub overturned: u16,
     pub reviewed: u16,
+    /// Of his fouls, those called on a side that was ahead and on one that
+    /// was behind when they were called (a level game counts for neither),
+    /// so a curious manager can see whether he keeps games close.
+    #[serde(default)]
+    pub fouls_lead: u32,
+    #[serde(default)]
+    pub fouls_trail: u32,
 }
 
 impl RefRecord {
@@ -69,6 +87,14 @@ impl RefRecord {
         self.wrong += o.wrong;
         self.overturned += o.overturned;
         self.reviewed += o.reviewed;
+        self.fouls_lead += o.fouls_lead;
+        self.fouls_trail += o.fouls_trail;
+    }
+
+    /// Fouls per game he called on leading sides minus those on trailing
+    /// sides: positive is a man whose whistle turns against a lead.
+    pub fn lead_balance(&self) -> f32 {
+        (self.fouls_lead as f32 - self.fouls_trail as f32) / self.games.max(1) as f32
     }
 }
 
@@ -94,6 +120,12 @@ pub struct Referee {
     pub charge_lean: u8,
     /// 1..=20. How easily a flop buys a whistle.
     pub flop_buyer: u8,
+    /// 1..=20 (0 in an old save, until `ensure_officials` fills it). Game
+    /// management: 1 calls it the same at any score, 20 keeps games close
+    /// (the whistle turns against a big lead, and he makes up for calls he
+    /// doubts). A style, not a fault: the league office does not audit it.
+    #[serde(default)]
+    pub game_mgmt: u8,
     #[serde(default)]
     pub season: RefRecord,
     #[serde(default)]
@@ -142,6 +174,12 @@ impl Referee {
         } else if self.flop_buyer <= 6 {
             t.push("not fooled by flops");
         }
+        if self.game_mgmt >= MANAGER_TAG {
+            t.push("keeps games close");
+        }
+        if self.game_mgmt >= MAKEUP_TAG {
+            t.push("makes up for his mistakes");
+        }
         if self.consistency <= 6 {
             t.push("inconsistent");
         }
@@ -163,6 +201,7 @@ impl Referee {
             composure: f(self.composure),
             charge_lean: f(self.charge_lean),
             flop_buyer: f(self.flop_buyer),
+            manager: if self.game_mgmt == 0 { 0.0 } else { f(self.game_mgmt) },
         }
     }
 }
@@ -178,6 +217,10 @@ pub struct Official {
     pub composure: f32,
     pub charge_lean: f32,
     pub flop_buyer: f32,
+    /// How much he evens a game out: 0 never, 1 always (see
+    /// `engine/officiating.rs`).
+    #[serde(default)]
+    pub manager: f32,
 }
 
 impl Official {
@@ -191,6 +234,7 @@ impl Official {
         composure: 0.55,
         charge_lean: 0.5,
         flop_buyer: 0.5,
+        manager: 0.0,
     };
 
     pub fn quality(&self) -> f32 {
@@ -362,6 +406,10 @@ pub struct GameOfficiating {
     pub crew: [RefId; 3],
     /// Fouls called, by the side that committed them.
     pub fouls: [u16; 2],
+    /// Fouls called on each side while it led, was level or trailed:
+    /// `[side][0 leading, 1 level, 2 trailing]`.
+    #[serde(default)]
+    pub fouls_state: [[u16; 3]; 2],
     /// Decisions made (whistles and fouls that should have been), and how
     /// many of each kind of error: missed, phantom, wrong foul, ball
     /// given the wrong way, miscounted.
@@ -471,6 +519,14 @@ pub struct Officials {
     /// challenges. For measuring what officiating does.
     #[serde(default)]
     pub off: bool,
+    /// League culture: the mean game management (1..=20) of the referees
+    /// hired here, set from `Rules::ref_game_mgmt`.
+    #[serde(default = "default_mgmt_mean")]
+    pub game_mgmt_mean: f32,
+}
+
+fn default_mgmt_mean() -> f32 {
+    GAME_MGMT_EUROPE
 }
 
 /// A bell-shaped draw in `mean ± spread` (sum of three uniforms).
@@ -489,6 +545,14 @@ fn mix(a: u64, b: u64) -> u64 {
     x ^ (x >> 31)
 }
 
+/// A referee's game management, drawn from a stream of its own made from
+/// the pool's salt and his id, so that adding the trait moved no other trait
+/// of any referee, and an old save can be given it by the same rule.
+fn style_of(salt: u64, id: RefId, mean: f32) -> u8 {
+    let mut rng = Rng::new(mix(salt ^ 0x6A3E_C0DE, id as u64));
+    trait_of(&mut rng, mean, GAME_MGMT_SPREAD)
+}
+
 impl Officials {
     /// How many active referees a league of `teams` clubs needs: three for
     /// every game of a day on which every club plays, and some to spare.
@@ -497,13 +561,14 @@ impl Officials {
     }
 
     /// A pool for a league of `teams` clubs, from `seed`.
-    pub fn generate(seed: u64, teams: usize) -> Officials {
+    pub fn generate(seed: u64, teams: usize, game_mgmt_mean: f32) -> Officials {
         let mut o = Officials {
             pool: Vec::new(),
             rng: Some(Rng::new(seed ^ 0x0FF1_C1A1_5EED)),
             salt: mix(seed, 0x0FF1),
             notices: Vec::new(),
             off: false,
+            game_mgmt_mean,
         };
         o.top_up(teams, true);
         o
@@ -544,6 +609,7 @@ impl Officials {
                 composure: trait_of(rng, 10.5 + sharp * 0.5, 3.4),
                 charge_lean: trait_of(rng, 10.5, 4.0),
                 flop_buyer: trait_of(rng, 10.0, 4.0),
+                game_mgmt: style_of(self.salt, id, self.game_mgmt_mean),
                 season: RefRecord::default(),
                 history: Vec::new(),
                 active: true,
@@ -551,6 +617,17 @@ impl Officials {
             };
             self.pool.push(r);
             active += 1;
+        }
+    }
+
+    /// Give every referee the game management a pool of this league
+    /// culture would (the same deterministic draw, so a pool can be shown
+    /// under another league's customs for measurement).
+    pub fn restyle(&mut self, mean: f32) {
+        self.game_mgmt_mean = mean;
+        let salt = self.salt;
+        for r in &mut self.pool {
+            r.game_mgmt = style_of(salt, r.id, mean);
         }
     }
 
@@ -695,11 +772,20 @@ impl World {
     /// seeded from the world's, which is only read.
     pub fn ensure_officials(&mut self) {
         let teams = self.teams.len();
+        let mean = self.rules.ref_game_mgmt;
         if self.officials.pool.is_empty() {
             let seed = self.rng.clone().next_u64();
-            self.officials = Officials::generate(seed, teams);
+            self.officials = Officials::generate(seed, teams, mean);
         } else if self.officials.pool.iter().filter(|r| r.active).count() < Officials::wanted(teams) {
             self.officials.top_up(teams, false);
+        }
+        // The league's culture is the rules'; a referee from an old save has
+        // no game management yet and is given one by the same deterministic
+        // draw a new one gets.
+        self.officials.game_mgmt_mean = mean;
+        let salt = self.officials.salt;
+        for r in self.officials.pool.iter_mut().filter(|r| r.game_mgmt == 0) {
+            r.game_mgmt = style_of(salt, r.id, mean);
         }
     }
 
@@ -828,6 +914,10 @@ impl World {
         } else if strict >= 12.5 {
             s += " A tight crew: keep the hands off, and mind the players on three fouls.";
         }
+        let mgmt = refs.iter().map(|r| r.game_mgmt as f32).sum::<f32>() / n;
+        if mgmt >= 7.5 {
+            s += " A crew that keeps games close: expect the whistle to turn against a big lead, so if we build one with aggressive defense our fouls will rise, and if we trail we will get the benefit of the doubt. They tend to make up for a call they doubt.";
+        }
         if lean >= 11.5 {
             s += if home {
                 " The hall will get to them, which should help us."
@@ -857,6 +947,14 @@ impl World {
             "Fouls called: {} {}, {} {}.\n",
             us, o.fouls[side], them, o.fouls[1 - side]
         );
+        let lead = |k: usize| o.fouls_state[k][0];
+        let trail = |k: usize| o.fouls_state[k][2];
+        if lead(0) + lead(1) + trail(0) + trail(1) > 0 {
+            s += &format!(
+                "Fouls while leading: {} {}, {} {}; while trailing: {} {}, {} {}.\n",
+                us, lead(side), them, lead(1 - side), us, trail(side), them, trail(1 - side)
+            );
+        }
         let wrong: Vec<&CallRecord> = o.notable.iter().filter(|c| c.verdict().is_wrong()).collect();
         let against = wrong.iter().filter(|c| c.gains as usize != side).count();
         let for_us = wrong.len() - against;
@@ -900,6 +998,7 @@ pub fn crew_line(refs: &[&Referee]) -> String {
     let strict = refs.iter().map(|r| r.strictness as f32).sum::<f32>() / n;
     let acc = refs.iter().map(|r| r.accuracy as f32).sum::<f32>() / n;
     let lean = refs.iter().map(|r| r.home_lean as f32).sum::<f32>() / n;
+    let mgmt = refs.iter().map(|r| r.game_mgmt as f32).sum::<f32>() / n;
     let mut parts = Vec::new();
     parts.push(if strict >= 12.5 {
         "a quick whistle"
@@ -916,6 +1015,9 @@ pub fn crew_line(refs: &[&Referee]) -> String {
     if lean >= 11.5 {
         parts.push("home crowds get to them");
     }
+    if mgmt >= 7.5 {
+        parts.push("keep games close");
+    }
     parts.join(", ")
 }
 
@@ -925,14 +1027,14 @@ mod tests {
 
     #[test]
     fn a_pool_is_made_from_its_own_stream_and_is_the_same_every_time() {
-        let a = Officials::generate(7, 24);
-        let b = Officials::generate(7, 24);
+        let a = Officials::generate(7, 24, GAME_MGMT_EUROPE);
+        let b = Officials::generate(7, 24, GAME_MGMT_EUROPE);
         assert_eq!(a.pool.len(), Officials::wanted(24));
         assert_eq!(
             a.pool.iter().map(|r| (&r.name, r.accuracy, r.age)).collect::<Vec<_>>(),
             b.pool.iter().map(|r| (&r.name, r.accuracy, r.age)).collect::<Vec<_>>()
         );
-        let c = Officials::generate(8, 24);
+        let c = Officials::generate(8, 24, GAME_MGMT_EUROPE);
         assert!(a.pool.iter().zip(&c.pool).any(|(x, y)| x.accuracy != y.accuracy));
         for r in &a.pool {
             for t in [r.accuracy, r.strictness, r.consistency, r.home_lean, r.composure] {
@@ -943,7 +1045,7 @@ mod tests {
 
     #[test]
     fn the_pool_is_varied() {
-        let o = Officials::generate(3, 24);
+        let o = Officials::generate(3, 24, GAME_MGMT_EUROPE);
         let lo = o.pool.iter().map(|r| r.accuracy).min().unwrap();
         let hi = o.pool.iter().map(|r| r.accuracy).max().unwrap();
         assert!(hi - lo >= 6, "{lo} {hi}");
@@ -954,7 +1056,7 @@ mod tests {
 
     #[test]
     fn nobody_works_two_games_on_a_day_and_the_big_games_get_the_best() {
-        let o = Officials::generate(5, 30);
+        let o = Officials::generate(5, 30, GAME_MGMT_EUROPE);
         // Fifteen games: a playoff, then divisions 0, 1, 2.
         let ranks: Vec<u32> = (0..15).map(|i| game_rank(i == 0, i % 3)).collect();
         let crews = o.crews_for_day(12, &ranks);
@@ -976,7 +1078,7 @@ mod tests {
 
     #[test]
     fn referees_age_retire_and_are_replaced() {
-        let mut o = Officials::generate(9, 24);
+        let mut o = Officials::generate(9, 24, GAME_MGMT_EUROPE);
         let n = o.pool.len();
         let mut retired = 0;
         for s in 0..25 {
@@ -993,7 +1095,7 @@ mod tests {
 
     #[test]
     fn a_bad_season_gets_a_referee_warned() {
-        let mut o = Officials::generate(2, 24);
+        let mut o = Officials::generate(2, 24, GAME_MGMT_EUROPE);
         o.pool[0].season = RefRecord {
             games: 30,
             calls: 1000,

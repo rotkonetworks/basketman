@@ -16,6 +16,7 @@ fn crew(acc: f32, strict: f32) -> Crew {
         composure: 0.55,
         charge_lean: 0.5,
         flop_buyer: 0.5,
+        manager: 0.0,
     };
     Crew { refs: [o; 3], crowd: 0.5 }
 }
@@ -344,4 +345,226 @@ fn with_a_crew_nobody_teleports_and_the_three_keep_clear_of_a_throw_in() {
         }
     }
     assert!(throw_ins > 50, "{throw_ins}");
+}
+
+// ---- game management -------------------------------------------------------
+
+/// A crew with some game management and everything else middling.
+fn managed(m: f32) -> Crew {
+    let mut c = crew(0.6, 0.5);
+    for r in &mut c.refs {
+        r.consistency = 0.55;
+        r.manager = m;
+    }
+    c
+}
+
+/// What one set of games under one crew came to.
+struct Arm {
+    games: usize,
+    margin: f32,
+    /// Fouls on the leading side minus fouls on the trailing side, summed.
+    lead_minus_trail: i32,
+    /// The referees' season records, summed over the games.
+    rec_lead: u32,
+    rec_trail: u32,
+    wrong: u32,
+    calls: u32,
+    /// Of the marginal whistles an official blew right after a call that
+    /// wronged a side (a wrong whistle on it, or a foul on it let go): how
+    /// many went against that same side, and how many there were.
+    after_wrong_against: u32,
+    after_wrong: u32,
+}
+
+fn arm(m: f32, games: usize) -> Arm {
+    let w = World::generate(7, 8);
+    let c = managed(m);
+    let mut a = Arm {
+        games: 0,
+        margin: 0.0,
+        lead_minus_trail: 0,
+        rec_lead: 0,
+        rec_trail: 0,
+        wrong: 0,
+        calls: 0,
+        after_wrong_against: 0,
+        after_wrong: 0,
+    };
+    for g in 0..games {
+        let (h, v) = (g % 8, (g * 3 + 1) % 8);
+        if h == v {
+            continue;
+        }
+        let (home, away) = (lineup(&w.teams[h], &w.players), lineup(&w.teams[v], &w.players));
+        let (r, rec) = simulate_recorded_crewed(&home, &away, &w.rules, &mut Rng::new(4200 + g as u64), Some(&c));
+        let o = r.officiating.as_ref().expect("officiated");
+        a.games += 1;
+        a.margin += (r.score[0] as f32 - r.score[1] as f32).abs();
+        for side in 0..2 {
+            a.lead_minus_trail += o.fouls_state[side][0] as i32 - o.fouls_state[side][2] as i32;
+        }
+        for p in &o.per_ref {
+            a.rec_lead += p.fouls_lead;
+            a.rec_trail += p.fouls_trail;
+        }
+        a.wrong += (o.errors[0] + o.errors[1] + o.errors[2]) as u32;
+        a.calls += o.calls as u32;
+        // Each official's wronged side so far, in the order of the calls.
+        let mut wronged: [Option<u8>; 3] = [None; 3];
+        for c in rec.calls.iter().filter(|c| c.what == crate::officials::What::Foul) {
+            let by = c.by as usize;
+            if let (Ruling::Marginal { .. }, Ruling::Foul { by: side, .. }) = (c.truth, c.called) {
+                if let Some(x) = wronged[by].take() {
+                    a.after_wrong += 1;
+                    a.after_wrong_against += (side == x) as u32;
+                }
+                continue;
+            }
+            if c.verdict().is_wrong() {
+                wronged[by] = match (c.truth, c.called) {
+                    (_, Ruling::Foul { by: x, .. }) => Some(x),
+                    (Ruling::Foul { by: x, .. }, _) => Some(1 - x),
+                    _ => None,
+                };
+            }
+        }
+    }
+    a
+}
+
+fn arms() -> &'static (Arm, Arm) {
+    static ARMS: std::sync::OnceLock<(Arm, Arm)> = std::sync::OnceLock::new();
+    ARMS.get_or_init(|| (arm(0.0, 360), arm(1.0, 360)))
+}
+
+#[test]
+fn a_strong_game_manager_crew_keeps_games_closer_than_one_with_none() {
+    let (none, strong) = arms();
+    let (m0, m1) = (none.margin / none.games as f32, strong.margin / strong.games as f32);
+    assert!(m1 < m0 - 0.4, "mean margin none {m0:.2}, strong {m1:.2}");
+    // Modest: a crew of the most game-managing men there are does not
+    // decide games.
+    assert!(m1 > m0 - 3.0, "mean margin none {m0:.2}, strong {m1:.2}");
+}
+
+#[test]
+fn a_strong_game_manager_crew_tilts_the_fouls_towards_the_trailing_side() {
+    let (none, strong) = arms();
+    let (d0, d1) = (
+        none.lead_minus_trail as f32 / none.games as f32,
+        strong.lead_minus_trail as f32 / strong.games as f32,
+    );
+    assert!(d1 > d0 + 1.0, "fouls on the leading side minus the trailing, per game: none {d0:.2}, strong {d1:.2}");
+    // The season record shows the same (a level game counts for neither).
+    let (r0, r1) = (
+        (none.rec_lead as f32 - none.rec_trail as f32) / none.games as f32,
+        (strong.rec_lead as f32 - strong.rec_trail as f32) / strong.games as f32,
+    );
+    assert!((r0 - d0).abs() < 1e-3 && (r1 - d1).abs() < 1e-3, "record {r0} {r1} against game {d0} {d1}");
+}
+
+#[test]
+fn a_game_managers_calls_are_ordinary_calls_and_no_more_often_wrong() {
+    let (none, strong) = arms();
+    let (w0, w1) = (none.wrong as f32 / none.calls as f32, strong.wrong as f32 / strong.calls as f32);
+    // Leaning is only on contact the book leaves to judgement, so it makes
+    // no error of its own: the share of wrong calls stays where it was.
+    assert!(w1 < w0 * 1.15 && w1 > w0 * 0.85, "wrong share none {w0:.4}, strong {w1:.4}");
+    assert!(none.wrong > 100 && strong.wrong > 100);
+}
+
+#[test]
+fn make_up_calls_follow_wrong_calls_more_often_than_chance() {
+    let (none, strong) = arms();
+    assert!(none.after_wrong > 150 && strong.after_wrong > 150, "{} {}", none.after_wrong, strong.after_wrong);
+    let (s0, s1) = (
+        none.after_wrong_against as f32 / none.after_wrong as f32,
+        strong.after_wrong_against as f32 / strong.after_wrong as f32,
+    );
+    eprintln!("after a wrong call: {} (none) and {} (strong) marginal whistles follow; against the wronged side {s0:.3} and {s1:.3}", none.after_wrong, strong.after_wrong);
+    // After a call that wronged a side, the next marginal whistle of the man
+    // who made it is against that side less often than for a man who does not
+    // make up.
+    assert!(s1 < s0 - 0.04, "next marginal whistle against the wronged side: none {s0:.3}, strong {s1:.3}");
+}
+
+#[test]
+fn a_game_managers_crew_still_records_truth_and_call_both() {
+    let w = World::generate(7, 8);
+    let (mut whistles, mut events) = (0, 0);
+    for g in 0..30 {
+        let (home, away) = (lineup(&w.teams[g % 8], &w.players), lineup(&w.teams[(g + 3) % 8], &w.players));
+        let (r, rec) = simulate_recorded_crewed(&home, &away, &w.rules, &mut Rng::new(700 + g as u64), Some(&managed(1.0)));
+        let o = r.officiating.as_ref().expect("officiated");
+        assert_eq!(o.wrong() as usize, rec.calls.iter().filter(|c| c.verdict().is_wrong()).count());
+        whistles += rec.calls.iter().filter(|c| matches!(c.called, Ruling::Foul { .. })).count();
+        whistles += rec
+            .calls
+            .iter()
+            .filter(|c| c.review.is_some_and(|r| r.overturned) && matches!(c.truth, Ruling::Foul { .. }))
+            .count();
+        events += rec.events.iter().filter(|e| matches!(e.kind, EventKind::Foul { .. })).count();
+        // Every foul is in one of the three states, and they add up.
+        let by_state: u16 = o.fouls_state.iter().flatten().sum();
+        assert_eq!(by_state, o.fouls[0] + o.fouls[1]);
+    }
+    assert_eq!(whistles, events);
+}
+
+#[test]
+fn game_management_is_rare_in_a_european_pool_common_in_an_nba_style_one() {
+    use crate::engine::Rules;
+    use crate::officials::Officials;
+    assert!(Rules::nba().ref_game_mgmt > Rules::fiba().ref_game_mgmt + 5.0);
+    let mean = |o: &Officials| o.pool.iter().map(|r| r.game_mgmt as f32).sum::<f32>() / o.pool.len() as f32;
+    let (mut eu, mut nba) = (0.0, 0.0);
+    for seed in 1..=12 {
+        let mut pool = Officials::generate(seed, 24, Rules::fiba().ref_game_mgmt);
+        assert!(pool.pool.iter().all(|r| (1..=20).contains(&r.game_mgmt)));
+        eu += mean(&pool) / 12.0;
+        let strong = pool.pool.iter().filter(|r| r.game_mgmt >= 9).count();
+        assert!(strong * 4 <= pool.pool.len(), "only a few clearly do it: {strong} of {}", pool.pool.len());
+        pool.restyle(Rules::nba().ref_game_mgmt);
+        nba += mean(&pool) / 12.0;
+    }
+    assert!(eu > 3.0 && eu < 7.0, "European pool mean {eu}");
+    assert!(nba > 10.0, "NBA-style pool mean {nba}");
+    // It is not drawn from the stream the other traits are: the same seed
+    // under another culture has every other trait as it was.
+    let a = Officials::generate(9, 24, 4.0);
+    let b = Officials::generate(9, 24, 12.0);
+    for (x, y) in a.pool.iter().zip(&b.pool) {
+        assert_eq!((x.name.as_str(), x.accuracy, x.strictness, x.home_lean), (y.name.as_str(), y.accuracy, y.strictness, y.home_lean));
+    }
+}
+
+#[test]
+fn an_old_save_without_game_management_gets_it_on_load() {
+    let w = World::generate(11, 8);
+    let mut v = serde_json::to_value(&w).unwrap();
+    v["rules"].as_object_mut().unwrap().remove("ref_game_mgmt");
+    let o = v["officials"].as_object_mut().unwrap();
+    o.remove("game_mgmt_mean");
+    for r in o["pool"].as_array_mut().unwrap() {
+        let r = r.as_object_mut().unwrap();
+        r.remove("game_mgmt");
+        for rec in [r.get_mut("season").unwrap()] {
+            let rec = rec.as_object_mut().unwrap();
+            rec.remove("fouls_lead");
+            rec.remove("fouls_trail");
+        }
+    }
+    let mut old: World = serde_json::from_value(v.clone()).expect("an old save still loads");
+    assert!(old.officials.pool.iter().all(|r| r.game_mgmt == 0));
+    old.ensure_officials();
+    // Given by the deterministic draw a new referee gets: the same as a world
+    // made with the trait.
+    assert!(old.officials.pool.iter().all(|r| r.game_mgmt >= 1));
+    let was: Vec<u8> = w.officials.pool.iter().map(|r| r.game_mgmt).collect();
+    let now: Vec<u8> = old.officials.pool.iter().map(|r| r.game_mgmt).collect();
+    assert_eq!(was, now);
+    let mut again: World = serde_json::from_value(v).unwrap();
+    again.ensure_officials();
+    assert_eq!(now, again.officials.pool.iter().map(|r| r.game_mgmt).collect::<Vec<u8>>());
 }

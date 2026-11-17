@@ -67,6 +67,16 @@ pub struct Rules {
     /// rule.
     #[serde(default = "default_timeouts")]
     pub timeouts: [u8; 3],
+    /// League culture of officiating: the mean game management (1..=20) of
+    /// the referees this league hires. Low where the crews call it the same
+    /// at any score (a European league), high where they keep games close
+    /// (the NBA). Read when the referee pool is made and topped up.
+    #[serde(default = "default_ref_game_mgmt")]
+    pub ref_game_mgmt: f32,
+}
+
+fn default_ref_game_mgmt() -> f32 {
+    crate::officials::GAME_MGMT_EUROPE
 }
 
 fn default_timeouts() -> [u8; 3] {
@@ -83,6 +93,7 @@ impl Rules {
             foul_limit: 5,
             bonus_after: 4,
             timeouts: default_timeouts(),
+            ref_game_mgmt: crate::officials::GAME_MGMT_EUROPE,
         }
     }
 
@@ -95,6 +106,7 @@ impl Rules {
             foul_limit: 6,
             bonus_after: 4,
             timeouts: default_timeouts(),
+            ref_game_mgmt: crate::officials::GAME_MGMT_NBA,
         }
     }
 }
