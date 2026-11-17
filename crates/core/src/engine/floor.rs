@@ -99,7 +99,7 @@ const COMPOSURE: f32 = 0.004;
 const RHYTHM: f32 = 0.06;
 const HOME: f32 = 0.016;
 /// A hand on the shooter that was called, and one that was not.
-const FOULED_ERR: f32 = 2.5;
+const FOULED_ERR: f32 = 3.8;
 const FOULED_JUMPER: f32 = 1.5;
 /// A tip-in at the ring: how much harder than a layup (a ball in the air, a
 /// hand's width of control), and how close a defender has to be to be in the way.
@@ -3278,7 +3278,7 @@ impl Game {
 
     fn foul_chance(&self, kind: ShotKind, c: f32) -> f32 {
         let base = match kind {
-            ShotKind::Rim => 0.075 + 0.225 * c.min(1.0),
+            ShotKind::Rim => 0.060 + 0.180 * c.min(1.0),
             ShotKind::Mid => 0.040 + 0.130 * c,
             ShotKind::Three => 0.018 + 0.060 * c,
         };
@@ -3834,7 +3834,7 @@ impl Game {
         // protects the ball and gets himself fouled draws more.
         let closeness = (1.0 + (1.3 - q.dist(p)) * 0.5).clamp(0.4, 1.5);
         let protect = 1.4 - self.oe(h, Attr::Handling) / 20.0 * 0.8;
-        let foul = 0.030
+        let foul = 0.044
             * (1.0 + 0.8 * aggression)
             * temper
             * closeness
