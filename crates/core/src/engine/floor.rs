@@ -47,11 +47,13 @@ mod stance_hooks;
 /// still going and when a body set in his way has stopped him.
 const KICK_PREMIUM: [f32; 2] = [0.2, 0.0];
 /// And how far under the bar of his own a man's shot may be for the ball to go to him then.
-const KICK_EAGER: [f32; 2] = [0.0, 0.45];
+const KICK_EAGER: [f32; 2] = [0.0, 0.35];
 pub(crate) static GT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 /// A man without the ball who is lower than this (metres from the baseline) when a
 /// drive starts goes to the corner; the others hold the arc.
 const CORNER_SPOT_Y: f32 = 3.2;
+/// Seconds a man with the ball takes before he reads the floor again, at least.
+const THINK_BASE: f32 = 0.88;
 const SHOT_HEAT: f32 = 0.16;
 const HEAT_CONTEST: f32 = 0.55;
 const HEAT_REAL: f32 = 0.45;
@@ -64,7 +66,7 @@ const SWING_MOVER: f32 = 0.25;
 /// What a shot has to be worth, in points, with twelve seconds on the clock, and how much
 /// more early in the possession (and less late) over twelve seconds: the
 /// worth of going on with the ball.
-const THRESHOLD_BASE: f32 = 1.18;
+const THRESHOLD_BASE: f32 = 1.17;
 const THRESHOLD_SLOPE: f32 = 0.40;
 /// How much worse a jumper is for a pass that was off the hands, and better for one on them.
 const PASS_RHYTHM: f32 = 0.30;
@@ -3492,7 +3494,7 @@ impl Game {
             self.play.source = Source::Forced;
             return self.gather(0.3, true);
         }
-        let think = 1.0
+        let think = THINK_BASE
             + (20.0 - self.oe(h, Attr::Iq)).max(0.0) * 0.015
             + self.rng.f32() * 0.3
             + self.off().unfamiliar * 0.5;
