@@ -21,3 +21,5 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 wasm-bindgen-futures = "0.4.80"
 # Fetches the sponsor manifest and its pictures in the browser.
 ehttp = "0.5"
+# Career files: download an export, read an import.
+web-sys = { version = "0.3", features = ["Url", "HtmlAnchorElement", "FileReader", "Blob", "BlobPropertyBag", "File", "FileList", "HtmlInputElement", "Document", "Element", "Event", "EventTarget", "Window"] }

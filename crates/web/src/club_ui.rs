@@ -676,6 +676,9 @@ impl App {
         }
         bd.card(ui, |ui| {
             ui.set_width(ui.available_width());
+            if !self.manager.is_empty() {
+                ui.label(dim(format!("Manager: {}", self.manager)));
+            }
             heading(ui, "Your career", &format!("Reputation {}", v.reputation));
             ui.label(dim(format!("You are {}.", v.reputation_word)));
             confidence_bar(ui, v.reputation as f32, &[]);

@@ -96,7 +96,7 @@ impl App {
         let t = ui.ctx().animate_bool_with_time(
             egui::Id::unique("side_menu"),
             self.sh.rail_open,
-            0.15,
+            if crate::settings::reduced() { 0.0 } else { 0.15 },
         );
         if t > 0.01 {
             // A tap anywhere else puts it away.
@@ -238,7 +238,7 @@ impl App {
                         ui.close();
                     }
                     if ui.button("Main menu").clicked() {
-                        self.started = false;
+                        self.open_pause();
                         ui.close();
                     }
                 });
