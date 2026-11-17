@@ -649,7 +649,7 @@ section moved for that reason too.
    (was 5), the weekly belief step is 0.04 (was 0.055).
 4. **Clubs are generated closer** (`league.rs`): the club offset is a uniform draw of width 0.8 (was 1.8), the
    player's 4.2 (was 5.0), base quality raised by 0.35 so that the league's attribute level is where it was (top eight of a rotation: overall 9.93
-   before, 9.94 now: `lab level`). Strength sd between clubs is now 0.49 (was 0.69). Test: `clubs_are_generated_close_together`.
+   before, 9.94 now: `lab level`). Strength sd between clubs is now about 0.5 (was 0.69). Test: `clubs_are_generated_close_together`.
 5. **Home advantage** (`engine/officiating.rs`, `engine/mod.rs`): `crew.crowd` (the loudness `crowd_effect` already
    computed and the engine only used for the whistle) now also (a) makes the visitors less sure of the hall: their
    set's unfamiliarity goes up by `0.3 x loudness` (rhythm in the shot), (b) lifts the home five and rattles the
@@ -720,7 +720,7 @@ mean and peak age, guards' weight, payroll correlation, offensive-foul share.
   in the engine as it plays; the league adds the clubs on top. The remaining excess is the variance of a possession
   (1.46 against about 1.25 real) and the 70-point scoring level, not the shape of the league. When the possession work lands,
   re-run `basketman lab shape 30`: the first row is the answer.
-* **Club spread**: the clubs are now 0.49 apart in strength, a good fit for a 5-point net-rating spread, yet win % sd is
+* **Club spread**: the clubs are now about 0.5 apart in strength, a good fit for a 5-point net-rating spread, yet win % sd is
   still 0.209 (band to 0.200): about a third of the true-talent sd is how different clubs' *compositions* play, which
   an average of ratings cannot see (clubs with equal averages still have a slope of 13 and a margin sd 2.7).
 * **Shooting-foul share** stays at 41.6% for the reason given; **home minus away fouls** is -0.7 (the band allows -1.0).
